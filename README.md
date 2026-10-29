@@ -77,7 +77,7 @@ Spotify data can improve personalization, but it is not automatically a good tra
 
 ## Deploy on Render
 
-Set the Render service root directory to `spotify_recommendation_engine` and use:
+Use the repository root as the Render service directory and use:
 
 ```text
 Build command: pip install -r requirements.txt
