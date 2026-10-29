@@ -1,0 +1,844 @@
+from pathlib import Path
+import time
+import uuid
+import re
+import json
+from concurrent.futures import ThreadPoolExecutor
+import pandas as pd
+import streamlit as st
+from event_store import EventStore
+from jiosaavn_client import JioSaavnClient
+from recommender import HybridRecommendationEngine, SpotifyRecommendationEngine
+from spotify_api import SpotifyOAuth, new_oauth_state, verify_oauth_state
+from user_store import UserStore
+
+st.set_page_config(page_title="TuneMatch | Spotify Recommender", page_icon="🎧", layout="wide")
+
+st.html("""
+<style>
+.stApp { background: radial-gradient(circle at 15% 0%, #16382d 0%, #0b1714 34%, #090d0c 100%); }
+.block-container { max-width: 1440px; padding-top: 1rem; padding-bottom: 4rem; }
+header[data-testid="stHeader"], [data-testid="stToolbar"] { background: transparent !important; }
+header[data-testid="stHeader"] { height: 2.5rem; }
+[data-testid="stDecoration"] { display: none; }
+[data-testid="stSidebar"] { background: linear-gradient(180deg, #111b19 0%, #0b1110 100%); border-right: 1px solid #25443a; }
+[data-testid="stMetric"] { background: linear-gradient(145deg, #193329, #12231e); border: 1px solid #2f5b4c; padding: 14px; border-radius: 16px; box-shadow: 0 8px 24px rgba(0,0,0,.14); }
+[data-testid="stMetricValue"] { color: #d9ffe9; }
+.stButton > button, .stLinkButton > a { border-radius: 999px; border: 1px solid #356452; transition: all .15s ease; }
+.stButton > button:hover, .stLinkButton > a:hover { border-color: #71e6a7; color: #dffff0; transform: translateY(-1px); }
+[data-testid="stVerticalBlockBorderWrapper"] { border-color: #2a4c41; border-radius: 18px; background: rgba(17, 35, 29, .58); }
+[data-testid="stImage"] img { border-radius: 14px; }
+.stTextInput input, .stMultiSelect div[data-baseweb="select"] { border-radius: 12px; }
+.shelf-title { color: #f4f7f5; font-size: 1.25rem; font-weight: 700; margin: 1.2rem 0 .4rem; }
+.shelf-subtitle { color: #9fb8ae; margin-bottom: .8rem; }
+.hero-copy { color: #a9c7bb; font-size: 1.05rem; max-width: 760px; }
+@media (max-width: 760px) { .block-container { padding: 1rem .7rem 3rem; } }
+</style>
+""")
+
+st.title("🎧 TuneMatch")
+st.markdown('<div class="hero-copy">A Spotify-inspired discovery experience powered by content, context, and cold-start personalization.</div>', unsafe_allow_html=True)
+
+DATA_PATH = Path(__file__).parent / "spotify_tracks_data.csv"
+EVENT_DB_PATH = Path(__file__).parent / "tune_match_events.sqlite3"
+HISTORY_PATH = Path(__file__).parent / "spotify_history.csv"
+
+@st.cache_data
+def load_data(path):
+    return pd.read_csv(path)
+
+
+@st.cache_data
+def load_imported_history(path):
+    if not path.exists():
+        return pd.DataFrame()
+    return pd.read_csv(path)
+
+@st.cache_resource
+def build_engine(data):
+    return SpotifyRecommendationEngine(data)
+
+data = load_data(DATA_PATH)
+imported_history = load_imported_history(HISTORY_PATH)
+engine = build_engine(data)
+stats = engine.catalog_stats()
+event_store = EventStore(EVENT_DB_PATH)
+user_store = UserStore(EVENT_DB_PATH)
+jio_client = JioSaavnClient()
+hybrid_engine = HybridRecommendationEngine(engine)
+hybrid_engine.fit(user_store.interaction_events())
+st.session_state.setdefault("local_session_id", uuid.uuid4().hex)
+st.session_state.setdefault("jio_search_cache_v2", {})
+# Migrate the old queue behavior: older sessions stored search results here.
+if "jio_queue_index" in st.session_state:
+    st.session_state.pop("jio_queue", None)
+    st.session_state.pop("jio_queue_index", None)
+
+
+def log_behavior(
+    event_type: str,
+    track_id: str | None = None,
+    duration_ms: int = 0,
+    metadata: dict | None = None,
+) -> None:
+    user_id = st.session_state.get("local_user_id")
+    if user_id:
+        user_store.log_event(
+            user_id=user_id,
+            track_id=track_id,
+            event_type=event_type,
+            session_id=st.session_state["local_session_id"],
+            duration_ms=duration_ms,
+            metadata_json=json.dumps(metadata or {}),
+        )
+
+
+def account_listening_time() -> None:
+    """Persist elapsed player time between Streamlit reruns."""
+    user_id = st.session_state.get("local_user_id")
+    started_at = st.session_state.get("jio_started_at")
+    if not user_id or not started_at:
+        return
+    now = time.time()
+    last_accounted = float(st.session_state.get("jio_last_accounted_at", started_at))
+    delta_ms = int(max(0.0, now - last_accounted) * 1000)
+    if delta_ms >= 1000:
+        log_behavior(
+            "listen_progress",
+            st.session_state.get("jio_current_track_id"),
+            duration_ms=delta_ms,
+        )
+        st.session_state["jio_last_accounted_at"] = now
+
+
+def spotify_access_token(client: SpotifyOAuth | None) -> str | None:
+    """Return a valid session token, refreshing it when necessary."""
+    token = st.session_state.get("spotify_token")
+    if not client or not token:
+        return None
+    import time
+
+    if float(token.get("expires_at", 0)) <= time.time():
+        try:
+            token = client.refresh_token(token["refresh_token"])
+            st.session_state["spotify_token"] = token
+        except Exception as exc:
+            st.session_state.pop("spotify_token", None)
+            st.sidebar.error(f"Spotify session expired: {exc}")
+            return None
+    return str(token["access_token"])
+
+
+def sync_spotify_taste(client: SpotifyOAuth, access_token: str) -> dict:
+    """Fetch the minimum user signals needed for personalization."""
+    return {
+        "profile": client.get(access_token, "me"),
+        "top_tracks": client.get(access_token, "me/top/tracks", limit=50, time_range="medium_term").get("items", []),
+        "recent_tracks": client.get(access_token, "me/player/recently-played", limit=50).get("items", []),
+        "saved_tracks": client.get(access_token, "me/tracks", limit=50).get("items", []),
+    }
+
+
+def local_ids_for_spotify_taste(taste: dict, catalog: pd.DataFrame) -> list[str]:
+    """Map Spotify track signals onto the local feature catalog when possible."""
+    by_id = {str(row.track_id): str(row.track_id) for row in catalog.itertuples()}
+    by_name = {
+        (str(row.track_name).strip().lower(), str(row.artists).split(",")[0].strip().lower()): str(row.track_id)
+        for row in catalog.itertuples()
+    }
+    found: list[str] = []
+    for collection in (taste.get("top_tracks", []), taste.get("recent_tracks", []), taste.get("saved_tracks", [])):
+        for entry in collection:
+            track = entry.get("track", entry)
+            track_id = str(track.get("id", ""))
+            artists = track.get("artists", [])
+            artist = str(artists[0].get("name", "")).strip().lower() if artists else ""
+            key = (str(track.get("name", "")).strip().lower(), artist)
+            match = by_id.get(track_id) or by_name.get(key)
+            if match and match not in found:
+                found.append(match)
+    return found
+
+
+def local_ids_for_imported_history(history: pd.DataFrame, catalog: pd.DataFrame) -> list[str]:
+    """Map the strongest imported listening signals to local catalog tracks."""
+    if history.empty or not {"track_name", "artists"}.issubset(history.columns):
+        return []
+    by_name = {
+        (str(row.track_name).strip().lower(), str(row.artists).split(",")[0].strip().lower()): str(row.track_id)
+        for row in catalog.itertuples()
+    }
+    ranked = history.copy()
+    played = ranked["ms_played"] if "ms_played" in ranked else pd.Series(0, index=ranked.index)
+    ranked["ms_played"] = pd.to_numeric(played, errors="coerce").fillna(0)
+    ranked["artist_key"] = ranked["artists"].astype(str).str.split(",").str[0].str.strip().str.lower()
+    ranked["track_key"] = ranked["track_name"].astype(str).str.strip().str.lower()
+    ranked = ranked.groupby(["track_key", "artist_key"], as_index=False)["ms_played"].sum()
+    ranked = ranked.sort_values("ms_played", ascending=False).head(100)
+    return [
+        by_name[(row.track_key, row.artist_key)]
+        for row in ranked.itertuples()
+        if (row.track_key, row.artist_key) in by_name
+    ]
+
+
+def personalize_jio_results(
+    results: list[dict],
+    catalog: pd.DataFrame,
+    preferred_track_ids: list[str],
+) -> list[dict]:
+    """Rank JioSaavn search results using this listener's local taste profile.
+
+    The catalog is only used as a private preference signal. Nothing from the
+    local catalog is rendered as a result, so every visible song still comes
+    from JioSaavn.
+    """
+    if not results or not preferred_track_ids:
+        return results
+
+    preferred = catalog[catalog["track_id"].astype(str).isin({str(x) for x in preferred_track_ids})]
+    if preferred.empty:
+        return results
+
+    artist_preferences = [
+        str(value).strip().lower()
+        for value in preferred["artists"].dropna().tolist()
+        if str(value).strip()
+    ]
+    track_preferences = [
+        str(value).strip().lower()
+        for value in preferred["track_name"].dropna().tolist()
+        if str(value).strip()
+    ]
+
+    def compact(text: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", str(text).lower()).strip()
+
+    def score(item: dict) -> tuple[int, int]:
+        item_artist = compact(item.get("artists", ""))
+        item_title = compact(item.get("title", ""))
+        artist_score = sum(1 for artist in artist_preferences if compact(artist) in item_artist)
+        title_score = sum(1 for title in track_preferences if compact(title) == item_title)
+        return (artist_score * 3 + title_score * 5, 0)
+
+    ranked = sorted(enumerate(results), key=lambda pair: (score(pair[1]), -pair[0]), reverse=True)
+    return [item for _, item in ranked]
+
+
+def build_jio_up_next(
+    seed: dict,
+    search_results: list[dict],
+    client: JioSaavnClient,
+    hybrid: HybridRecommendationEngine,
+    user_id: str,
+    catalog: pd.DataFrame,
+    preferred_track_ids: list[str],
+    limit: int = 70,
+    exclude_items: list[dict] | None = None,
+) -> list[dict]:
+    """Build a separate recommendation queue; never reuse search results."""
+    title = str(seed.get("title", "")).strip()
+    artists = str(seed.get("artists", "")).strip()
+    album = str(seed.get("album", "")).strip()
+    artist_names = [name.strip() for name in artists.split(",") if name.strip()]
+    related_queries = []
+    for artist in artist_names[:5]:
+        related_queries.extend([
+            f"{artist} songs",
+            f"{artist} best songs",
+            f"{artist} hits",
+            f"{artist} old songs",
+            f"{artist} classics",
+            f"{artist} romantic songs",
+            f"{artist} popular songs",
+            f"{artist} latest songs",
+        ])
+    if album:
+        related_queries.extend([f"{album} songs", f"{album} soundtrack"])
+    if title:
+        related_queries.extend([
+            f"{title} similar songs",
+            f"songs like {title}",
+            f"{title} soundtrack",
+            f"{title} playlist",
+        ])
+    fallback_queries = [
+        "popular songs", "trending songs", "bollywood songs",
+        "classic songs", "romantic songs", "old songs",
+    ]
+    collected: list[dict] = []
+    seen: set[str] = set()
+    normalize_title = lambda value: re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
+    search_ids = {
+        str(item.get("song_id") or item.get("title", "")) for item in search_results
+    }
+    search_titles = {normalize_title(item.get("title", "")) for item in search_results}
+    for item in exclude_items or []:
+        search_ids.add(str(item.get("song_id") or item.get("title", "")))
+        search_titles.add(normalize_title(item.get("title", "")))
+    def collect_items(items: list[dict]) -> None:
+        for item in items:
+            key = str(item.get("song_id") or item.get("title", ""))
+            title_key = normalize_title(item.get("title", ""))
+            if not key or not title_key or key in seen or key in search_ids or title_key in search_titles:
+                continue
+            seen.add(key)
+            seen.add(title_key)
+            collected.append(item)
+
+    def collect_queries(queries: list[str], page_limit: int = 12) -> None:
+        # Fetch a small batch concurrently. The cap avoids overwhelming the
+        # public upstream API while cutting queue-build latency substantially.
+        queries = [query for query in queries if query]
+        for start in range(0, len(queries), 4):
+            batch = queries[start:start + 4]
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                pages = executor.map(lambda value: client.search_direct(value, limit=page_limit), batch)
+                for page in pages:
+                    collect_items(page)
+            if len(collected) >= limit:
+                break
+
+    collect_queries(related_queries, page_limit=12)
+    # A full expanded artist page is used only when the related pages have not
+    # produced enough candidates for the large Up Next shelf.
+    if len(collected) < 60:
+        for artist in artist_names[:3]:
+            collect_items(client.search(f"{artist} songs", limit=30))
+    if len(collected) < 60:
+        collect_queries(fallback_queries, page_limit=15)
+    # The public upstream service can return only a few rows per query. Use
+    # broader but still seed-related pages as a final capacity pass so a
+    # selected recommendation gets its own large queue instead of inheriting
+    # the old queue's remainder.
+    if len(collected) < 60:
+        broad_queries = []
+        for artist in artist_names[:2]:
+            broad_queries.extend([
+                f"{artist} film songs",
+                f"{artist} playlist",
+                f"{artist} evergreen songs",
+                f"{artist} top 50 songs",
+            ])
+        collect_queries(broad_queries, page_limit=20)
+    ranked = hybrid.rank_jio_results(collected, user_id, catalog, preferred_track_ids, seed=seed)
+    unique: list[dict] = []
+    used_titles: set[str] = set()
+    for item in ranked:
+        title_key = normalize_title(item.get("title", ""))
+        if title_key and title_key not in used_titles:
+            used_titles.add(title_key)
+            unique.append(item)
+    return unique[:limit]
+
+
+spotify_client = SpotifyOAuth.from_environment()
+spotify_token = None
+spotify_taste = st.session_state.get("spotify_taste")
+with st.sidebar:
+    st.header("Your TuneMatch account")
+    local_user_id = st.session_state.get("local_user_id")
+    if local_user_id:
+        summary = user_store.summary(local_user_id)
+        st.success("Signed in")
+        st.caption(f"{summary['tracks_played']} tracks played · {summary['likes']} likes")
+        if st.session_state.get("local_session_started_at"):
+            minutes = (time.time() - st.session_state["local_session_started_at"]) / 60
+            st.caption(f"Current session: {minutes:.1f} min")
+        if st.button("Log out of TuneMatch", width="stretch"):
+            account_listening_time()
+            started = st.session_state.pop("local_session_started_at", time.time())
+            log_behavior("session_end", duration_ms=int((time.time() - started) * 1000))
+            st.session_state.pop("local_user_id", None)
+            st.rerun()
+    else:
+        st.subheader("Welcome to TuneMatch")
+        auth_choice = st.radio(
+            "Choose an option to continue",
+            ["I am new — create account", "I already have an account — log in"],
+            index=None,
+            key="auth_choice",
+        )
+        if auth_choice is None:
+            st.info("First choose whether you are a new or existing user.")
+            st.stop()
+        is_new_user = auth_choice.startswith("I am new")
+        auth_mode = "Create account" if is_new_user else "Log in"
+        with st.form("local_auth", border=False):
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button(auth_mode, width="stretch")
+        if submitted:
+            if is_new_user:
+                ok, message = user_store.register(email, password)
+            else:
+                ok, message = user_store.authenticate(email, password)
+            if ok:
+                st.session_state["local_user_id"] = message
+                st.session_state["local_session_started_at"] = time.time()
+                log_behavior("session_start")
+                st.rerun()
+            else:
+                st.error(message)
+    if not st.session_state.get("local_user_id"):
+        st.info("Create a TuneMatch account to save likes, plays, skips, and session analytics.")
+        st.stop()
+
+account_listening_time()
+
+
+@st.fragment(run_every="10s")
+def render_admin_dashboard() -> None:
+    """Admin-only observability view; normal listeners never see this data."""
+    st.header("TuneMatch admin analytics")
+    st.caption("Operational and data-science metrics from local implicit-feedback events · auto-refreshes every 10 seconds")
+    events = pd.DataFrame(user_store.admin_events())
+    users = pd.DataFrame(user_store.admin_users())
+    if events.empty:
+        st.info("No listener events have been collected yet.")
+        return
+
+    events["created_at"] = pd.to_datetime(events["created_at"], errors="coerce", utc=True)
+    events["duration_min"] = pd.to_numeric(events["duration_ms"], errors="coerce").fillna(0) / 60000
+    event_weights = {
+        "jio_play": 1.0, "play_start": 1.0,
+        "jio_like": 1.0, "like": 1.0,
+        "jio_skip": 1.0, "skip": 1.0,
+    }
+    plays = events[events["event_type"].isin(["jio_play", "play_start"])]
+    likes = events[events["event_type"].isin(["jio_like", "like"])]
+    skips = events[events["event_type"].isin(["jio_skip", "skip"])]
+    a, b, c, d = st.columns(4)
+    a.metric("Registered users", int(len(users)))
+    b.metric("Total events", int(len(events)))
+    c.metric("Play starts", int(len(plays)))
+    d.metric("Listening hours", f"{events['duration_min'].sum() / 60:.1f}")
+
+    left, right = st.columns(2)
+    with left:
+        st.subheader("Event mix")
+        st.bar_chart(events["event_type"].value_counts().rename("events"))
+    with right:
+        st.subheader("User activity")
+        by_user = events.groupby("user_id").agg(
+            events=("event_type", "size"),
+            plays=("event_type", lambda values: values.isin(["jio_play", "play_start"]).sum()),
+            likes=("event_type", lambda values: values.isin(["jio_like", "like"]).sum()),
+            skips=("event_type", lambda values: values.isin(["jio_skip", "skip"]).sum()),
+        ).sort_values("events", ascending=False)
+        st.bar_chart(by_user[["plays", "likes", "skips"]])
+
+    daily = events.dropna(subset=["created_at"]).copy()
+    if not daily.empty:
+        daily["date"] = daily["created_at"].dt.date.astype(str)
+        listening = daily.groupby("date")["duration_min"].sum().rename("minutes")
+        st.subheader("Listening time over time")
+        st.line_chart(listening)
+
+    # Metadata quality and catalog observability.
+    metadata_rows = []
+    for raw in events.get("metadata_json", pd.Series(dtype=str)).fillna("{}"): 
+        try:
+            metadata_rows.append(json.loads(raw))
+        except (TypeError, ValueError):
+            metadata_rows.append({})
+    metadata = pd.DataFrame(metadata_rows)
+    if not metadata.empty:
+        st.subheader("Most played artists")
+        artists = metadata.get("artists", pd.Series(dtype=str)).fillna("").astype(str)
+        artist_counts = artists.str.split(",").explode().str.strip()
+        # Do not truncate this to the top 15: the admin view should expose
+        # every artist present in the collected event metadata.
+        artist_counts = artist_counts[artist_counts != ""].value_counts().rename("plays")
+        if not artist_counts.empty:
+            st.dataframe(
+                artist_counts.to_frame().reset_index(names="artist"),
+                width="stretch",
+                hide_index=True,
+            )
+            st.bar_chart(artist_counts.to_frame(), horizontal=True)
+
+        quality_columns = [column for column in ("title", "artists", "album", "stream_url", "image_url") if column in metadata]
+        if quality_columns:
+            quality = pd.DataFrame({column: metadata[column].fillna("").astype(str).str.strip().ne("") for column in quality_columns})
+            quality = (quality.mean() * 100).round(1).rename("completeness_percent")
+            st.subheader("External music data quality")
+            st.dataframe(quality.to_frame(), width="stretch")
+
+    # Collaborative-filtering health: the interaction matrix dimensions and
+    # density tell us whether MF has enough signal or is still cold-start.
+    interactions = events[events["track_id"].notna()]
+    matrix_users = interactions["user_id"].nunique()
+    matrix_items = interactions["track_id"].nunique()
+    matrix_cells = max(1, matrix_users * matrix_items)
+    st.subheader("Recommendation model health")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Users in interaction matrix", int(matrix_users))
+    m2.metric("Unique interacted songs", int(matrix_items))
+    m3.metric("Matrix density", f"{len(interactions) / matrix_cells * 100:.2f}%")
+    m4.metric("Like rate", f"{len(likes) / max(1, len(plays)) * 100:.1f}%")
+    st.caption("Low matrix density means the system should rely more on content, mood and cold-start signals than collaborative filtering.")
+
+
+if user_store.is_admin(local_user_id):
+    with st.sidebar:
+        workspace_view = st.radio("Workspace", ["TuneMatch", "Admin dashboard"], key="workspace_view")
+    if workspace_view == "Admin dashboard":
+        render_admin_dashboard()
+        st.stop()
+
+st.markdown(f"## Good evening, listener")
+st.caption("Your recommendations are ready. Search only when you want something specific.")
+search_query = st.text_input(
+    "Search songs, artists, albums, or genres",
+    placeholder="What do you want to listen to?",
+    key="global_search",
+)
+
+genre_options = sorted(data["track_genre"].dropna().astype(str).unique().tolist())
+popular = data.sort_values("popularity", ascending=False).head(100)
+track_labels = {
+    f"{row.track_name} — {row.artists}": str(row.track_id)
+    for row in popular.itertuples()
+}
+with st.expander("Tune your taste (optional)"):
+    onboarding_genres = st.multiselect(
+        "Genres you like", genre_options, default=genre_options[:2], key="onboarding_genres"
+    )
+    onboarding_tracks = st.multiselect(
+        "Artists or tracks you already enjoy", list(track_labels), key="onboarding_tracks"
+    )
+
+live_track_ids = local_ids_for_spotify_taste(spotify_taste or {}, data)
+imported_track_ids = local_ids_for_imported_history(imported_history, data)
+preferred_track_ids = (
+    user_store.liked_track_ids(local_user_id)
+    + live_track_ids
+    + imported_track_ids
+    + [track_labels[label] for label in onboarding_tracks]
+)
+
+if not search_query:
+    st.info("Search a song, artist, album, or genre to see matching music and play it.")
+else:
+    st.markdown('<div class="shelf-title">Search results</div>', unsafe_allow_html=True)
+    st.markdown('<div class="shelf-subtitle">Songs · ranked for your taste</div>', unsafe_allow_html=True)
+    try:
+        search_cache = st.session_state["jio_search_cache_v2"]
+        jio_results = search_cache.get(search_query)
+        if jio_results is None:
+            jio_results = jio_client.search(search_query, limit=30)
+        if not jio_results:
+            local_guess = engine.search(search_query, limit=1)
+            if not local_guess.empty:
+                guess = local_guess.iloc[0]
+                fallback_query = f"{guess['track_name']} {guess.get('album_name', '')}".strip()
+                jio_results = jio_client.search(fallback_query, limit=30)
+        jio_results = hybrid_engine.rank_jio_results(
+            jio_results, local_user_id, data, preferred_track_ids
+        )
+        if jio_results:
+            search_cache[search_query] = jio_results
+        if jio_results:
+            jio_cols = st.columns(4)
+            for i, item in enumerate(jio_results):
+                with jio_cols[i % 4]:
+                    with st.container(border=True):
+                        if item["image_url"]:
+                            st.image(item["image_url"], width="stretch")
+                        st.markdown(f"**{item['title']}**")
+                        st.caption(f"{item['artists']}\n{item['album']}")
+                        if st.button("▶ Play", key=f"jio_play_{i}_{item['song_id'] or item['title']}", width="stretch"):
+                            # Set the selected song first; recommendation
+                            # fetching must never make the player disappear.
+                            st.session_state["jio_now_playing"] = item
+                            st.session_state["jio_queue"] = []
+                            st.session_state["jio_current_track_id"] = str(
+                                item.get("song_id") or item.get("title", "")
+                            )
+                            st.session_state["jio_started_at"] = time.time()
+                            st.session_state["jio_last_accounted_at"] = st.session_state["jio_started_at"]
+                            log_behavior(
+                                "jio_play",
+                                str(item.get("song_id") or item.get("title", "")),
+                                metadata=item,
+                            )
+                            try:
+                                # Refit immediately so this play is included
+                                # in the live collaborative/MF ranking.
+                                hybrid_engine.fit(user_store.interaction_events())
+                                st.session_state["jio_queue"] = build_jio_up_next(
+                                    item,
+                                    jio_results,
+                                    jio_client,
+                                    hybrid_engine,
+                                    local_user_id,
+                                    data,
+                                    preferred_track_ids,
+                                )
+                            except Exception:
+                                st.session_state["jio_queue"] = []
+                            st.rerun()
+                        if st.button("♡ Like", key=f"jio_like_{i}_{item['song_id'] or item['title']}", width="stretch"):
+                            log_behavior(
+                                "jio_like",
+                                str(item.get("song_id") or item.get("title", "")),
+                                metadata=item,
+                            )
+                            # A like changes ranking, not the user's whole
+                            # queue. Preserve the existing queue and rerank it
+                            # in memory so the action stays instant and does
+                            # not shrink 55 recommendations to a few API rows.
+                            hybrid_engine.fit(user_store.interaction_events())
+                            existing_queue = list(st.session_state.get("jio_queue", []))
+                            if existing_queue:
+                                st.session_state["jio_queue"] = hybrid_engine.rank_jio_results(
+                                    existing_queue,
+                                    local_user_id,
+                                    data,
+                                    preferred_track_ids,
+                                    seed=item,
+                                )[:70]
+                            else:
+                                st.session_state["jio_queue"] = build_jio_up_next(
+                                    item,
+                                    jio_results,
+                                    jio_client,
+                                    hybrid_engine,
+                                    local_user_id,
+                                    data,
+                                    preferred_track_ids,
+                                    exclude_items=[item],
+                                )
+                            st.toast("Added to your taste profile")
+                        if item["perma_url"]:
+                            st.link_button("Open song", item["perma_url"], width="stretch")
+        else:
+            st.caption("No songs found for this search.")
+    except Exception:
+        st.caption("Music search is temporarily unavailable. Try again in a moment.")
+
+jio_now = st.session_state.get("jio_now_playing")
+if jio_now and (
+    not jio_now.get("stream_url")
+    or "preview.saavncdn.com" in str(jio_now.get("stream_url", ""))
+) and jio_now.get("title"):
+    # Upgrade a player item created before the API started exposing media_url.
+    try:
+        refreshed = jio_client.search(str(jio_now["title"]), limit=5)
+        same_song = next(
+            (item for item in refreshed if item.get("song_id") == jio_now.get("song_id")),
+            next((item for item in refreshed if item.get("title") == jio_now.get("title")), None),
+        )
+        if same_song and same_song.get("stream_url"):
+            jio_now = same_song
+            st.session_state["jio_now_playing"] = same_song
+    except Exception:
+        pass
+if jio_now:
+    st.markdown('<div class="shelf-title">TuneMatch player</div>', unsafe_allow_html=True)
+    now_cols = st.columns([1, 3, 1, 1])
+    with now_cols[0]:
+        if jio_now.get("image_url"):
+            st.image(jio_now["image_url"], width="stretch", alt=jio_now.get("title", "TuneMatch song"))
+    with now_cols[1]:
+        st.markdown(f"**{jio_now.get('title', 'Unknown song')}**")
+        st.caption(f"{jio_now.get('artists', '')} · {jio_now.get('album', '')}")
+        stream_url = jio_now.get("stream_url", "")
+        perma_url = jio_now.get("perma_url", "")
+        if stream_url:
+            st.audio(
+                stream_url,
+                format=jio_now.get("stream_format", "audio/mpeg"),
+            )
+        elif perma_url:
+            st.warning("Audio preview unavailable for this song.")
+            st.link_button("Open song", perma_url, width="stretch")
+        current_id = str(jio_now.get("song_id") or jio_now.get("title", ""))
+        liked_ids = set(user_store.liked_track_ids(local_user_id))
+        if current_id in liked_ids:
+            st.success("♥ Liked")
+        elif st.button("♡ Like this song", key=f"player_like_{current_id}", width="stretch"):
+            log_behavior("jio_like", current_id, metadata=jio_now)
+            hybrid_engine.fit(user_store.interaction_events())
+            existing_queue = list(st.session_state.get("jio_queue", []))
+            if existing_queue:
+                # Re-rank the already fetched queue immediately. This keeps
+                # the full recommendation shelf visible after a live like.
+                st.session_state["jio_queue"] = hybrid_engine.rank_jio_results(
+                    existing_queue,
+                    local_user_id,
+                    data,
+                    preferred_track_ids,
+                    seed=jio_now,
+                )[:70]
+            else:
+                cached_results = st.session_state.get("jio_search_cache_v2", {}).get(search_query, [])
+                try:
+                    st.session_state["jio_queue"] = build_jio_up_next(
+                        jio_now,
+                        cached_results,
+                        jio_client,
+                        hybrid_engine,
+                        local_user_id,
+                        data,
+                        preferred_track_ids,
+                        exclude_items=[jio_now],
+                    )
+                except Exception:
+                    st.session_state["jio_queue"] = []
+            st.toast("Added to your likes and taste profile")
+            st.rerun()
+    with now_cols[2]:
+        if st.button("⏭ Next", key="jio_next", width="stretch"):
+            queue = st.session_state.get("jio_queue", [])
+            if queue:
+                current_id = st.session_state.get("jio_current_track_id")
+                if current_id:
+                    log_behavior("jio_skip", str(current_id))
+                next_item = queue.pop(0)
+                st.session_state["jio_queue"] = queue
+                st.session_state["jio_now_playing"] = next_item
+                st.session_state["jio_current_track_id"] = str(
+                    next_item.get("song_id") or next_item.get("title", "")
+                )
+                st.session_state["jio_started_at"] = time.time()
+                st.session_state["jio_last_accounted_at"] = st.session_state["jio_started_at"]
+                log_behavior(
+                    "jio_play",
+                    str(next_item.get("song_id") or next_item.get("title", "")),
+                    metadata=next_item,
+                )
+                hybrid_engine.fit(user_store.interaction_events())
+                cached_results = st.session_state.get("jio_search_cache_v2", {}).get(
+                    search_query, []
+                )
+                try:
+                    st.session_state["jio_queue"] = build_jio_up_next(
+                        next_item,
+                        cached_results,
+                        jio_client,
+                        hybrid_engine,
+                        local_user_id,
+                        data,
+                        preferred_track_ids,
+                        exclude_items=[next_item, *queue],
+                    )
+                except Exception:
+                    st.session_state["jio_queue"] = queue
+                st.rerun()
+            else:
+                st.info("No personalized recommendation is ready yet. Play another search result first.")
+    with now_cols[3]:
+        st.toggle("Loop", key="jio_loop")
+    raw_up_next = st.session_state.get("jio_queue", [])
+    up_next = []
+    seen_up_next_titles: set[str] = set()
+    for item in raw_up_next:
+        title_key = re.sub(r"[^a-z0-9]+", " ", str(item.get("title", "")).lower()).strip()
+        if title_key and title_key not in seen_up_next_titles:
+            seen_up_next_titles.add(title_key)
+            up_next.append(item)
+    st.session_state["jio_queue"] = up_next
+    if up_next:
+        st.caption(f"Up next for you ({len(up_next)}): " + " · ".join(
+            str(item.get("title", "Unknown song")) for item in up_next[:5]
+        ))
+        with st.expander(f"See all {len(up_next)} personalized recommendations", expanded=True):
+            recommendation_cols = st.columns(4)
+            for index, item in enumerate(up_next):
+                with recommendation_cols[index % 4]:
+                    with st.container(border=True):
+                        st.caption(f"{index + 1}. {item.get('title', 'Unknown song')}")
+                        st.caption(f"{item.get('artists', '')} · {item.get('album', '')}")
+                        if item.get("recommendation_reason"):
+                            st.caption(f"💡 {item['recommendation_reason']}")
+                        if st.button(
+                            "▶ Play",
+                            key=f"up_next_play_{index}_{item.get('song_id') or item.get('title')}",
+                            width="stretch",
+                        ):
+                            # Selecting an Up Next item starts a new listening
+                            # context. Rebuild the queue from that song instead
+                            # of merely playing the old queue's remainder.
+                            st.session_state["jio_now_playing"] = item
+                            old_queue = list(up_next)
+                            st.session_state["jio_queue"] = []
+                            st.session_state["jio_current_track_id"] = str(
+                                item.get("song_id") or item.get("title", "")
+                            )
+                            st.session_state["jio_started_at"] = time.time()
+                            st.session_state["jio_last_accounted_at"] = st.session_state["jio_started_at"]
+                            log_behavior(
+                                "jio_play",
+                                str(item.get("song_id") or item.get("title", "")),
+                                metadata=item,
+                            )
+                            hybrid_engine.fit(user_store.interaction_events())
+                            cached_results = st.session_state.get("jio_search_cache_v2", {}).get(
+                                search_query, []
+                            )
+                            try:
+                                st.session_state["jio_queue"] = build_jio_up_next(
+                                    item,
+                                    cached_results,
+                                    jio_client,
+                                    hybrid_engine,
+                                    local_user_id,
+                                    data,
+                                    preferred_track_ids,
+                                    exclude_items=[item, *old_queue],
+                                )
+                            except Exception:
+                                st.session_state["jio_queue"] = []
+                            st.rerun()
+    else:
+        st.caption("No more personalized recommendations in this queue.")
+    if st.button("↻ Refresh recommendations", key="refresh_recommendations"):
+        hybrid_engine.fit(user_store.interaction_events())
+        cached_results = st.session_state.get("jio_search_cache_v2", {}).get(search_query, [])
+        try:
+            st.session_state["jio_queue"] = build_jio_up_next(
+                jio_now,
+                cached_results,
+                jio_client,
+                hybrid_engine,
+                local_user_id,
+                data,
+                preferred_track_ids,
+                exclude_items=[jio_now, *up_next],
+            )
+        except Exception:
+            st.session_state["jio_queue"] = []
+        st.rerun()
+
+with st.expander("Current session activity and data-science metrics", expanded=True):
+    activity = user_store.summary(
+        local_user_id,
+        session_id=st.session_state["local_session_id"],
+    )
+    a, b, c, d = st.columns(4)
+    a.metric("Events", activity["events"])
+    b.metric("Tracks played", activity["tracks_played"])
+    c.metric("Likes", activity["likes"])
+    live_ms = activity["listening_ms"]
+    if st.session_state.get("jio_started_at"):
+        live_ms += int(
+            max(0.0, time.time() - float(
+                st.session_state.get("jio_last_accounted_at", st.session_state["jio_started_at"])
+            )) * 1000
+        )
+    d.metric("Listening time", f"{live_ms / 60000:.1f} min")
+    st.caption("Play starts, skips, likes, dislikes, session duration, and recommendation seeds are collected for future ranking evaluation.")
+
+with st.expander("How this recommender works"):
+    st.markdown("""
+    1. **Content-based filtering:** artist/title taste signals are matched against each music result.
+    2. **Collaborative filtering:** users with similar play/like behavior contribute implicit preference signals.
+    3. **Matrix factorization:** TruncatedSVD learns latent user-song embeddings from the interaction matrix.
+    4. **Sequential hybrid ranking:** content (50%), collaborative/matrix-factorization (25%), next-track transitions (15%), and popularity (10%) are blended.
+    5. **Freshness and diversity:** recent repeats, artist repetition, and album repetition are penalized.
+    6. **Cold-start aware:** before enough events exist, content and onboarding signals carry the ranking.
+
+    Every play, like, and skip improves the local implicit-feedback model for the next search.
+    """)
