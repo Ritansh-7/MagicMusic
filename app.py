@@ -1725,8 +1725,13 @@ if jio_now:
         st.html(
             """
             <script>
-            const anchor = document.getElementById('tune-match-player-anchor');
-            if (anchor) anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            const root = window.parent && window.parent.document ? window.parent.document : document;
+            const scrollToPlayer = () => {
+              const anchor = root.getElementById('tune-match-player-anchor');
+              if (anchor) anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            };
+            requestAnimationFrame(scrollToPlayer);
+            setTimeout(scrollToPlayer, 180);
             </script>
             """,
             unsafe_allow_javascript=True,
@@ -1734,6 +1739,11 @@ if jio_now:
     if st.button("↻ Refresh recommendations", key="refresh_recommendations"):
         refresh_hybrid_model(force=True)
         cached_results = st.session_state.get("jio_search_cache_v2", {}).get(search_query.strip().lower(), [])
+        current_seed_id = str(jio_now.get("song_id") or jio_now.get("title", ""))
+        # Do not exclude the previous queue here. Those tracks are precisely
+        # the only candidates available in the cached seed-related result
+        # pool, and excluding them all can produce an empty radio. The ranker
+        # still excludes the current track, recent history and duplicates.
         try:
             st.session_state["jio_queue"] = build_jio_up_next(
                 jio_now,
@@ -1743,10 +1753,12 @@ if jio_now:
                 local_user_id,
                 data,
                 preferred_track_ids,
-                exclude_items=[jio_now, *up_next],
+                exclude_items=[jio_now],
             )
         except Exception:
             st.session_state["jio_queue"] = []
+        st.session_state["jio_queue_seed_id"] = current_seed_id
+        st.session_state["jio_queue_attempted_id"] = current_seed_id
         st.rerun()
 
 with st.expander("Current session activity and data-science metrics", expanded=True):
