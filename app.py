@@ -275,6 +275,17 @@ def build_hybrid_engine(_content_engine):
     return HybridRecommendationEngine(_content_engine)
 
 
+@st.cache_resource(show_spinner=False)
+def build_user_store(path: str, database_url: str) -> UserStore:
+    """Initialize the account store once per Streamlit process.
+
+    Streamlit reruns the script after every widget interaction. Creating the
+    remote MySQL tables on every rerun made login appear slow, especially on a
+    cloud database with a cold connection.
+    """
+    return UserStore(path, database_url=database_url)
+
+
 raw_data = load_data(DATA_PATH)
 data, mood_scaler, mood_cluster_model = build_catalog_clusters(raw_data)
 live_catalog_lookup = build_live_catalog_lookup(data)
@@ -282,13 +293,19 @@ imported_history = load_imported_history(HISTORY_PATH)
 engine = build_engine(data)
 stats = engine.catalog_stats()
 database_url = configured_database_url()
+if "cloud_db_unavailable" not in st.session_state:
+    st.session_state["cloud_db_unavailable"] = False
 try:
-    user_store = UserStore(EVENT_DB_PATH, database_url=database_url)
+    if database_url and st.session_state["cloud_db_unavailable"]:
+        raise RuntimeError("cloud database was unavailable earlier in this session")
+    user_store = build_user_store(str(EVENT_DB_PATH), database_url)
 except Exception:
     # Keep the UI usable while a cloud database is paused, misconfigured, or
     # temporarily unreachable. Once DATABASE_URL is corrected and the app is
     # rebooted, UserStore automatically returns to the configured MySQL DB.
-    user_store = UserStore(EVENT_DB_PATH)
+    if database_url:
+        st.session_state["cloud_db_unavailable"] = True
+    user_store = build_user_store(str(EVENT_DB_PATH), "")
     if database_url:
         st.warning(
             "Cloud database is unavailable right now. TuneMatch is using temporary local storage; "
@@ -308,12 +325,18 @@ if "jio_queue_index" in st.session_state:
 
 def refresh_hybrid_model(force: bool = False) -> None:
     """Refit only when the event store has changed; keeps UI reruns fast."""
+    # A normal widget rerun cannot change the event table. Only reload remote
+    # interactions after this session writes an event; admin analytics has its
+    # own 10-second live refresh path.
+    if not force and not st.session_state.get("events_dirty", True):
+        return
     events = user_store.interaction_events()
     latest_event = events[-1].get("created_at") if events else ""
     signature = (len(events), str(latest_event))
     if force or st.session_state.get("hybrid_model_signature") != signature:
         hybrid_engine.fit(events)
         st.session_state["hybrid_model_signature"] = signature
+        st.session_state["events_dirty"] = False
 
 
 refresh_hybrid_model()
@@ -335,6 +358,20 @@ def log_behavior(
             duration_ms=duration_ms,
             metadata_json=json.dumps(metadata or {}),
         )
+        st.session_state["events_dirty"] = True
+        st.session_state["summary_dirty"] = True
+
+
+def cached_user_summary(user_id: str, session_id: str | None = None) -> dict[str, int]:
+    """Avoid a remote aggregate query on every Streamlit rerun."""
+    cache = st.session_state.setdefault("user_summary_cache", {})
+    cache_key = f"{user_id}:{session_id or 'all'}"
+    if cache_key in cache and not st.session_state.get("summary_dirty"):
+        return cache[cache_key]
+    summary = user_store.summary(user_id, session_id=session_id)
+    cache[cache_key] = summary
+    st.session_state["summary_dirty"] = False
+    return summary
 
 
 def account_listening_time() -> None:
@@ -634,7 +671,7 @@ with st.sidebar:
     st.header("Your TuneMatch account")
     local_user_id = st.session_state.get("local_user_id")
     if local_user_id:
-        summary = user_store.summary(local_user_id)
+        summary = cached_user_summary(local_user_id)
         st.success("Signed in")
         st.caption(f"{summary['tracks_played']} tracks played · {summary['likes']} likes")
         if st.session_state.get("local_session_started_at"):
@@ -645,6 +682,8 @@ with st.sidebar:
             started = st.session_state.pop("local_session_started_at", time.time())
             log_behavior("session_end", duration_ms=int((time.time() - started) * 1000))
             st.session_state.pop("local_user_id", None)
+            st.session_state.pop("local_is_admin", None)
+            st.session_state.pop("user_summary_cache", None)
             st.rerun()
     else:
         st.subheader("Welcome to TuneMatch")
@@ -671,6 +710,7 @@ with st.sidebar:
             if ok:
                 st.session_state["local_user_id"] = message
                 st.session_state["local_session_started_at"] = time.time()
+                st.session_state["local_is_admin"] = user_store.is_admin(message)
                 log_behavior("session_start")
                 st.rerun()
             else:
@@ -794,7 +834,7 @@ def render_admin_dashboard() -> None:
         st.bar_chart(data["cluster_id"].value_counts().sort_index().rename("catalog_tracks"))
 
 
-if user_store.is_admin(local_user_id):
+if st.session_state.get("local_is_admin", False):
     with st.sidebar:
         workspace_view = st.radio("Workspace", ["TuneMatch", "Admin dashboard"], key="workspace_view")
     if workspace_view == "Admin dashboard":
@@ -1189,7 +1229,7 @@ if jio_now:
         st.rerun()
 
 with st.expander("Current session activity and data-science metrics", expanded=True):
-    activity = user_store.summary(
+    activity = cached_user_summary(
         local_user_id,
         session_id=st.session_state["local_session_id"],
     )

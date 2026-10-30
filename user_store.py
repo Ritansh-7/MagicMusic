@@ -36,6 +36,12 @@ class _MySQLConnection:
             charset="utf8mb4",
             cursorclass=pymysql.cursors.DictCursor,
             autocommit=False,
+            # Do not let a sleeping/unreachable cloud database freeze a
+            # Streamlit rerun indefinitely. Aiven connections normally finish
+            # well below this; these are only a safety bound for cold starts.
+            connect_timeout=8,
+            read_timeout=12,
+            write_timeout=12,
         )
 
     def __enter__(self):
