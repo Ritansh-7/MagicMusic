@@ -276,10 +276,17 @@ def build_live_catalog_lookup(data: pd.DataFrame) -> dict[tuple[str, str], dict]
         artist = _compact_key(artists)
         if not title or not artist:
             continue
+        genre_text = str(getattr(row, "track_genre", "")).casefold()
+        language_hint = next(
+            (language for language in ("hindi", "tamil", "telugu", "punjabi", "bengali", "marathi", "malayalam", "kannada")
+             if language in genre_text),
+            "",
+        )
         lookup[(title, artist)] = {
             "cluster_id": getattr(row, "cluster_id", None),
             "feature_source": "local_audio_catalog",
             "catalog_artists": str(getattr(row, "artists", "")),
+            "catalog_language_hint": language_hint,
             **{
                 column: float(getattr(row, column, 0) or 0)
                 for column in MOOD_FEATURES
@@ -341,6 +348,8 @@ def enrich_live_items(items: list[dict]) -> list[dict]:
             item.update({key: value for key, value in match.items() if key != "catalog_artists"})
             if not str(item.get("artists", "")).strip():
                 item["artists"] = match.get("catalog_artists", "")
+            if not str(item.get("language", "")).strip() and match.get("catalog_language_hint"):
+                item["language"] = match["catalog_language_hint"]
         else:
             item.setdefault("feature_source", "live_metadata_fallback")
             item.update({key: value for key, value in infer_metadata_mood(item).items() if key not in item})
@@ -909,6 +918,12 @@ def build_jio_up_next(
                     continue
                 era_score = float(np.exp(-((era_gap / 10.0) ** 2)))
             item_intents = set(item.get("intent_labels", [])) - {"general"}
+            if seed_intents and item_intents and not seed_intents.intersection(item_intents):
+                continue
+            seed_language = str(seed.get("language", "")).casefold().strip()
+            item_language = str(item.get("language", "")).casefold().strip()
+            if seed_language and item_language and seed_language != item_language:
+                continue
             intent_score = (
                 len(seed_intents.intersection(item_intents)) / max(len(seed_intents), 1)
                 if seed_intents else 0.0

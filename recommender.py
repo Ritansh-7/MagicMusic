@@ -630,6 +630,7 @@ class HybridRecommendationEngine:
                 len(seed_intents.intersection(item_intents)) / max(len(seed_intents), 1)
                 if seed_intents else 0.0
             )
+            intent_conflict = bool(seed_intents and item_intents and not seed_intents.intersection(item_intents))
             # Current-track context is deliberately stronger than history.
             context_score = (
                 0.25 * seed_artist_match
@@ -662,6 +663,7 @@ class HybridRecommendationEngine:
             item["_feature_tokens"] = feature_tokens(item)
             item["_metadata_similarity"] = metadata_similarity
             item["_intent_match"] = intent_match
+            item["_intent_conflict"] = intent_conflict
             item["_era_delta"] = era_delta
             item["_same_era"] = same_era
             if album_match and (mood_match >= 0.62 or intent_match >= 0.5):
@@ -773,6 +775,8 @@ class HybridRecommendationEngine:
                 if (not relaxed_context and has_seed and bool(item.get("_language_conflict", False))
                         and not same_artist_context and not float(item.get("_album_match", 0.0))):
                     continue
+                if bool(item.get("_intent_conflict", False)):
+                    continue
                 if not relaxed_context and has_seed and not strong_context and float(item.get("_profile_score", 0.0)) < 0.35:
                     continue
                 if not relaxed_context and has_seed and seed_styles != {"neutral"} and not (
@@ -833,6 +837,6 @@ class HybridRecommendationEngine:
         for item in selected:
             item.pop("_context_score", None)
             item.pop("_profile_score", None)
-            for key in ("_seed_artist_match", "_album_match", "_language_match", "_language_conflict", "_era_match", "_cluster_match", "_style_match", "_mood_match", "_feature_tokens", "_metadata_similarity", "_intent_match", "_era_delta", "_same_era"):
+            for key in ("_seed_artist_match", "_album_match", "_language_match", "_language_conflict", "_era_match", "_cluster_match", "_style_match", "_mood_match", "_feature_tokens", "_metadata_similarity", "_intent_match", "_intent_conflict", "_era_delta", "_same_era"):
                 item.pop(key, None)
         return selected
