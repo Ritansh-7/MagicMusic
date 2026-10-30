@@ -142,11 +142,13 @@ class JioSaavnClient:
             f"{query} music",
             f"{query} hits",
             f"{query} hindi",
+            f"{query} soundtrack",
+            f"{query} film songs",
             f"{query} playlist",
             f"{query} romantic songs",
             f"{query} bollywood songs",
         )
-        with ThreadPoolExecutor(max_workers=min(6, len(candidates))) as executor:
+        with ThreadPoolExecutor(max_workers=min(8, len(candidates))) as executor:
             pages = executor.map(
                 lambda candidate: self.search_direct(candidate, limit=min(limit, 12)),
                 candidates,

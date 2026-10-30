@@ -630,7 +630,11 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
         title_tokens = set(title.split())
         exact_title = float(title == query_key)
         title_match = float(query_key in title or query_tokens.issubset(title_tokens))
+        album_exact = float(album == query_key)
         album_match = float(query_key in album or query_tokens.issubset(set(album.split())))
+        entity_title_match = float(
+            query_key in title and any(marker in title for marker in ("from", "title track", "soundtrack"))
+        )
         artist_match = float(query_key in artists)
         language = str(item.get("language", "")).lower()
         variant_penalty = 0.0
@@ -640,14 +644,27 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
             variant_penalty += 1.0
         return (
             5.0 * exact_title
-            + 3.0 * title_match
-            + 2.0 * album_match
+            + 4.0 * album_exact
+            + 3.0 * entity_title_match
+            + 1.5 * title_match
+            + 1.5 * album_match
             + 1.0 * artist_match
             - variant_penalty,
             0,
         )
-
-    return [item for _, item in sorted(enumerate(results), key=lambda pair: (score(pair[1]), -pair[0]), reverse=True)]
+    ordered = [item for _, item in sorted(enumerate(results), key=lambda pair: (score(pair[1]), -pair[0]), reverse=True)]
+    unique: list[dict] = []
+    seen: set[str] = set()
+    for item in ordered:
+        key = "|".join(
+            _compact_key(item.get(field, ""))
+            for field in ("title", "artists", "album")
+        )
+        if key and key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique
 
 
 def build_jio_up_next(
