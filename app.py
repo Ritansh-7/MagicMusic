@@ -1727,11 +1727,16 @@ if jio_now:
             <script>
             const root = window.parent && window.parent.document ? window.parent.document : document;
             const scrollToPlayer = () => {
-              const anchor = root.getElementById('tune-match-player-anchor');
-              if (anchor) anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              const anchor = root.getElementById('tune-match-player-anchor')
+                || document.getElementById('tune-match-player-anchor');
+              if (anchor) {
+                anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                try { (window.top || window).location.hash = 'tune-match-player-anchor'; } catch (_) {}
+              }
             };
             requestAnimationFrame(scrollToPlayer);
             setTimeout(scrollToPlayer, 180);
+            setTimeout(scrollToPlayer, 650);
             </script>
             """,
             unsafe_allow_javascript=True,
