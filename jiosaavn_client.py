@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from typing import Any
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 import re
@@ -15,7 +16,7 @@ def _cached_search_page(base_url: str, query: str) -> tuple[dict[str, Any], ...]
         response = requests.get(
             f"{base_url}/result/",
             params={"query": query, "lyrics": "false"},
-            timeout=10,
+            timeout=7,
         )
         response.raise_for_status()
         payload = response.json()
@@ -132,8 +133,9 @@ class JioSaavnClient:
             return []
         collected: list[dict[str, Any]] = []
         seen: set[str] = set()
-        # The upstream service occasionally returns 500 for an exact title;
-        # query expansion also lets us collect more than its usual 5-result page.
+        # Search several high-signal expansions in parallel. The old sequential
+        # loop could make one search wait for 18 upstream requests; cached pages
+        # and ordered result merging preserve relevance while cutting latency.
         candidates = (
             query,
             f"{query} song",
@@ -142,21 +144,14 @@ class JioSaavnClient:
             f"{query} hindi",
             f"{query} playlist",
             f"{query} romantic songs",
-            f"{query} new songs",
             f"{query} bollywood songs",
-            f"{query} party songs",
-            f"{query} sad songs",
-            f"{query} love songs",
-            f"{query} dance songs",
-            f"{query} indie songs",
-            f"{query} mashup songs",
-            f"{query} classics",
-            f"{query} 2024 songs",
-            f"{query} 2025 songs",
-            f"{query} 2026 songs",
         )
-        for candidate in candidates:
-            raw_items = self.search_direct(candidate, limit=limit)
+        with ThreadPoolExecutor(max_workers=min(6, len(candidates))) as executor:
+            pages = executor.map(
+                lambda candidate: self.search_direct(candidate, limit=min(limit, 12)),
+                candidates,
+            )
+        for raw_items in pages:
             if not raw_items:
                 continue
             for item in raw_items:

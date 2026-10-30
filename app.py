@@ -740,7 +740,7 @@ def play_next_from_queue(mark_previous_as_skip: bool = True) -> bool:
         metadata=next_item,
     )
     refresh_hybrid_model(force=True)
-    cached_results = st.session_state.get("jio_search_cache_v2", {}).get(search_query, [])
+    cached_results = st.session_state.get("jio_search_cache_v2", {}).get(search_query.strip().lower(), [])
     try:
         st.session_state["jio_queue"] = build_jio_up_next(
             next_item,
@@ -763,7 +763,8 @@ else:
     st.markdown('<div class="shelf-subtitle">Songs · ranked for your taste</div>', unsafe_allow_html=True)
     try:
         search_cache = st.session_state["jio_search_cache_v2"]
-        jio_results = search_cache.get(search_query)
+        search_cache_key = search_query.strip().lower()
+        jio_results = search_cache.get(search_cache_key)
         if jio_results is None:
             jio_results = jio_client.search(search_query, limit=30)
         if not jio_results:
@@ -776,14 +777,15 @@ else:
             enrich_live_items(jio_results), local_user_id, data, preferred_track_ids
         )
         if jio_results:
-            search_cache[search_query] = jio_results
+            search_cache[search_cache_key] = jio_results
         if jio_results:
             jio_cols = st.columns(4)
-            for i, item in enumerate(jio_results):
-                with jio_cols[i % 4]:
+            for i, item in enumerate(jio_results, start=1):
+                with jio_cols[(i - 1) % 4]:
                     with st.container(border=True):
                         if item["image_url"]:
                             st.image(item["image_url"], width="stretch")
+                        st.caption(f"Search result {i}")
                         st.markdown(f"**{item['title']}**")
                         st.caption(f"{item['artists']}\n{item['album']}")
                         if st.button("▶ Play", key=f"jio_play_{i}_{item['song_id'] or item['title']}", width="stretch"):
@@ -923,7 +925,7 @@ if jio_now:
                     seed=jio_now,
                 )[:70]
             else:
-                cached_results = st.session_state.get("jio_search_cache_v2", {}).get(search_query, [])
+                cached_results = st.session_state.get("jio_search_cache_v2", {}).get(search_query.strip().lower(), [])
                 try:
                     st.session_state["jio_queue"] = build_jio_up_next(
                         jio_now,
@@ -1051,7 +1053,7 @@ if jio_now:
         )
     if st.button("↻ Refresh recommendations", key="refresh_recommendations"):
         refresh_hybrid_model(force=True)
-        cached_results = st.session_state.get("jio_search_cache_v2", {}).get(search_query, [])
+        cached_results = st.session_state.get("jio_search_cache_v2", {}).get(search_query.strip().lower(), [])
         try:
             st.session_state["jio_queue"] = build_jio_up_next(
                 jio_now,
