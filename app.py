@@ -501,17 +501,17 @@ def render_admin_dashboard() -> None:
     st.caption("Operational and data-science metrics from local implicit-feedback events · auto-refreshes every 10 seconds")
     events = pd.DataFrame(user_store.admin_events())
     users = pd.DataFrame(user_store.admin_users())
+    status_a, status_b, status_c, status_d = st.columns(4)
+    status_a.metric("Database", user_store.database_kind.upper())
+    status_b.metric("Catalog tracks", f"{len(data):,}")
+    status_c.metric("Mood clusters", int(mood_cluster_model.n_clusters))
+    status_d.metric("ML features", len(MOOD_FEATURES))
     if events.empty:
         st.info("No listener events have been collected yet.")
         return
 
     events["created_at"] = pd.to_datetime(events["created_at"], errors="coerce", utc=True)
     events["duration_min"] = pd.to_numeric(events["duration_ms"], errors="coerce").fillna(0) / 60000
-    event_weights = {
-        "jio_play": 1.0, "play_start": 1.0,
-        "jio_like": 1.0, "like": 1.0,
-        "jio_skip": 1.0, "skip": 1.0,
-    }
     plays = events[events["event_type"].isin(["jio_play", "play_start"])]
     likes = events[events["event_type"].isin(["jio_like", "like"])]
     skips = events[events["event_type"].isin(["jio_skip", "skip"])]
@@ -551,6 +551,16 @@ def render_admin_dashboard() -> None:
             metadata_rows.append({})
     metadata = pd.DataFrame(metadata_rows)
     if not metadata.empty:
+        source_counts = metadata.get("feature_source", pd.Series(dtype=str)).fillna("unknown").value_counts()
+        matched = int(source_counts.get("local_audio_catalog", 0))
+        fallback = int(source_counts.get("live_metadata_fallback", 0))
+        st.subheader("Live feature enrichment")
+        q1, q2, q3 = st.columns(3)
+        q1.metric("Live items enriched", matched)
+        q2.metric("Metadata fallback", fallback)
+        q3.metric("Feature match rate", f"{matched / max(1, matched + fallback) * 100:.1f}%")
+        st.bar_chart(source_counts.rename("events"))
+
         st.subheader("Most played artists")
         artists = metadata.get("artists", pd.Series(dtype=str)).fillna("").astype(str)
         artist_counts = artists.str.split(",").explode().str.strip()
@@ -585,6 +595,15 @@ def render_admin_dashboard() -> None:
     m3.metric("Matrix density", f"{len(interactions) / matrix_cells * 100:.2f}%")
     m4.metric("Like rate", f"{len(likes) / max(1, len(plays)) * 100:.1f}%")
     st.caption("Low matrix density means the system should rely more on content, mood and cold-start signals than collaborative filtering.")
+
+    model_table = pd.DataFrame({
+        "signal": ["content", "collaborative/MF", "session transition", "popularity", "diversity"],
+        "weight_or_rule": ["50%", "25%", "15%", "10%", "artist/album/recent penalties"],
+    })
+    with st.expander("Live model configuration", expanded=False):
+        st.dataframe(model_table, width="stretch", hide_index=True)
+        st.caption("MiniBatchKMeans clusters the local audio catalog; matched live songs inherit those features. Unmatched songs use metadata fallback.")
+        st.bar_chart(data["cluster_id"].value_counts().sort_index().rename("catalog_tracks"))
 
 
 if user_store.is_admin(local_user_id):
