@@ -229,6 +229,7 @@ hybrid_engine = build_hybrid_engine(engine)
 st.session_state.setdefault("local_session_id", uuid.uuid4().hex)
 st.session_state.setdefault("jio_search_cache_v2", {})
 st.session_state.setdefault("jio_loop", False)
+st.session_state.setdefault("scroll_to_player", False)
 # Migrate the old queue behavior: older sessions stored search results here.
 if "jio_queue_index" in st.session_state:
     st.session_state.pop("jio_queue", None)
@@ -789,6 +790,7 @@ else:
                             # Set the selected song first; recommendation
                             # fetching must never make the player disappear.
                             st.session_state["jio_now_playing"] = item
+                            st.session_state["scroll_to_player"] = True
                             st.session_state["jio_queue"] = []
                             st.session_state["jio_current_track_id"] = str(
                                 item.get("song_id") or item.get("title", "")
@@ -873,6 +875,7 @@ if jio_now and (
     except Exception:
         pass
 if jio_now:
+    st.html("<div id='tune-match-player-anchor'></div>")
     st.markdown('<div class="shelf-title">TuneMatch player</div>', unsafe_allow_html=True)
     now_cols = st.columns([1, 3, 1, 1])
     with now_cols[0]:
@@ -969,6 +972,7 @@ if jio_now:
         with banner_right:
             if st.button("▶ Play next", key=f"featured_play_{featured.get('song_id') or featured.get('title')}", width="stretch"):
                 st.session_state["jio_now_playing"] = featured
+                st.session_state["scroll_to_player"] = True
                 old_queue = list(up_next)
                 st.session_state["jio_queue"] = []
                 st.session_state["jio_current_track_id"] = str(featured.get("song_id") or featured.get("title", ""))
@@ -1002,6 +1006,7 @@ if jio_now:
                             # context. Rebuild the queue from that song instead
                             # of merely playing the old queue's remainder.
                             st.session_state["jio_now_playing"] = item
+                            st.session_state["scroll_to_player"] = True
                             old_queue = list(up_next)
                             st.session_state["jio_queue"] = []
                             st.session_state["jio_current_track_id"] = str(
@@ -1034,6 +1039,16 @@ if jio_now:
                             st.rerun()
     else:
         st.caption("No more personalized recommendations in this queue.")
+    if st.session_state.pop("scroll_to_player", False):
+        st.html(
+            """
+            <script>
+            const anchor = document.getElementById('tune-match-player-anchor');
+            if (anchor) anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            </script>
+            """,
+            unsafe_allow_javascript=True,
+        )
     if st.button("↻ Refresh recommendations", key="refresh_recommendations"):
         refresh_hybrid_model(force=True)
         cached_results = st.session_state.get("jio_search_cache_v2", {}).get(search_query, [])
