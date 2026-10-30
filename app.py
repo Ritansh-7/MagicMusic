@@ -153,6 +153,7 @@ INTENT_TERMS = {
     "sad": {"sad", "heartbreak", "alone", "broken", "dard", "udaas", "tanha", "judai"},
     "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "shiva", "ram", "allah", "khuda"},
     "calm": {"acoustic", "unplugged", "lofi", "sleep", "calm", "peace", "sukoon", "soothing", "instrumental"},
+    "acoustic_indie": {"acoustic", "unplugged", "indie", "folk", "singer songwriter", "singer-songwriter", "coke studio", "soul"},
 }
 
 
@@ -216,7 +217,7 @@ def infer_metadata_mood(item: dict) -> dict:
         "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "dil", "jaan", "saiyaara"},
         "sad": {"sad", "heartbreak", "alone", "broken", "dard", "udaas"},
         "instrumental": {"theme", "score", "background", "instrumental", "bgm", "soundtrack"},
-        "acoustic": {"acoustic", "unplugged", "lofi", "slowed", "reverb"},
+        "acoustic_indie": {"acoustic", "unplugged", "indie", "folk", "singer songwriter", "singer-songwriter", "coke studio", "lofi", "slowed", "reverb"},
     }
     tokens = set(re.findall(r"[a-z0-9]+", text))
     matched = {
@@ -231,13 +232,13 @@ def infer_metadata_mood(item: dict) -> dict:
         vector.update(energy=0.45, tempo=88.0, valence=0.62, danceability=0.42, acousticness=0.45, loudness=-11.0)
     if "instrumental" in matched:
         vector.update(instrumentalness=0.88, speechiness=0.02, acousticness=0.52)
-    if "acoustic" in matched:
+    if "acoustic_indie" in matched:
         vector.update(energy=0.35, tempo=82.0, acousticness=0.78, instrumentalness=0.25, loudness=-14.0)
     labels = sorted(matched) or ["neutral"]
     return {
         "mood_vector": _mood_vector(vector),
         "mood_label": ", ".join(labels),
-        "mood_confidence": 0.62 if matched else 0.22,
+        "mood_confidence": 0.72 if matched else 0.22,
         "mood_source": "metadata_fallback",
     }
 
@@ -823,10 +824,17 @@ def build_jio_up_next(
             f"bollywood songs from {seed_year}",
             f"songs like {title} {decade}s" if title else "",
         ])
-    fallback_queries = [
-        "popular songs", "trending songs", "bollywood songs",
-        "classic songs", "romantic songs", "old songs",
-    ]
+    # Do not fill a seed-specific radio queue with global popular/romantic
+    # pages. Those pages create the exact failure mode where an acoustic indie
+    # song receives unrelated Bollywood recommendations. Every fallback must
+    # retain at least the seed artist, intent or title context.
+    fallback_queries = []
+    if title:
+        fallback_queries.extend([f"songs like {title}", f"{title} similar songs"])
+    if verified_intents:
+        fallback_queries.extend(f"{intent} hindi songs" for intent in sorted(verified_intents) if intent != "general")
+    if not fallback_queries and artist_names:
+        fallback_queries.extend(f"{artist} songs" for artist in artist_names[:2])
     collected: list[dict] = []
     seen: set[str] = set()
     normalize_title = lambda value: re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
@@ -885,10 +893,7 @@ def build_jio_up_next(
             ])
         if seed_year:
             decade = (seed_year // 10) * 10
-            broad_queries.extend([
-                f"hindi songs {decade}s",
-                f"bollywood hits {decade}s",
-            ])
+            broad_queries.append(f"hindi songs {decade}s")
             broad_queries.extend(
                 f"{intent} songs {decade}s"
                 for intent in sorted(verified_intents) if intent != "general"

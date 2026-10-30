@@ -124,6 +124,11 @@ consecutive same-artist penalty: 0.30
 
 Weak fallback songs are removed when they do not meet the current mood/context gate. This prevents the same singer from filling the entire queue while preserving strong relevance.
 
+For live songs without native audio features, metadata semantics are used only
+as low-confidence evidence. A confident acoustic/indie, ghazal, motivational,
+romantic or devotional seed rejects candidates with a conflicting intent, and
+generic popular/trending pages are never used as a seed-specific fallback.
+
 ## Real-time behavior
 
 - Search answers the user’s query.

@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 ERA_COMPATIBILITY_WINDOW_YEARS = 30
-HYBRID_MODEL_VERSION = "hybrid-v5-audio-ltr"
+HYBRID_MODEL_VERSION = "hybrid-v6-semantic-gated"
 
 
 def _metadata_feature_tokens(item: dict) -> dict[str, float]:
@@ -570,7 +570,7 @@ class HybridRecommendationEngine:
             "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "dil", "jaan", "saiyaara"},
             "sad": {"sad", "heartbreak", "alone", "broken", "dard", "udaas"},
             "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "shiva", "ram"},
-            "lofi": {"lofi", "acoustic", "unplugged", "instrumental", "slowed", "reverb"},
+            "acoustic_indie": {"lofi", "acoustic", "unplugged", "instrumental", "slowed", "reverb", "indie", "folk", "coke studio", "singer songwriter"},
         }
         seed_tokens = set(re.findall(r"[a-z0-9]+", seed_text))
         seed_styles = {
@@ -863,6 +863,23 @@ class HybridRecommendationEngine:
                 if has_seed and bool(item.get("_language_conflict", False)):
                     continue
                 if bool(item.get("_intent_conflict", False)):
+                    continue
+                # A confident seed intent is a hard semantic contract. A
+                # candidate with no evidence for that intent is not allowed
+                # merely because it is popular or from a similar era. Same
+                # artist/album/cluster is the only safe exception.
+                candidate_intents = set(item.get("intent_labels", [])) - {"general"}
+                if (
+                    has_seed
+                    and seed_intents
+                    and not candidate_intents
+                    and float(item.get("mood_confidence", 0.0) or 0.0) < 0.65
+                    and not (
+                        float(item.get("_seed_artist_match", 0.0))
+                        or float(item.get("_album_match", 0.0))
+                        or float(item.get("_cluster_match", 0.0))
+                    )
+                ):
                     continue
                 if not relaxed_context and has_seed and not strong_context and float(item.get("_profile_score", 0.0)) < 0.35:
                     continue
