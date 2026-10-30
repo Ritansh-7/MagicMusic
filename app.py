@@ -1399,6 +1399,35 @@ if jio_now and (
     except Exception:
         pass
 if jio_now:
+    # Rebuild the queue automatically whenever the actual player seed changes.
+    # Manual refresh remains optional; autoplay, Next and Like all converge on
+    # the same current-song context.
+    current_queue_seed = str(jio_now.get("song_id") or jio_now.get("title", ""))
+    queue_seed = st.session_state.get("jio_queue_seed_id")
+    if queue_seed != current_queue_seed:
+        current_queue = list(st.session_state.get("jio_queue", []))
+        if current_queue:
+            # A play/Next handler already built this queue in this rerun.
+            st.session_state["jio_queue_seed_id"] = current_queue_seed
+        elif st.session_state.get("jio_queue_attempted_id") != current_queue_seed:
+            st.session_state["jio_queue_attempted_id"] = current_queue_seed
+            try:
+                cached_results = st.session_state.get("jio_search_cache_v2", {}).get(
+                    search_query.strip().lower(), []
+                )
+                st.session_state["jio_queue"] = build_jio_up_next(
+                    jio_now,
+                    cached_results,
+                    jio_client,
+                    hybrid_engine,
+                    local_user_id,
+                    data,
+                    preferred_track_ids,
+                    exclude_items=[jio_now],
+                )
+                st.session_state["jio_queue_seed_id"] = current_queue_seed
+            except Exception:
+                st.session_state["jio_queue"] = []
     st.html("<div id='tune-match-player-anchor'></div>")
     st.markdown('<div class="shelf-title">TuneMatch player</div>', unsafe_allow_html=True)
     now_cols = st.columns([1, 3, 1, 1])
@@ -1436,6 +1465,8 @@ if jio_now:
         if current_id in liked_ids:
             st.success("♥ Liked")
         elif st.button("♡ Like this song", key=f"player_like_{current_id}", width="stretch"):
+            st.session_state.pop("jio_queue_seed_id", None)
+            st.session_state.pop("jio_queue_attempted_id", None)
             log_behavior("jio_like", current_id, metadata=jio_now)
             refresh_hybrid_model(force=True)
             existing_queue = list(st.session_state.get("jio_queue", []))
@@ -1449,6 +1480,7 @@ if jio_now:
                     preferred_track_ids,
                     seed=jio_now,
                 )[:70]
+                st.session_state["jio_queue_seed_id"] = current_id
             else:
                 cached_results = st.session_state.get("jio_search_cache_v2", {}).get(search_query.strip().lower(), [])
                 try:
@@ -1462,6 +1494,7 @@ if jio_now:
                         preferred_track_ids,
                         exclude_items=[jio_now],
                     )
+                    st.session_state["jio_queue_seed_id"] = current_id
                 except Exception:
                     st.session_state["jio_queue"] = []
             st.toast("Added to your likes and taste profile")
