@@ -147,7 +147,7 @@ MOOD_VECTOR_FEATURES = (
 
 INTENT_TERMS = {
     "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "pyar", "dil", "jaan", "saiyaara"},
-    "ghazal": {"ghazal", "ghazals", "shayar", "shayari", "mehfil", "rekhta"},
+    "ghazal": {"ghazal", "ghazals", "shayar", "shayari", "mehfil", "rekhta", "ghulam ali", "ghulam ali classics", "ustad bade ghulam ali", "ghulam ali khan", "chupke chupke classics"},
     "motivational": {"motivation", "motivational", "zinda", "jeet", "victory", "fighter", "warrior", "rise", "goal", "inspire"},
     "energetic": {"fight", "anthem", "rock", "power", "action", "dance", "party", "bhangra", "bang", "fire", "dhamaka", "dhamaal", "high", "energy"},
     "sad": {"sad", "heartbreak", "alone", "broken", "dard", "udaas", "tanha", "judai"},
@@ -218,6 +218,7 @@ def infer_metadata_mood(item: dict) -> dict:
         "sad": {"sad", "heartbreak", "alone", "broken", "dard", "udaas"},
         "instrumental": {"theme", "score", "background", "instrumental", "bgm", "soundtrack"},
         "acoustic_indie": {"acoustic", "unplugged", "indie", "folk", "singer songwriter", "singer-songwriter", "coke studio", "lofi", "slowed", "reverb"},
+        "ghazal": {"ghazal", "ghazals", "shayar", "shayari", "mehfil", "rekhta", "ghulam ali", "ghulam ali classics", "ustad bade ghulam ali", "ghulam ali khan", "chupke chupke classics"},
     }
     tokens = set(re.findall(r"[a-z0-9]+", text))
     matched = {
@@ -234,6 +235,8 @@ def infer_metadata_mood(item: dict) -> dict:
         vector.update(instrumentalness=0.88, speechiness=0.02, acousticness=0.52)
     if "acoustic_indie" in matched:
         vector.update(energy=0.35, tempo=82.0, acousticness=0.78, instrumentalness=0.25, loudness=-14.0)
+    if "ghazal" in matched:
+        vector.update(energy=0.28, tempo=72.0, valence=0.38, danceability=0.25, acousticness=0.76, instrumentalness=0.12, loudness=-15.0)
     labels = sorted(matched) or ["neutral"]
     return {
         "mood_vector": _mood_vector(vector),
