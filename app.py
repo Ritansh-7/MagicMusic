@@ -686,6 +686,8 @@ with st.sidebar:
     if local_user_id:
         summary = cached_user_summary(local_user_id)
         st.success("Signed in")
+        if st.session_state.get("auth_storage_warning"):
+            st.warning(st.session_state.pop("auth_storage_warning"))
         st.caption(f"{summary['tracks_played']} tracks played · {summary['likes']} likes")
         if st.session_state.get("local_session_started_at"):
             minutes = (time.time() - st.session_state["local_session_started_at"]) / 60
@@ -716,10 +718,26 @@ with st.sidebar:
             password = st.text_input("Password", type="password")
             submitted = st.form_submit_button(auth_mode, width="stretch")
         if submitted:
-            if is_new_user:
-                ok, message = user_store.register(email, password)
-            else:
-                ok, message = user_store.authenticate(email, password)
+            try:
+                if is_new_user:
+                    ok, message = user_store.register(email, password)
+                else:
+                    ok, message = user_store.authenticate(email, password)
+            except Exception:
+                # A remote MySQL timeout must not break the auth screen. For a
+                # new account, preserve the user's progress in local storage;
+                # the cloud store will be used again after the app is rebooted
+                # and DATABASE_URL/Aiven connectivity is fixed.
+                if is_new_user and database_url and user_store.uses_mysql:
+                    user_store = build_user_store(str(EVENT_DB_PATH), "")
+                    ok, message = user_store.register(email, password)
+                    if ok:
+                        st.session_state["auth_storage_warning"] = (
+                            "Cloud database timed out. Your account is currently saved in temporary app storage; "
+                            "fix Aiven connectivity before relying on persistent analytics."
+                        )
+                else:
+                    ok, message = False, "Database is temporarily unavailable. Please try again shortly."
             if ok:
                 st.session_state["local_user_id"] = message
                 st.session_state["local_session_started_at"] = time.time()
