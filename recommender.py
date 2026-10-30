@@ -944,7 +944,6 @@ class HybridRecommendationEngine:
                     has_seed
                     and seed_intents
                     and not candidate_intents
-                    and float(item.get("mood_confidence", 0.0) or 0.0) < 0.65
                     and not (
                         float(item.get("_seed_artist_match", 0.0))
                         or float(item.get("_album_match", 0.0))
