@@ -71,7 +71,7 @@ SPOTIFY_REDIRECT_URI = "http://127.0.0.1:8501"
 
 Live mode uses Spotify OAuth and requests only `user-read-private`, `user-top-read`, `user-read-recently-played`, and `user-library-read`. It syncs the current user's profile, top tracks, recent plays, and saved tracks. Live catalog search links back to Spotify; this app does not download or rehost audio.
 
-The app stores only explicit recommendation events (`recommendation_seed`, `like`, and `dislike`) in `tune_match_events.sqlite3`. Access and refresh tokens remain in the Streamlit session and are not written to the database. For production, move the event store to a protected server database, add a privacy/consent screen, encrypt secrets, and implement deletion/export controls.
+For local development, the app uses `tune_match_events.sqlite3`. For Streamlit Community Cloud or Render, add a persistent PostgreSQL `DATABASE_URL` in the platform's secrets/settings. The app automatically switches to PostgreSQL for users, password hashes, likes, skips, plays, listening time and recommendation events, so data survives app restarts and redeploys. Never commit the real connection string.
 
 Spotify data can improve personalization, but it is not automatically a good training set. Use explicit feedback and time-aware evaluation, separate users between train/validation/test, and never train on data without user consent.
 
@@ -84,7 +84,7 @@ Build command: pip install -r requirements.txt
 Start command: streamlit run app.py --server.address=0.0.0.0 --server.port=$PORT
 ```
 
-The included `render.yaml` contains the same configuration. Add `TUNEMATCH_ADMIN_EMAIL` as a Render environment variable for the admin dashboard. The local SQLite database is ephemeral on Render's free tier, so use an external persistent database before production; otherwise user accounts and events can disappear after a redeploy or restart.
+The included `render.yaml` contains the same configuration. Add `TUNEMATCH_ADMIN_EMAIL` and `DATABASE_URL` as Render environment variables for the admin dashboard and persistent user data.
 
 ## Run tests
 

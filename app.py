@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import time
 import uuid
 import re
@@ -6,7 +7,6 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 import streamlit as st
-from event_store import EventStore
 from jiosaavn_client import JioSaavnClient
 from recommender import HybridRecommendationEngine, SpotifyRecommendationEngine
 from spotify_api import SpotifyOAuth, new_oauth_state, verify_oauth_state
@@ -43,6 +43,17 @@ DATA_PATH = Path(__file__).parent / "spotify_tracks_data.csv"
 EVENT_DB_PATH = Path(__file__).parent / "tune_match_events.sqlite3"
 HISTORY_PATH = Path(__file__).parent / "spotify_history.csv"
 
+
+def configured_database_url() -> str:
+    """Use persistent cloud Postgres when configured, otherwise local SQLite."""
+    database_url = os.getenv("DATABASE_URL", "").strip()
+    if database_url:
+        return database_url
+    try:
+        return str(st.secrets.get("DATABASE_URL", "")).strip()
+    except (FileNotFoundError, KeyError, AttributeError):
+        return ""
+
 @st.cache_data
 def load_data(path):
     return pd.read_csv(path)
@@ -62,8 +73,7 @@ data = load_data(DATA_PATH)
 imported_history = load_imported_history(HISTORY_PATH)
 engine = build_engine(data)
 stats = engine.catalog_stats()
-event_store = EventStore(EVENT_DB_PATH)
-user_store = UserStore(EVENT_DB_PATH)
+user_store = UserStore(EVENT_DB_PATH, database_url=configured_database_url())
 jio_client = JioSaavnClient()
 hybrid_engine = HybridRecommendationEngine(engine)
 hybrid_engine.fit(user_store.interaction_events())

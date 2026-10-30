@@ -8,6 +8,13 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except ImportError:  # PostgreSQL is only required when DATABASE_URL is configured.
+    psycopg = None
+    dict_row = None
+
 
 class UserStore:
     """Local account and behavior store for the demo app.
@@ -15,18 +22,57 @@ class UserStore:
     Passwords are salted PBKDF2 hashes; raw passwords are never stored.
     """
 
-    def __init__(self, path: str | Path | None = None):
+    def __init__(self, path: str | Path | None = None, database_url: str | None = None):
+        self.database_url = (database_url or os.getenv("DATABASE_URL", "")).strip()
+        if self.database_url and psycopg is None:
+            raise RuntimeError("DATABASE_URL is configured, but psycopg is not installed.")
         self.path = Path(path or os.getenv("TUNEMATCH_DB_PATH", "tune_match_events.sqlite3"))
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.database_url:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
+    @property
+    def uses_postgres(self) -> bool:
+        return bool(self.database_url)
+
+    def _sql(self, query: str) -> str:
+        return query.replace("?", "%s") if self.uses_postgres else query
+
+    def _connect(self):
+        if self.uses_postgres:
+            return psycopg.connect(self.database_url, row_factory=dict_row)
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
         return connection
 
     def _initialize(self) -> None:
         with self._connect() as connection:
+            if self.uses_postgres:
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS users (
+                        id BIGSERIAL PRIMARY KEY,
+                        email TEXT UNIQUE NOT NULL,
+                        password_hash TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS behavior_events (
+                        id BIGSERIAL PRIMARY KEY,
+                        user_id BIGINT NOT NULL REFERENCES users(id),
+                        track_id TEXT,
+                        event_type TEXT NOT NULL,
+                        session_id TEXT NOT NULL,
+                        duration_ms BIGINT DEFAULT 0,
+                        metadata_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL
+                    )
+                    """
+                )
+                return
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS users (
@@ -74,18 +120,23 @@ class UserStore:
             return False, "Use a valid email and a password with at least 8 characters."
         try:
             with self._connect() as connection:
+                query = "INSERT INTO users(email, password_hash, created_at) VALUES (?, ?, ?)"
+                if self.uses_postgres:
+                    query += " RETURNING id"
                 cursor = connection.execute(
-                    "INSERT INTO users(email, password_hash, created_at) VALUES (?, ?, ?)",
+                    self._sql(query),
                     (email, self._hash_password(password), datetime.now(timezone.utc).isoformat()),
                 )
+                if self.uses_postgres:
+                    return True, str(cursor.fetchone()["id"])
                 return True, str(cursor.lastrowid)
-        except sqlite3.IntegrityError:
+        except (sqlite3.IntegrityError, getattr(getattr(psycopg, "errors", None), "UniqueViolation", RuntimeError)):
             return False, "An account with this email already exists."
 
     def authenticate(self, email: str, password: str) -> tuple[bool, str]:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT id, email, password_hash FROM users WHERE email = ?",
+                self._sql("SELECT id, email, password_hash FROM users WHERE email = ?"),
                 (email.strip().lower(),),
             ).fetchone()
         if not row or not self._verify_password(password, row["password_hash"]):
@@ -95,7 +146,7 @@ class UserStore:
     def user_email(self, user_id: str) -> str:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT email FROM users WHERE id = ?",
+                self._sql("SELECT email FROM users WHERE id = ?"),
                 (str(user_id),),
             ).fetchone()
         return str(row["email"]) if row else ""
@@ -135,11 +186,11 @@ class UserStore:
     ) -> None:
         with self._connect() as connection:
             connection.execute(
-                """
+                self._sql("""
                 INSERT INTO behavior_events
                     (user_id, track_id, event_type, session_id, duration_ms, metadata_json, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
+                """),
                 (str(user_id), track_id, event_type, session_id, int(duration_ms), metadata_json,
                  datetime.now(timezone.utc).isoformat()),
             )
@@ -147,7 +198,7 @@ class UserStore:
     def liked_track_ids(self, user_id: str) -> list[str]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT DISTINCT track_id FROM behavior_events WHERE user_id = ? AND event_type = 'like' AND track_id IS NOT NULL",
+                self._sql("SELECT DISTINCT track_id FROM behavior_events WHERE user_id = ? AND event_type = 'like' AND track_id IS NOT NULL"),
                 (str(user_id),),
             ).fetchall()
         return [str(row["track_id"]) for row in rows]
@@ -169,7 +220,7 @@ class UserStore:
         parameters = (str(user_id), str(session_id)) if session_id else (str(user_id),)
         with self._connect() as connection:
             row = connection.execute(
-                f"""
+                self._sql(f"""
                 SELECT
                     COUNT(*) AS events,
                     COUNT(DISTINCT CASE WHEN event_type IN ('play_start', 'jio_play') THEN track_id END) AS tracks_played,
@@ -177,7 +228,7 @@ class UserStore:
                     COUNT(CASE WHEN event_type IN ('skip', 'jio_skip') THEN 1 END) AS skips,
                     COALESCE(SUM(duration_ms), 0) AS listening_ms
                 FROM behavior_events WHERE user_id = ?{session_clause}
-                """,
+                """),
                 parameters,
             ).fetchone()
         return {key: int(row[key] or 0) for key in row.keys()}
