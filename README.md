@@ -45,6 +45,8 @@ instrumentalness, speechiness, liveness, loudness, popularity
 
 When no local match exists, the system does not invent audio features. It uses metadata fallback signals: artist, album, language, year, title and session context.
 
+For fast live ranking, unmatched JioSaavn songs also receive a low-confidence metadata mood vector inferred from title, album and artist terms (for example energetic, romantic, sad, instrumental or acoustic). This avoids downloading and analysing dozens of previews during every queue build. Exact local matches use the catalog audio-feature vector with higher confidence.
+
 ### Mood/style clustering
 
 `MiniBatchKMeans` clusters the local catalog using standardized audio features. The model learns up to 24 fast mood/style clusters, such as old acoustic, romantic Bollywood, high-energy dance, slow/sad and instrumental styles. A matched live song inherits its local cluster ID, and cluster similarity becomes part of ranking.
@@ -78,10 +80,11 @@ For every candidate song `i`, the current hybrid score is:
 
 ```text
 score(i) =
-    0.50 × content_similarity(i)
-  + 0.25 × collaborative_score(i)
+    0.60 × current_song_context(i)
+  + 0.15 × user_taste(i)
   + 0.15 × transition_score(i)
-  + 0.10 × popularity_score(i)
+  + 0.05 × collaborative_score(i)
+  + 0.05 × popularity_score(i)
 ```
 
 For the current live song, seed-content similarity uses:
@@ -97,12 +100,13 @@ For the current live song, seed-content similarity uses:
 The final reranker applies:
 
 ```text
-artist repeat penalty: 0.22 per previous occurrence
-album repeat penalty: 0.05 per previous occurrence
-recently played penalty: 0.12
+duplicate/recently played songs: removed
+artist repeat penalty: 0.42 per previous occurrence
+album repeat penalty: 0.10 per previous occurrence
+consecutive same-artist penalty: 0.30
 ```
 
-This prevents the same singer from filling the entire queue while preserving strong relevance.
+Weak fallback songs are removed when they do not meet the current mood/context gate. This prevents the same singer from filling the entire queue while preserving strong relevance.
 
 ## Real-time behavior
 

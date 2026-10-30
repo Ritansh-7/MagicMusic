@@ -135,6 +135,10 @@ MOOD_FEATURES = (
     "energy", "tempo", "valence", "danceability", "acousticness",
     "instrumentalness", "speechiness", "liveness", "loudness", "popularity",
 )
+MOOD_VECTOR_FEATURES = (
+    "energy", "tempo", "valence", "danceability", "acousticness",
+    "instrumentalness", "speechiness", "liveness", "loudness", "popularity",
+)
 
 
 @st.cache_resource
@@ -162,6 +166,63 @@ def _compact_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
 
 
+def _mood_vector(values: dict) -> list[float]:
+    """Convert mixed live/catalog features into a cheap comparable vector."""
+    vector = []
+    for feature in MOOD_VECTOR_FEATURES:
+        value = pd.to_numeric(values.get(feature, 0.0), errors="coerce")
+        value = float(value) if pd.notna(value) else 0.0
+        if feature == "tempo":
+            value /= 200.0
+        elif feature == "loudness":
+            value = (value + 60.0) / 60.0
+        elif feature == "popularity":
+            value /= 100.0
+        vector.append(max(0.0, min(1.0, value)))
+    return vector
+
+
+def infer_metadata_mood(item: dict) -> dict:
+    """Fast mood fallback for live songs without a local audio match.
+
+    This intentionally avoids downloading every live preview. It gives the
+    ranker a low-cost, low-confidence vector until an audio-feature match is
+    available from the local catalog.
+    """
+    text = " ".join(str(item.get(field, "")) for field in ("title", "album", "artists", "language")).lower()
+    vector = {
+        "energy": 0.50, "tempo": 100.0, "valence": 0.50, "danceability": 0.50,
+        "acousticness": 0.40, "instrumentalness": 0.15, "speechiness": 0.10,
+        "liveness": 0.20, "loudness": -12.0, "popularity": 35.0,
+    }
+    labels = []
+    groups = {
+        "energetic": {"fight", "anthem", "rock", "zinda", "sultan", "power", "action", "dance", "party", "bhangra", "bang", "fire", "dhamaka", "warrior", "bhaag", "milkha"},
+        "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "dil", "jaan", "saiyaara"},
+        "sad": {"sad", "heartbreak", "alone", "broken", "dard", "udaas"},
+        "instrumental": {"theme", "score", "background", "instrumental", "bgm", "soundtrack"},
+        "acoustic": {"acoustic", "unplugged", "lofi", "slowed", "reverb"},
+    }
+    matched = {label for label, words in groups.items() if any(word in text for word in words)}
+    if "energetic" in matched:
+        vector.update(energy=0.85, tempo=135.0, valence=0.72, danceability=0.72, acousticness=0.18, loudness=-6.0)
+    elif "sad" in matched:
+        vector.update(energy=0.30, tempo=72.0, valence=0.20, danceability=0.25, acousticness=0.58, loudness=-15.0)
+    elif "romantic" in matched:
+        vector.update(energy=0.45, tempo=88.0, valence=0.62, danceability=0.42, acousticness=0.45, loudness=-11.0)
+    if "instrumental" in matched:
+        vector.update(instrumentalness=0.88, speechiness=0.02, acousticness=0.52)
+    if "acoustic" in matched:
+        vector.update(energy=0.35, tempo=82.0, acousticness=0.78, instrumentalness=0.25, loudness=-14.0)
+    labels = sorted(matched) or ["neutral"]
+    return {
+        "mood_vector": _mood_vector(vector),
+        "mood_label": ", ".join(labels),
+        "mood_confidence": 0.62 if matched else 0.22,
+        "mood_source": "metadata_fallback",
+    }
+
+
 @st.cache_resource
 def build_live_catalog_lookup(data: pd.DataFrame) -> dict[tuple[str, str], dict]:
     lookup: dict[tuple[str, str], dict] = {}
@@ -179,6 +240,10 @@ def build_live_catalog_lookup(data: pd.DataFrame) -> dict[tuple[str, str], dict]
                 for column in MOOD_FEATURES
             },
         }
+        lookup[(title, artist)]["mood_vector"] = _mood_vector(lookup[(title, artist)])
+        lookup[(title, artist)]["mood_label"] = "audio-features"
+        lookup[(title, artist)]["mood_confidence"] = 0.95
+        lookup[(title, artist)]["mood_source"] = "local_audio_catalog"
     return lookup
 
 
@@ -196,6 +261,7 @@ def enrich_live_items(items: list[dict]) -> list[dict]:
             item.update(match)
         else:
             item.setdefault("feature_source", "live_metadata_fallback")
+            item.update({key: value for key, value in infer_metadata_mood(item).items() if key not in item})
     return items
 
 
@@ -411,6 +477,9 @@ def build_jio_up_next(
     exclude_items: list[dict] | None = None,
 ) -> list[dict]:
     """Build a separate recommendation queue; never reuse search results."""
+    # Ensure the playing seed has the same mood representation as candidates,
+    # including when it came from the player refresh path rather than search.
+    seed = enrich_live_items([seed])[0]
     title = str(seed.get("title", "")).strip()
     artists = str(seed.get("artists", "")).strip()
     album = str(seed.get("album", "")).strip()

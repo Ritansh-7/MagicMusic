@@ -7,18 +7,19 @@ TuneMatch is a Spotify-inspired Streamlit music discovery application. It has tw
 1. A local catalog engine built from `spotify_tracks_data.csv`.
 2. A live music discovery layer that retrieves external song metadata and audio URLs, then ranks those results for the signed-in TuneMatch user.
 
-The current live ranking is a hybrid, sequence-aware recommender. It combines:
+The current live ranking is a hybrid, context-first, sequence-aware recommender. It combines:
 
 ```text
-content preference       50%
-collaborative/MF score   25%
+current-song context     60%
+user taste               15%
 next-track transitions   15%
-popularity               10%
+collaborative/MF score    5%
+popularity                5%
 ```
 
 The app records implicit feedback—plays, likes, skips, and listening duration—in SQLite. After a play, like, skip, or explicit refresh, the interaction model is refit and the `Up next for you` queue is rebuilt.
 
-The important production caveat is that the current external catalog does not provide the same audio-feature vector as the local dataset. Therefore, live external content matching currently uses artist/title preference signals, while the local catalog engine uses full genre, artist, and audio-feature similarity.
+The important production caveat is that the current external catalog does not provide the same audio-feature vector as the local dataset. Exact live-result matches inherit the local audio-feature vector. Unmatched results receive a fast, low-confidence metadata mood vector; the app deliberately avoids downloading and analysing every live preview during queue construction because that would add significant latency.
 
 ## 2. Product behavior
 
@@ -272,9 +273,15 @@ Collaborative filtering becomes useful only when:
 
 ## 7. Hybrid ranking of live results
 
-`rank_jio_results()` combines three normalized signals.
+`rank_jio_results()` combines current-song context, user taste, session transitions, collaborative signals and a small popularity prior.
 
-### 7.1 Live content score
+### 7.1 Fast live mood enrichment
+
+For exact normalized title/artist matches, the live item inherits the local catalog's numeric feature vector and MiniBatchKMeans cluster. For unmatched items, a lightweight keyword mapper infers a mood vector from title, album, artist and language text. It labels the result as `metadata_fallback` with lower confidence instead of pretending that an audio model analysed the track.
+
+This choice keeps search and queue latency low. A future offline worker can analyse previews with librosa or Essentia and replace the fallback vector without changing the ranker interface.
+
+### 7.2 Live content score
 
 For each external result, the engine checks:
 
@@ -285,28 +292,29 @@ Artist matches contribute up to 0.25 each and exact preferred-title matches cont
 
 This is a practical external-content bridge. It is not the same as full audio-vector similarity because the external result does not provide all local numeric audio features.
 
-### 7.2 Collaborative score
+### 7.3 Collaborative score
 
 The external `song_id` is looked up in the user-item factorization model. If that ID has appeared in behavior data, the latent user-item score is used. Otherwise it falls back to zero.
 
-### 7.3 Popularity score
+### 7.4 Popularity score
 
 Observed interaction totals are normalized and used as a small popularity prior. Unknown items receive zero for this internal popularity signal.
 
-### 7.4 Sequential transition score
+### 7.5 Sequential transition score
 
 The model records adjacent play transitions within a user session. If a user plays track A and then track B, the transition `A -> B` receives evidence. When A is the current seed, candidates previously observed after A receive an additional next-track score.
 
 This is a lightweight sequential recommender. It is not a transformer or reinforcement-learning model, but it gives the queue a session-aware signal beyond static similarity.
 
-### 7.5 Final formula
+### 7.6 Final formula
 
 ```text
 hybrid_score =
-    0.50 × content_score
-  + 0.25 × collaborative_score
+    0.60 × current_song_context
+  + 0.15 × user_taste
   + 0.15 × transition_score
-  + 0.10 × popularity_score
+  + 0.05 × collaborative_score
+  + 0.05 × popularity_score
 ```
 
 The results are sorted descending by this score.
