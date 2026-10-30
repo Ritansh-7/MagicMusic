@@ -12,7 +12,7 @@ import streamlit as st
 from sklearn.cluster import MiniBatchKMeans
 from sklearn.preprocessing import StandardScaler
 from jiosaavn_client import JioSaavnClient
-from recommender import HybridRecommendationEngine, SpotifyRecommendationEngine
+from recommender import HYBRID_MODEL_VERSION, HybridRecommendationEngine, SpotifyRecommendationEngine
 from spotify_api import SpotifyOAuth, new_oauth_state, verify_oauth_state
 from user_store import UserStore
 
@@ -981,7 +981,7 @@ def build_jio_up_next(
             log_behavior(
                 "recommendation_impression",
                 metadata={
-                    "model_version": "hybrid-v4-multistage",
+                    "model_version": HYBRID_MODEL_VERSION,
                     "seed_track_id": str(seed.get("song_id") or seed.get("title", "")),
                     "seed_title": seed.get("title", ""),
                     "items": [
