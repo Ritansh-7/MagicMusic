@@ -71,7 +71,7 @@ SPOTIFY_REDIRECT_URI = "http://127.0.0.1:8501"
 
 Live mode uses Spotify OAuth and requests only `user-read-private`, `user-top-read`, `user-read-recently-played`, and `user-library-read`. It syncs the current user's profile, top tracks, recent plays, and saved tracks. Live catalog search links back to Spotify; this app does not download or rehost audio.
 
-For local development, the app uses `tune_match_events.sqlite3`. For Streamlit Community Cloud or Render, add a persistent PostgreSQL `DATABASE_URL` in the platform's secrets/settings. The app automatically switches to PostgreSQL for users, password hashes, likes, skips, plays, listening time and recommendation events, so data survives app restarts and redeploys. Never commit the real connection string.
+For local development, the app uses `tune_match_events.sqlite3`. For Streamlit Community Cloud or Render, add a persistent MySQL or PostgreSQL `DATABASE_URL` in the platform's secrets/settings. The app automatically switches to the configured cloud database for users, password hashes, likes, skips, plays, listening time and recommendation events, so data survives app restarts and redeploys. Never commit the real connection string.
 
 Spotify data can improve personalization, but it is not automatically a good training set. Use explicit feedback and time-aware evaluation, separate users between train/validation/test, and never train on data without user consent.
 

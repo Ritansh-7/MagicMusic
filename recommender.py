@@ -498,13 +498,21 @@ class HybridRecommendationEngine:
                 if seed_year and item_year else 0.0
             )
             language_match = 1.0 if seed_language and language and seed_language == language else 0.0
+            seed_cluster = (seed or {}).get("cluster_id")
+            item_cluster = item.get("cluster_id")
+            cluster_match = (
+                1.0
+                if seed_cluster is not None and item_cluster is not None and str(seed_cluster) == str(item_cluster)
+                else 0.0
+            )
             # Metadata-level semantics: singer, album, era and language are
             # stronger evidence than title overlap alone for external songs.
             seed_content = (
-                0.48 * seed_artist_match
-                + 0.20 * album_match
-                + 0.20 * era_match
-                + 0.12 * language_match
+                0.40 * seed_artist_match
+                + 0.17 * album_match
+                + 0.16 * era_match
+                + 0.10 * language_match
+                + 0.17 * cluster_match
             )
             content.append(max(profile_content, seed_content))
             if seed_artist_match:
@@ -513,6 +521,8 @@ class HybridRecommendationEngine:
                 item["recommendation_reason"] = "Similar album or soundtrack"
             elif language_match and era_match >= 0.65:
                 item["recommendation_reason"] = "Similar language and era"
+            elif cluster_match:
+                item["recommendation_reason"] = "Similar mood and sound cluster"
             elif era_match >= 0.65:
                 item["recommendation_reason"] = "Similar era and listening style"
             elif artist_match:

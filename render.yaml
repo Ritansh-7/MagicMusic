@@ -10,3 +10,5 @@ services:
         sync: false
       - key: JIOSAAVN_API_URL
         value: https://saavnapi-nine.vercel.app
+      - key: DATABASE_URL
+        sync: false

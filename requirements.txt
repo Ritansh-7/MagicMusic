@@ -6,3 +6,4 @@ streamlit>=1.57,<2
 pytest>=7.0
 requests>=2.31
 psycopg[binary]>=3.2
+pymysql>=1.1

@@ -7,6 +7,7 @@ import secrets
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse, unquote
 
 try:
     import psycopg
@@ -14,6 +15,45 @@ try:
 except ImportError:  # PostgreSQL is only required when DATABASE_URL is configured.
     psycopg = None
     dict_row = None
+
+try:
+    import pymysql
+except ImportError:  # MySQL is optional for local SQLite development.
+    pymysql = None
+
+
+class _MySQLConnection:
+    """Small execute-compatible wrapper matching the SQLite/Postgres paths."""
+
+    def __init__(self, database_url: str):
+        parsed = urlparse(database_url)
+        self.connection = pymysql.connect(
+            host=parsed.hostname,
+            port=parsed.port or 3306,
+            user=unquote(parsed.username or ""),
+            password=unquote(parsed.password or ""),
+            database=(parsed.path or "").lstrip("/"),
+            charset="utf8mb4",
+            cursorclass=pymysql.cursors.DictCursor,
+            autocommit=False,
+        )
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            if exc_type:
+                self.connection.rollback()
+            else:
+                self.connection.commit()
+        finally:
+            self.connection.close()
+
+    def execute(self, query: str, parameters=()):
+        cursor = self.connection.cursor()
+        cursor.execute(query, parameters)
+        return cursor
 
 
 class UserStore:
@@ -24,8 +64,11 @@ class UserStore:
 
     def __init__(self, path: str | Path | None = None, database_url: str | None = None):
         self.database_url = (database_url or os.getenv("DATABASE_URL", "")).strip()
-        if self.database_url and psycopg is None:
-            raise RuntimeError("DATABASE_URL is configured, but psycopg is not installed.")
+        self.database_kind = self._database_kind(self.database_url)
+        if self.database_kind == "postgres" and psycopg is None:
+            raise RuntimeError("PostgreSQL DATABASE_URL is configured, but psycopg is not installed.")
+        if self.database_kind == "mysql" and pymysql is None:
+            raise RuntimeError("MySQL DATABASE_URL is configured, but pymysql is not installed.")
         self.path = Path(path or os.getenv("TUNEMATCH_DB_PATH", "tune_match_events.sqlite3"))
         if not self.database_url:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -33,14 +76,29 @@ class UserStore:
 
     @property
     def uses_postgres(self) -> bool:
-        return bool(self.database_url)
+        return self.database_kind == "postgres"
+
+    @property
+    def uses_mysql(self) -> bool:
+        return self.database_kind == "mysql"
+
+    @staticmethod
+    def _database_kind(database_url: str) -> str:
+        scheme = urlparse(database_url).scheme.lower()
+        if scheme.startswith("mysql"):
+            return "mysql"
+        if scheme.startswith("postgres") or scheme.startswith("postgresql"):
+            return "postgres"
+        return "sqlite"
 
     def _sql(self, query: str) -> str:
-        return query.replace("?", "%s") if self.uses_postgres else query
+        return query.replace("?", "%s") if (self.uses_postgres or self.uses_mysql) else query
 
     def _connect(self):
         if self.uses_postgres:
             return psycopg.connect(self.database_url, row_factory=dict_row)
+        if self.uses_mysql:
+            return _MySQLConnection(self.database_url)
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
         return connection
@@ -70,6 +128,35 @@ class UserStore:
                         metadata_json TEXT NOT NULL DEFAULT '{}',
                         created_at TEXT NOT NULL
                     )
+                    """
+                )
+                return
+            if self.uses_mysql:
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS users (
+                        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                        email VARCHAR(320) UNIQUE NOT NULL,
+                        password_hash TEXT NOT NULL,
+                        created_at VARCHAR(64) NOT NULL
+                    ) ENGINE=InnoDB
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS behavior_events (
+                        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                        user_id BIGINT NOT NULL,
+                        track_id TEXT,
+                        event_type VARCHAR(64) NOT NULL,
+                        session_id VARCHAR(128) NOT NULL,
+                        duration_ms BIGINT DEFAULT 0,
+                        metadata_json LONGTEXT NOT NULL,
+                        created_at VARCHAR(64) NOT NULL,
+                        INDEX idx_behavior_user (user_id),
+                        INDEX idx_behavior_created (created_at),
+                        CONSTRAINT fk_behavior_user FOREIGN KEY (user_id) REFERENCES users(id)
+                    ) ENGINE=InnoDB
                     """
                 )
                 return
@@ -130,7 +217,11 @@ class UserStore:
                 if self.uses_postgres:
                     return True, str(cursor.fetchone()["id"])
                 return True, str(cursor.lastrowid)
-        except (sqlite3.IntegrityError, getattr(getattr(psycopg, "errors", None), "UniqueViolation", RuntimeError)):
+        except (
+            sqlite3.IntegrityError,
+            getattr(getattr(psycopg, "errors", None), "UniqueViolation", RuntimeError),
+            getattr(getattr(pymysql, "err", None), "IntegrityError", RuntimeError),
+        ):
             return False, "An account with this email already exists."
 
     def authenticate(self, email: str, password: str) -> tuple[bool, str]:

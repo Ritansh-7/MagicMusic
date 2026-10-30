@@ -7,6 +7,8 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 import streamlit as st
+from sklearn.cluster import MiniBatchKMeans
+from sklearn.preprocessing import StandardScaler
 from jiosaavn_client import JioSaavnClient
 from recommender import HybridRecommendationEngine, SpotifyRecommendationEngine
 from spotify_api import SpotifyOAuth, new_oauth_state, verify_oauth_state
@@ -70,13 +72,83 @@ def build_engine(data):
     return SpotifyRecommendationEngine(data)
 
 
+MOOD_FEATURES = (
+    "energy", "tempo", "valence", "danceability", "acousticness",
+    "instrumentalness", "speechiness", "liveness", "loudness", "popularity",
+)
+
+
+@st.cache_resource
+def build_catalog_clusters(data: pd.DataFrame) -> tuple[pd.DataFrame, StandardScaler, MiniBatchKMeans]:
+    """Learn fast mood/style clusters from the local audio-feature catalog."""
+    frame = data.copy()
+    feature_frame = pd.DataFrame({
+        column: pd.to_numeric(frame.get(column, 0), errors="coerce")
+        for column in MOOD_FEATURES
+    }).fillna(0.0)
+    scaler = StandardScaler()
+    matrix = scaler.fit_transform(feature_frame)
+    cluster_count = max(2, min(24, max(2, len(frame) // 150)))
+    model = MiniBatchKMeans(
+        n_clusters=cluster_count,
+        batch_size=512,
+        n_init=3,
+        random_state=42,
+    )
+    frame["cluster_id"] = model.fit_predict(matrix)
+    return frame, scaler, model
+
+
+def _compact_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
+
+
+@st.cache_resource
+def build_live_catalog_lookup(data: pd.DataFrame) -> dict[tuple[str, str], dict]:
+    lookup: dict[tuple[str, str], dict] = {}
+    for row in data.itertuples(index=False):
+        title = _compact_key(getattr(row, "track_name", ""))
+        artists = str(getattr(row, "artists", "")).split(",")[0]
+        artist = _compact_key(artists)
+        if not title or not artist:
+            continue
+        lookup[(title, artist)] = {
+            "cluster_id": getattr(row, "cluster_id", None),
+            "feature_source": "local_audio_catalog",
+            **{
+                column: float(getattr(row, column, 0) or 0)
+                for column in MOOD_FEATURES
+            },
+        }
+    return lookup
+
+
+def enrich_live_items(items: list[dict]) -> list[dict]:
+    """Attach local audio features to live results when title/artist matches."""
+    for item in items:
+        title = _compact_key(item.get("title", ""))
+        artist_names = str(item.get("artists", "")).split(",")
+        match = None
+        for artist_name in artist_names:
+            match = live_catalog_lookup.get((title, _compact_key(artist_name)))
+            if match:
+                break
+        if match:
+            item.update(match)
+        else:
+            item.setdefault("feature_source", "live_metadata_fallback")
+    return items
+
+
 @st.cache_resource
 def build_hybrid_engine(content_engine):
     """Keep one fitted model service per app process instead of rebuilding it on every rerun."""
     return HybridRecommendationEngine(content_engine)
 
 
-data = load_data(DATA_PATH)
+raw_data = load_data(DATA_PATH)
+data, mood_scaler, mood_cluster_model = build_catalog_clusters(raw_data)
+live_catalog_lookup = build_live_catalog_lookup(data)
 imported_history = load_imported_history(HISTORY_PATH)
 engine = build_engine(data)
 stats = engine.catalog_stats()
@@ -350,7 +422,13 @@ def build_jio_up_next(
                 f"{artist} top 50 songs",
             ])
         collect_queries(broad_queries, page_limit=20)
-    ranked = hybrid.rank_jio_results(collected, user_id, catalog, preferred_track_ids, seed=seed)
+    ranked = hybrid.rank_jio_results(
+        enrich_live_items(collected),
+        user_id,
+        catalog,
+        preferred_track_ids,
+        seed=seed,
+    )
     unique: list[dict] = []
     used_titles: set[str] = set()
     for item in ranked:
@@ -564,7 +642,7 @@ else:
                 fallback_query = f"{guess['track_name']} {guess.get('album_name', '')}".strip()
                 jio_results = jio_client.search(fallback_query, limit=30)
         jio_results = hybrid_engine.rank_jio_results(
-            jio_results, local_user_id, data, preferred_track_ids
+            enrich_live_items(jio_results), local_user_id, data, preferred_track_ids
         )
         if jio_results:
             search_cache[search_query] = jio_results
