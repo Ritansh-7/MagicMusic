@@ -1196,10 +1196,18 @@ else:
                 guess = local_guess.iloc[0]
                 fallback_query = f"{guess['track_name']} {guess.get('album_name', '')}".strip()
                 jio_results = jio_client.search(fallback_query, limit=30)
-        jio_results = hybrid_engine.rank_jio_results(
-            enrich_live_items(jio_results), local_user_id, data, preferred_track_ids
-        )
-        jio_results = prioritize_search_results(jio_results, search_query)
+        raw_jio_results = list(jio_results or [])
+        try:
+            jio_results = hybrid_engine.rank_jio_results(
+                enrich_live_items(raw_jio_results), local_user_id, data, preferred_track_ids
+            )
+            jio_results = prioritize_search_results(jio_results, search_query)
+        except Exception:
+            # Live catalog search must remain usable even if one malformed
+            # metadata row breaks a personalization feature. Show the raw
+            # upstream results and let the next rerun retry ranking.
+            jio_results = raw_jio_results
+            st.info("Live results loaded. Personalization is refreshing for this search.")
         if jio_results:
             search_cache[search_cache_key] = jio_results
         if jio_results:
