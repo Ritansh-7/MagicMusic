@@ -245,10 +245,26 @@ def infer_music_intents(item: dict) -> list[str]:
         str(item.get(field, "")) for field in ("title", "album", "artists", "language")
     ).casefold()
     tokens = set(re.findall(r"[a-z0-9]+", text))
-    return [
+    labels = [
         label for label, terms in INTENT_TERMS.items()
         if any((term in text if " " in term else term in tokens) for term in terms)
-    ] or ["general"]
+    ]
+    # Numeric audio features provide a language/artist-independent drive
+    # signal. This catches motivational tracks whose title contains no mood
+    # keyword (for example a film title track).
+    try:
+        energy = float(item.get("energy", 0.0) or 0.0)
+        valence = float(item.get("valence", 0.0) or 0.0)
+        danceability = float(item.get("danceability", 0.0) or 0.0)
+        tempo = min(1.0, float(item.get("tempo", 0.0) or 0.0) / 140.0)
+        drive_score = 0.35 * energy + 0.30 * valence + 0.20 * danceability + 0.15 * tempo
+        if drive_score >= 0.62:
+            labels.append("motivational")
+        if energy >= 0.62 and tempo >= 0.55:
+            labels.append("energetic")
+    except (TypeError, ValueError):
+        pass
+    return sorted(set(labels)) or ["general"]
 
 
 @st.cache_resource
@@ -303,7 +319,7 @@ def enrich_live_items(items: list[dict]) -> list[dict]:
         # song/version-specific rule. This handles suffixes such as alternate
         # versions while preserving the upstream title and artwork.
         title_match = None
-        if not str(item.get("artists", "")).strip() and title:
+        if not match and title:
             best_score = 0.0
             for candidate in live_title_lookup:
                 candidate_title = candidate["title"]
@@ -314,7 +330,8 @@ def enrich_live_items(items: list[dict]) -> list[dict]:
                     best_score = score
                     title_match = candidate
             if title_match and best_score >= 0.72:
-                item["artists"] = title_match["artists"]
+                if not str(item.get("artists", "")).strip():
+                    item["artists"] = title_match["artists"]
                 match = live_catalog_lookup.get(
                     (title_match["title"], _compact_key(title_match["artists"].split(",")[0]))
                 )
