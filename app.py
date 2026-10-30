@@ -4,6 +4,7 @@ import time
 import uuid
 import re
 import json
+from difflib import SequenceMatcher
 from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 import streamlit as st
@@ -239,6 +240,7 @@ def build_live_catalog_lookup(data: pd.DataFrame) -> dict[tuple[str, str], dict]
         lookup[(title, artist)] = {
             "cluster_id": getattr(row, "cluster_id", None),
             "feature_source": "local_audio_catalog",
+            "catalog_artists": str(getattr(row, "artists", "")),
             **{
                 column: float(getattr(row, column, 0) or 0)
                 for column in MOOD_FEATURES
@@ -248,6 +250,18 @@ def build_live_catalog_lookup(data: pd.DataFrame) -> dict[tuple[str, str], dict]
         lookup[(title, artist)]["mood_label"] = "audio-features"
         lookup[(title, artist)]["mood_confidence"] = 0.95
         lookup[(title, artist)]["mood_source"] = "local_audio_catalog"
+    return lookup
+
+
+@st.cache_resource
+def build_live_title_lookup(data: pd.DataFrame) -> list[dict]:
+    """Index catalog titles for artist recovery when live metadata is sparse."""
+    lookup = []
+    for row in data.itertuples(index=False):
+        title = _compact_key(getattr(row, "track_name", ""))
+        artists = str(getattr(row, "artists", "")).strip()
+        if title and artists:
+            lookup.append({"title": title, "artists": artists})
     return lookup
 
 
@@ -261,8 +275,32 @@ def enrich_live_items(items: list[dict]) -> list[dict]:
             match = live_catalog_lookup.get((title, _compact_key(artist_name)))
             if match:
                 break
+        # Some JioSaavn search rows omit singers entirely. Recover the artist
+        # from the local catalog using a generic title similarity, not a
+        # song/version-specific rule. This handles suffixes such as alternate
+        # versions while preserving the upstream title and artwork.
+        title_match = None
+        if not str(item.get("artists", "")).strip() and title:
+            best_score = 0.0
+            for candidate in live_title_lookup:
+                candidate_title = candidate["title"]
+                score = SequenceMatcher(None, title, candidate_title).ratio()
+                if title in candidate_title or candidate_title in title:
+                    score = max(score, 0.82)
+                if score > best_score:
+                    best_score = score
+                    title_match = candidate
+            if title_match and best_score >= 0.72:
+                item["artists"] = title_match["artists"]
+                match = live_catalog_lookup.get(
+                    (title_match["title"], _compact_key(title_match["artists"].split(",")[0]))
+                )
+                if match:
+                    item["feature_source"] = "local_audio_catalog_title_match"
         if match:
-            item.update(match)
+            item.update({key: value for key, value in match.items() if key != "catalog_artists"})
+            if not str(item.get("artists", "")).strip():
+                item["artists"] = match.get("catalog_artists", "")
         else:
             item.setdefault("feature_source", "live_metadata_fallback")
             item.update({key: value for key, value in infer_metadata_mood(item).items() if key not in item})
@@ -289,6 +327,7 @@ def build_user_store(path: str, database_url: str) -> UserStore:
 raw_data = load_data(DATA_PATH)
 data, mood_scaler, mood_cluster_model = build_catalog_clusters(raw_data)
 live_catalog_lookup = build_live_catalog_lookup(data)
+live_title_lookup = build_live_title_lookup(data)
 imported_history = load_imported_history(HISTORY_PATH)
 engine = build_engine(data)
 stats = engine.catalog_stats()
