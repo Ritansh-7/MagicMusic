@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 
 ERA_COMPATIBILITY_WINDOW_YEARS = 30
+HYBRID_MODEL_VERSION = "hybrid-v4-multistage"
 import re
 from scipy.sparse import hstack, csr_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -839,6 +840,17 @@ class HybridRecommendationEngine:
                 break
             best_index = max(eligible, key=lambda pair: pair[1])[0]
             _, chosen = remaining.pop(best_index)
+            chosen["recommendation_score"] = round(float(max(0.0, max(eligible, key=lambda pair: pair[1])[1])), 6)
+            chosen["recommendation_features"] = {
+                "context": round(float(chosen.get("_context_score", 0.0)), 4),
+                "mood": round(float(chosen.get("_mood_match", 0.0)), 4),
+                "intent": round(float(chosen.get("_intent_match", 0.0)), 4),
+                "metadata": round(float(chosen.get("_metadata_similarity", 0.0)), 4),
+                "era": round(float(chosen.get("_era_match", 0.0)), 4),
+                "language": round(float(chosen.get("_language_match", 0.0)), 4),
+                "transition": round(float(transition_map.get(str(chosen.get("song_id") or chosen.get("title", "")), 0.0)), 4),
+            }
+            chosen["recommendation_model_version"] = HYBRID_MODEL_VERSION
             selected.append(chosen)
             artist_key = str(chosen.get("artists", "")).lower()
             album_key = str(chosen.get("album", "")).lower()

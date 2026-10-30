@@ -962,7 +962,41 @@ def build_jio_up_next(
         if title_key and title_key not in used_titles:
             used_titles.add(title_key)
             unique.append(item)
-    return unique[:limit]
+    queue = unique[:limit]
+    for position, item in enumerate(queue, start=1):
+        item["recommendation_rank"] = position
+        item.setdefault("recommendation_source", "current_track_radio")
+
+    # One compact impression event per generated queue gives us exposure data
+    # without inserting one database row per visible recommendation.
+    if queue and st.session_state.get("local_user_id"):
+        impression_key = "|".join([
+            str(seed.get("song_id") or seed.get("title", "")),
+            str(st.session_state.get("local_session_id", "")),
+            "|".join(str(item.get("song_id") or item.get("title", "")) for item in queue[:25]),
+        ])
+        seen_impressions = st.session_state.setdefault("recommendation_impressions", set())
+        if impression_key not in seen_impressions:
+            seen_impressions.add(impression_key)
+            log_behavior(
+                "recommendation_impression",
+                metadata={
+                    "model_version": "hybrid-v4-multistage",
+                    "seed_track_id": str(seed.get("song_id") or seed.get("title", "")),
+                    "seed_title": seed.get("title", ""),
+                    "items": [
+                        {
+                            "track_id": str(item.get("song_id") or item.get("title", "")),
+                            "title": item.get("title", ""),
+                            "rank": item.get("recommendation_rank"),
+                            "score": item.get("recommendation_score", 0.0),
+                            "source": item.get("recommendation_source", "current_track_radio"),
+                        }
+                        for item in queue[:25]
+                    ],
+                },
+            )
+    return queue
 
 
 spotify_client = SpotifyOAuth.from_environment()
@@ -1091,6 +1125,23 @@ def render_admin_dashboard() -> None:
             metadata_rows.append({})
     metadata = pd.DataFrame(metadata_rows)
     if not metadata.empty:
+        exposed_ids: set[str] = set()
+        for index, row in enumerate(metadata_rows):
+            if index >= len(events) or events.iloc[index]["event_type"] != "recommendation_impression":
+                continue
+            for item in row.get("items", []) if isinstance(row, dict) else []:
+                if isinstance(item, dict) and item.get("track_id"):
+                    exposed_ids.add(str(item["track_id"]))
+        played_ids = {
+            str(value) for value in plays.get("track_id", pd.Series(dtype=str)).dropna().tolist()
+        }
+        recommended_plays = len(exposed_ids.intersection(played_ids))
+        if exposed_ids:
+            st.subheader("Recommendation evaluation")
+            e1, e2, e3 = st.columns(3)
+            e1.metric("Tracks exposed", f"{len(exposed_ids):,}")
+            e2.metric("Exposed tracks played", f"{recommended_plays:,}")
+            e3.metric("Exposure play-through", f"{recommended_plays / len(exposed_ids) * 100:.1f}%")
         source_counts = metadata.get("feature_source", pd.Series(dtype=str)).fillna("unknown").value_counts()
         matched = int(source_counts.get("local_audio_catalog", 0))
         fallback = int(source_counts.get("live_metadata_fallback", 0))
