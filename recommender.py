@@ -746,6 +746,7 @@ class HybridRecommendationEngine:
                     and (
                         float(item.get("_mood_match", 0.0)) >= 0.62
                         or float(item.get("_style_match", 0.0))
+                        or float(item.get("_metadata_similarity", 0.0)) >= 0.25
                     )
                 )
                 strong_context = (
@@ -755,6 +756,7 @@ class HybridRecommendationEngine:
                     or float(item.get("_mood_match", 0.0)) >= 0.62
                     or float(item.get("_metadata_similarity", 0.0)) >= 0.35
                     or float(item.get("_intent_match", 0.0)) >= 0.5
+                    or float(item.get("_metadata_similarity", 0.0)) >= 0.25
                     or (
                         float(item.get("_style_match", 0.0))
                         and (
@@ -777,6 +779,7 @@ class HybridRecommendationEngine:
                         and (
                             float(item.get("_mood_match", 0.0)) >= 0.62
                             or float(item.get("_style_match", 0.0))
+                            or float(item.get("_metadata_similarity", 0.0)) >= 0.25
                         )
                     )
                     or float(item.get("_album_match", 0.0))
@@ -784,6 +787,7 @@ class HybridRecommendationEngine:
                     or float(item.get("_mood_match", 0.0)) >= 0.62
                     or float(item.get("_metadata_similarity", 0.0)) >= 0.35
                     or float(item.get("_intent_match", 0.0)) >= 0.5
+                    or float(item.get("_metadata_similarity", 0.0)) >= 0.25
                     or (
                         float(item.get("_style_match", 0.0))
                         and (
