@@ -504,6 +504,8 @@ class HybridRecommendationEngine:
         }
         seed_styles = seed_styles or {"neutral"}
         seed_mood = np.asarray((seed or {}).get("mood_vector", []), dtype=float)
+        seed_feature_tokens = feature_tokens(seed or {})
+        seed_confidence = float((seed or {}).get("mood_confidence", 0.0) or 0.0)
         def feature_tokens(item: dict) -> dict[str, float]:
             """Create a generic sparse metadata vector for diversity scoring."""
             text = " ".join(
@@ -619,14 +621,16 @@ class HybridRecommendationEngine:
                 and seed_styles.intersection(item_styles)
             ) else 0.0
             mood_match = mood_similarity(item)
+            metadata_similarity = sparse_cosine(seed_feature_tokens, feature_tokens(item))
             # Current-track context is deliberately stronger than history.
             context_score = (
-                0.30 * seed_artist_match
-                + 0.15 * album_match
-                + 0.10 * era_match
-                + 0.10 * language_match
-                + 0.15 * cluster_match
+                0.25 * seed_artist_match
+                + 0.12 * album_match
+                + 0.08 * era_match
+                + 0.08 * language_match
+                + 0.12 * cluster_match
                 + 0.20 * mood_match
+                + 0.15 * metadata_similarity
             )
             seed_content = (
                 0.40 * seed_artist_match
@@ -647,6 +651,7 @@ class HybridRecommendationEngine:
             item["_style_match"] = style_match
             item["_mood_match"] = mood_match
             item["_feature_tokens"] = feature_tokens(item)
+            item["_metadata_similarity"] = metadata_similarity
             item["_era_delta"] = era_delta
             item["_same_era"] = same_era
             if seed_artist_match and mood_match >= 0.62:
@@ -661,6 +666,8 @@ class HybridRecommendationEngine:
                 item["recommendation_reason"] = "Similar mood with a different era"
             elif mood_match >= 0.78:
                 item["recommendation_reason"] = "Very similar mood and sound"
+            elif metadata_similarity >= 0.45:
+                item["recommendation_reason"] = "Similar title, album and artist context"
             elif style_match and language_match:
                 item["recommendation_reason"] = "Similar energy and language"
             elif style_match:
@@ -733,6 +740,7 @@ class HybridRecommendationEngine:
                     or float(item.get("_album_match", 0.0))
                     or float(item.get("_cluster_match", 0.0))
                     or float(item.get("_mood_match", 0.0)) >= 0.62
+                    or float(item.get("_metadata_similarity", 0.0)) >= 0.35
                     or (
                         float(item.get("_style_match", 0.0))
                         and (
@@ -760,6 +768,7 @@ class HybridRecommendationEngine:
                     or float(item.get("_album_match", 0.0))
                     or float(item.get("_cluster_match", 0.0))
                     or float(item.get("_mood_match", 0.0)) >= 0.62
+                    or float(item.get("_metadata_similarity", 0.0)) >= 0.35
                     or (
                         float(item.get("_style_match", 0.0))
                         and (
@@ -800,6 +809,6 @@ class HybridRecommendationEngine:
         for item in selected:
             item.pop("_context_score", None)
             item.pop("_profile_score", None)
-            for key in ("_seed_artist_match", "_album_match", "_language_match", "_language_conflict", "_era_match", "_cluster_match", "_style_match", "_mood_match", "_feature_tokens", "_era_delta", "_same_era"):
+            for key in ("_seed_artist_match", "_album_match", "_language_match", "_language_conflict", "_era_match", "_cluster_match", "_style_match", "_mood_match", "_feature_tokens", "_metadata_similarity", "_era_delta", "_same_era"):
                 item.pop(key, None)
         return selected

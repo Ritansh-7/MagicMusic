@@ -1064,10 +1064,11 @@ else:
         if jio_results:
             search_cache[search_cache_key] = jio_results
         if jio_results:
-            jio_cols = st.columns(4)
-            for i, item in enumerate(jio_results, start=1):
-                with jio_cols[(i - 1) % 4]:
-                    with st.container(border=True):
+            for row_start in range(0, len(jio_results), 4):
+                jio_cols = st.columns(4)
+                for column_index, item in enumerate(jio_results[row_start:row_start + 4]):
+                    i = row_start + column_index + 1
+                    with jio_cols[column_index], st.container(border=True):
                         if item["image_url"]:
                             st.image(item["image_url"], width="stretch")
                         st.caption(f"Search result {i}")
