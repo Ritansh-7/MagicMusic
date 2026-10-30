@@ -844,14 +844,19 @@ def render_admin_dashboard() -> None:
         ).value_counts().rename("plays")
         # Do not truncate this to the top 15: the admin view should expose
         # every artist present in the collected event metadata.
-        artist_counts = artist_counts[artist_counts != ""].value_counts().rename("plays")
         if not artist_counts.empty:
+            artist_table = artist_counts.to_frame(name="plays")
+            artist_table.index.name = "artist"
+            artist_table = artist_table.reset_index()
             st.dataframe(
-                artist_counts.to_frame().reset_index(names="artist"),
+                artist_table,
                 width="stretch",
                 hide_index=True,
             )
-            st.bar_chart(artist_counts.to_frame(), horizontal=True)
+            # Use an explicit index for the chart. Passing a dataframe whose
+            # index and column both carry the artist label can make pandas'
+            # internal reset_index raise a duplicate-column ValueError.
+            st.bar_chart(artist_table.set_index("artist")["plays"], horizontal=True)
 
         # Live audit trail: show the actual recent play metadata rather than
         # only aggregate artist counts. This makes the current singer/song
