@@ -814,8 +814,34 @@ def render_admin_dashboard() -> None:
         st.bar_chart(source_counts.rename("events"))
 
         st.subheader("Most played artists")
-        artists = metadata.get("artists", pd.Series(dtype=str)).fillna("").astype(str)
-        artist_counts = artists.str.split(",").explode().str.strip()
+        play_mask = events["event_type"].isin(["jio_play", "play_start"]).to_numpy()
+
+        def metadata_artist_names(value: object) -> list[str]:
+            if isinstance(value, list):
+                return [
+                    str(entry.get("name", entry)).strip()
+                    if isinstance(entry, dict) else str(entry).strip()
+                    for entry in value
+                    if str(entry).strip()
+                ]
+            return [part.strip() for part in str(value or "").split(",") if part.strip()]
+
+        artist_values: list[str] = []
+        for index, row in enumerate(metadata.to_dict("records")):
+            if index >= len(play_mask) or not play_mask[index]:
+                continue
+            raw_artists = row.get("artists") or row.get("artist") or row.get("singers")
+            artist_values.extend(metadata_artist_names(raw_artists))
+
+        # Count only actual play events, and merge harmless casing/whitespace
+        # differences so one singer cannot be split into multiple rows.
+        canonical_artists: dict[str, str] = {}
+        for artist in artist_values:
+            key = re.sub(r"\s+", " ", artist).strip().casefold()
+            canonical_artists.setdefault(key, artist)
+        artist_counts = pd.Series(
+            [canonical_artists[re.sub(r"\s+", " ", artist).strip().casefold()] for artist in artist_values]
+        ).value_counts().rename("plays")
         # Do not truncate this to the top 15: the admin view should expose
         # every artist present in the collected event metadata.
         artist_counts = artist_counts[artist_counts != ""].value_counts().rename("plays")
@@ -830,9 +856,7 @@ def render_admin_dashboard() -> None:
         # Live audit trail: show the actual recent play metadata rather than
         # only aggregate artist counts. This makes the current singer/song
         # visible as soon as the next 10-second fragment refresh runs.
-        play_metadata = metadata.loc[
-            events["event_type"].isin(["jio_play", "play_start"]).to_numpy()
-        ].copy()
+        play_metadata = metadata.loc[play_mask].copy()
         play_events = events.loc[
             events["event_type"].isin(["jio_play", "play_start"])
         ].copy()
