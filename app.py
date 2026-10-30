@@ -5,6 +5,7 @@ import uuid
 import re
 import json
 from difflib import SequenceMatcher
+import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 import streamlit as st
@@ -838,26 +839,66 @@ def build_jio_up_next(
                 for intent in sorted(verified_intents) if intent != "general"
             )
         collect_queries(broad_queries, page_limit=20)
-    ranked = hybrid.rank_jio_results(
-        enrich_live_items(collected),
-        user_id,
-        catalog,
-        preferred_track_ids,
-        seed=seed,
-    )
-    if not ranked and collected:
-        # Keep the continuous relevance score, but relax only the hard
-        # context gate. Freshness, duplicate removal, MMR diversity and the
-        # learned ranking signals still apply, so a queue is never blank just
-        # because live metadata was incomplete.
+    enriched_collected = enrich_live_items(collected)
+    try:
         ranked = hybrid.rank_jio_results(
-            enrich_live_items(collected),
+            enriched_collected,
             user_id,
             catalog,
             preferred_track_ids,
             seed=seed,
-            relaxed_context=True,
         )
+        if not ranked and collected:
+            # Keep the continuous relevance score, but relax only the hard
+            # context gate. Freshness, duplicate removal, MMR diversity and
+            # learned signals still apply.
+            ranked = hybrid.rank_jio_results(
+                enriched_collected,
+                user_id,
+                catalog,
+                preferred_track_ids,
+                seed=seed,
+                relaxed_context=True,
+            )
+    except Exception:
+        ranked = []
+
+    if not ranked and enriched_collected:
+        # Last-resort relevance guard: preserve candidate order/score inputs,
+        # but prefer the same verified intent and a continuous era window.
+        # This is deliberately artist-agnostic; an artist change is valid when
+        # the song's mood and period remain close.
+        try:
+            seed_year = int(str(seed.get("year", ""))[:4])
+        except ValueError:
+            seed_year = 0
+        seed_intents = set(seed.get("intent_labels", [])) - {"general"}
+        fallback: list[tuple[float, dict]] = []
+        for item in enriched_collected:
+            title_key = normalize_title(item.get("title", ""))
+            if not title_key or title_key == normalize_title(seed.get("title", "")):
+                continue
+            try:
+                item_year = int(str(item.get("year", ""))[:4])
+            except ValueError:
+                item_year = 0
+            era_score = 0.5
+            if seed_year and item_year:
+                era_gap = abs(seed_year - item_year)
+                if era_gap > 10:
+                    continue
+                era_score = float(np.exp(-((era_gap / 10.0) ** 2)))
+            item_intents = set(item.get("intent_labels", [])) - {"general"}
+            intent_score = (
+                len(seed_intents.intersection(item_intents)) / max(len(seed_intents), 1)
+                if seed_intents else 0.0
+            )
+            artist_score = float(bool(
+                set(str(seed.get("artists", "")).casefold().split(","))
+                & set(str(item.get("artists", "")).casefold().split(","))
+            ))
+            fallback.append((0.55 * intent_score + 0.30 * era_score + 0.15 * artist_score, item))
+        ranked = [item for _, item in sorted(fallback, key=lambda pair: pair[0], reverse=True)]
     unique: list[dict] = []
     used_titles: set[str] = set()
     for item in ranked:
