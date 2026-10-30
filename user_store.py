@@ -35,7 +35,9 @@ class _MySQLConnection:
             database=(parsed.path or "").lstrip("/"),
             charset="utf8mb4",
             cursorclass=pymysql.cursors.DictCursor,
-            autocommit=False,
+            # Each user/event write is independent. Autocommit avoids holding
+            # a transaction open across a remote Streamlit rerun.
+            autocommit=True,
             # Do not let a sleeping/unreachable cloud database freeze a
             # Streamlit rerun indefinitely. Aiven connections normally finish
             # well below this; these are only a safety bound for cold starts.
