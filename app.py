@@ -887,6 +887,9 @@ if jio_now:
         st.markdown(f"**{jio_now.get('title', 'Unknown song')}**")
         st.caption(f"{jio_now.get('artists', '')} · {jio_now.get('album', '')}")
         current_id = str(jio_now.get("song_id") or jio_now.get("title", ""))
+        # Component-v2 IDs cannot contain its internal `__` delimiter. Live
+        # providers occasionally return titles/IDs containing underscores.
+        audio_component_key = re.sub(r"[^A-Za-z0-9]+", "-", current_id).strip("-") or "track"
         stream_url = jio_now.get("stream_url", "")
         perma_url = jio_now.get("perma_url", "")
         if stream_url:
@@ -898,7 +901,7 @@ if jio_now:
                     "autoplay": True,
                     "loop": bool(st.session_state.get("jio_loop", False)),
                 },
-                key=f"tm_audio_{str(jio_now.get('song_id') or jio_now.get('title', ''))}",
+                key=f"tm-audio-{audio_component_key}",
                 on_ended_change=lambda: None,
             )
             if getattr(audio_result, "ended", None) and not st.session_state.get("jio_loop", False):
