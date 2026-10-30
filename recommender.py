@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+
+ERA_COMPATIBILITY_WINDOW_YEARS = 30
 import re
 from scipy.sparse import hstack, csr_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -740,6 +742,15 @@ class HybridRecommendationEngine:
                 # has meaningful session/context evidence.
                 if item_id in recent_items or title_key in recent_items:
                     continue
+                # When both release years are known, prevent a large era jump
+                # before score-based ranking. Missing years stay eligible and
+                # are handled by the other metadata/mood signals.
+                if (
+                    has_seed
+                    and seed_year
+                    and int(item.get("_era_delta", 0) or 0) > ERA_COMPATIBILITY_WINDOW_YEARS
+                ):
+                    continue
                 # When the seed has a recognizable mood, a candidate must
                 # share that mood or a strong artist/album/audio-cluster link.
                 # Same language and era alone are not enough to turn a soft
@@ -772,8 +783,7 @@ class HybridRecommendationEngine:
                 # because both titles contain an energy keyword. Cross-
                 # language discovery remains possible through same-artist or
                 # same-album evidence, but not as an accidental fallback.
-                if (not relaxed_context and has_seed and bool(item.get("_language_conflict", False))
-                        and not same_artist_context and not float(item.get("_album_match", 0.0))):
+                if has_seed and bool(item.get("_language_conflict", False)):
                     continue
                 if bool(item.get("_intent_conflict", False)):
                     continue

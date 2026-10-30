@@ -16,6 +16,8 @@ from recommender import HybridRecommendationEngine, SpotifyRecommendationEngine
 from spotify_api import SpotifyOAuth, new_oauth_state, verify_oauth_state
 from user_store import UserStore
 
+ERA_COMPATIBILITY_WINDOW_YEARS = 30
+
 st.set_page_config(page_title="TuneMatch | Spotify Recommender", page_icon="🎧", layout="wide")
 
 # A small bidirectional Streamlit component is used for the player because
@@ -933,7 +935,7 @@ def build_jio_up_next(
             era_score = 0.5
             if seed_year and item_year:
                 era_gap = abs(seed_year - item_year)
-                if era_gap > 10:
+                if era_gap > ERA_COMPATIBILITY_WINDOW_YEARS:
                     continue
                 era_score = float(np.exp(-((era_gap / 10.0) ** 2)))
             item_intents = set(item.get("intent_labels", [])) - {"general"}
