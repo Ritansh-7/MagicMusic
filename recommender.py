@@ -559,6 +559,7 @@ class HybridRecommendationEngine:
                 if seed_year and item_year else 0.0
             )
             language_match = 1.0 if seed_language and language and seed_language == language else 0.0
+            language_conflict = bool(seed_language and language and seed_language != language)
             seed_cluster = (seed or {}).get("cluster_id")
             item_cluster = item.get("cluster_id")
             cluster_match = (
@@ -604,6 +605,7 @@ class HybridRecommendationEngine:
             item["_seed_artist_match"] = seed_artist_match
             item["_album_match"] = album_match
             item["_language_match"] = language_match
+            item["_language_conflict"] = language_conflict
             item["_era_match"] = era_match
             item["_cluster_match"] = cluster_match
             item["_style_match"] = style_match
@@ -696,6 +698,12 @@ class HybridRecommendationEngine:
                         )
                     )
                 )
+                # Do not recommend a known different-language track merely
+                # because both titles contain an energy keyword. Cross-
+                # language discovery remains possible through same-artist or
+                # same-album evidence, but not as an accidental fallback.
+                if has_seed and bool(item.get("_language_conflict", False)) and not same_artist_context and not float(item.get("_album_match", 0.0)):
+                    continue
                 if has_seed and not strong_context and float(item.get("_profile_score", 0.0)) < 0.35:
                     continue
                 if has_seed and seed_styles != {"neutral"} and not (
@@ -742,6 +750,6 @@ class HybridRecommendationEngine:
         for item in selected:
             item.pop("_context_score", None)
             item.pop("_profile_score", None)
-            for key in ("_seed_artist_match", "_album_match", "_language_match", "_era_match", "_cluster_match", "_style_match", "_mood_match"):
+            for key in ("_seed_artist_match", "_album_match", "_language_match", "_language_conflict", "_era_match", "_cluster_match", "_style_match", "_mood_match"):
                 item.pop(key, None)
         return selected
