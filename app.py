@@ -870,6 +870,20 @@ def render_admin_dashboard() -> None:
             if index >= len(play_mask) or not play_mask[index]:
                 continue
             raw_artists = row.get("artists") or row.get("artist") or row.get("singers")
+            if not raw_artists and row.get("title"):
+                event_title = _compact_key(row.get("title", ""))
+                best_artist = ""
+                best_score = 0.0
+                for candidate in live_title_lookup:
+                    candidate_title = candidate["title"]
+                    score = SequenceMatcher(None, event_title, candidate_title).ratio()
+                    if event_title in candidate_title or candidate_title in event_title:
+                        score = max(score, 0.82)
+                    if score > best_score:
+                        best_score = score
+                        best_artist = candidate["artists"]
+                if best_score >= 0.72:
+                    raw_artists = best_artist
             artist_values.extend(metadata_artist_names(raw_artists))
 
         # Count only actual play events, and merge harmless casing/whitespace
