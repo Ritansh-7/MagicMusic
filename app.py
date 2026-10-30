@@ -18,28 +18,34 @@ st.set_page_config(page_title="TuneMatch | Spotify Recommender", page_icon="🎧
 
 st.html("""
 <style>
-.stApp { background: radial-gradient(circle at 15% 0%, #16382d 0%, #0b1714 34%, #090d0c 100%); }
+.stApp { background: radial-gradient(circle at 8% 0%, #203f35 0%, #0d1718 30%, #090b10 67%, #160d20 100%); }
 .block-container { max-width: 1440px; padding-top: 1rem; padding-bottom: 4rem; }
 header[data-testid="stHeader"], [data-testid="stToolbar"] { background: transparent !important; }
 header[data-testid="stHeader"] { height: 2.5rem; }
 [data-testid="stDecoration"] { display: none; }
-[data-testid="stSidebar"] { background: linear-gradient(180deg, #111b19 0%, #0b1110 100%); border-right: 1px solid #25443a; }
-[data-testid="stMetric"] { background: linear-gradient(145deg, #193329, #12231e); border: 1px solid #2f5b4c; padding: 14px; border-radius: 16px; box-shadow: 0 8px 24px rgba(0,0,0,.14); }
+[data-testid="stSidebar"] { background: linear-gradient(180deg, #12152a 0%, #0b1115 52%, #160d20 100%); border-right: 1px solid #3d4269; }
+[data-testid="stMetric"] { background: linear-gradient(145deg, rgba(25,51,41,.92), rgba(24,18,43,.92)); border: 1px solid #3c6b61; padding: 14px; border-radius: 16px; box-shadow: 0 8px 24px rgba(0,0,0,.18); }
 [data-testid="stMetricValue"] { color: #d9ffe9; }
-.stButton > button, .stLinkButton > a { border-radius: 999px; border: 1px solid #356452; transition: all .15s ease; }
-.stButton > button:hover, .stLinkButton > a:hover { border-color: #71e6a7; color: #dffff0; transform: translateY(-1px); }
-[data-testid="stVerticalBlockBorderWrapper"] { border-color: #2a4c41; border-radius: 18px; background: rgba(17, 35, 29, .58); }
+.stButton > button, .stLinkButton > a { border-radius: 999px; border: 1px solid #467b70; background: linear-gradient(100deg, rgba(30,215,96,.13), rgba(139,92,246,.13)); transition: all .15s ease; }
+.stButton > button:hover, .stLinkButton > a:hover { border-color: #b7ff4a; color: #f2fff8; box-shadow: 0 0 22px rgba(30,215,96,.22); transform: translateY(-1px); }
+[data-testid="stVerticalBlockBorderWrapper"] { border-color: #38545a; border-radius: 18px; background: linear-gradient(145deg, rgba(17,35,29,.74), rgba(24,18,43,.62)); box-shadow: 0 12px 30px rgba(0,0,0,.12); }
 [data-testid="stImage"] img { border-radius: 14px; }
 .stTextInput input, .stMultiSelect div[data-baseweb="select"] { border-radius: 12px; }
-.shelf-title { color: #f4f7f5; font-size: 1.25rem; font-weight: 700; margin: 1.2rem 0 .4rem; }
-.shelf-subtitle { color: #9fb8ae; margin-bottom: .8rem; }
-.hero-copy { color: #a9c7bb; font-size: 1.05rem; max-width: 760px; }
+[data-testid="stTextInputRootElement"] { border: 1px solid #3e6a66; border-radius: 14px; background: rgba(11,20,24,.75); }
+[data-testid="stTextInputRootElement"]:focus-within { border-color: #ff4fd8; box-shadow: 0 0 0 3px rgba(255,79,216,.14); }
+.shelf-title { color: #f4f7f5; font-size: 1.35rem; font-weight: 800; margin: 1.35rem 0 .4rem; letter-spacing: -.02em; }
+.shelf-subtitle { color: #a8c7d0; margin-bottom: .8rem; }
+.hero-panel { padding: 1.55rem 1.7rem; border-radius: 26px; border: 1px solid #315b58; background: linear-gradient(120deg, rgba(25,65,51,.76), rgba(42,21,65,.62) 72%, rgba(16,32,45,.7)); box-shadow: 0 18px 50px rgba(0,0,0,.2); }
+.hero-title { font-size: clamp(2.2rem, 5vw, 4.5rem); line-height: .95; font-weight: 900; letter-spacing: -.07em; background: linear-gradient(100deg, #ffffff 0%, #baffd2 42%, #ff8cec 86%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.hero-copy { color: #b6d3d1; font-size: 1.05rem; max-width: 760px; margin-top: .65rem; }
+.hero-chip { display: inline-block; margin: .95rem .45rem 0 0; padding: .32rem .72rem; border-radius: 999px; color: #eafff3; background: rgba(30,215,96,.12); border: 1px solid rgba(183,255,74,.32); font-size: .82rem; }
+.hero-chip:nth-child(2) { background: rgba(255,79,216,.12); border-color: rgba(255,79,216,.35); }
+.hero-chip:nth-child(3) { background: rgba(84,229,255,.1); border-color: rgba(84,229,255,.32); }
 @media (max-width: 760px) { .block-container { padding: 1rem .7rem 3rem; } }
 </style>
 """)
 
-st.title("🎧 TuneMatch")
-st.markdown('<div class="hero-copy">A Spotify-inspired discovery experience powered by content, context, and cold-start personalization.</div>', unsafe_allow_html=True)
+st.markdown('''<div class="hero-panel"><div class="hero-title">🎧 TuneMatch</div><div class="hero-copy">Your live, mood-aware music universe—personalized by every play, like and skip.</div><span class="hero-chip">✦ Fresh for you</span><span class="hero-chip">◉ Mood-aware</span><span class="hero-chip">⚡ Live discovery</span></div>''', unsafe_allow_html=True)
 
 DATA_PATH = Path(__file__).parent / "spotify_tracks_data.csv"
 EVENT_DB_PATH = Path(__file__).parent / "tune_match_events.sqlite3"
