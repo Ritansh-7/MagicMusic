@@ -754,7 +754,9 @@ def build_jio_up_next(
             f"{artist} old songs",
             f"{artist} classics",
             f"{artist} romantic songs",
+            f"{artist} hindi songs",
             f"{artist} ghazals",
+            f"{artist} hindi ghazals",
             f"{artist} best ghazals",
             f"{artist} popular ghazals",
             f"{artist} popular songs",
@@ -770,6 +772,7 @@ def build_jio_up_next(
             f"{title} soundtrack",
             f"{title} playlist",
             f"{title} ghazal",
+            f"{title} hindi song",
         ])
         related_queries.extend(f"{title} {intent}" for intent in sorted(verified_intents) if intent != "general")
     try:
