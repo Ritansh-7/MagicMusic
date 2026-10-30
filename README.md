@@ -1,65 +1,170 @@
-# TuneMatch — Spotify Track Recommendation Engine
+# TuneMatch
 
-A Spotify-inspired hybrid recommender with live music search, implicit feedback, session-aware ranking, and a local content catalog.
+TuneMatch is a Spotify-inspired, live music recommendation platform built with Streamlit. It combines live JioSaavn discovery with a local audio-feature catalog, implicit user feedback, mood clustering and session-aware ranking.
 
-## Features
-- Local TuneMatch account signup/login with salted password hashing
-- Single-page Spotify-style Home with immediate shelves, an optional global search bar, and a player queue
-- Live JioSaavn song cards with artwork, artist/album metadata, and external play links (no JioSaavn login)
-- Local event tracking for session duration, play starts, likes, dislikes, and recommendation seeds
-- Cold-start onboarding and personalized shelves without forcing the user into separate search/vibe screens
-- Unified listener profile from selected genres and favorite tracks
-- Hybrid profile ranking with semantic/audio similarity, popularity, and artist diversity
-- Explainable shelves for personalized picks, high-energy discoveries, and hidden gems
-- Similar-song recommendations from a selected seed track
-- TF-IDF representations for genre tags and artist names
-- Min-max-scaled audio features and cosine similarity
-- Hybrid ranking that combines similarity with popularity
-- Search by song, artist, album, or genre
-- Vibe-based recommendations from energy, danceability, valence, and genre
-- Optional explicit-track filtering
-- Export recommendations to CSV
-- Unit tests
+It is not Spotify's proprietary system. It is an explainable, deployable recommendation-engine project demonstrating search, playback, personalization, feedback loops, diversity, cold start and analytics.
 
-## Recommendation strategy and data limitation
-The supplied catalog has metadata and audio features; user behavior is collected separately in the local event database. The app combines content similarity, implicit-feedback collaborative signals, TruncatedSVD matrix factorization, session transitions, popularity, and diversity penalties. Cold-start users rely more on content and onboarding signals.
+## What the project does
 
-The strategy is adapted from the themes in [Spotify Research's Search & Recommendations work](https://research.atspotify.com/search-recommendations): represent listeners and items in a shared feature space, combine behavioral-style profile signals with item semantics, make cold start explicit through onboarding choices, and serve recommendations as intent-driven shelves. In this local clone, onboarding genres and selected tracks stand in for behavioral signals; when event data becomes available, the same profile API can be extended with recency-weighted likes, skips, saves, and playlist context.
+- Creates TuneMatch accounts with salted PBKDF2 password hashes.
+- Searches live songs through an unofficial JioSaavn API without requiring a JioSaavn login.
+- Shows live artwork, artist/album metadata and available audio previews.
+- Provides Search, Player, Like, Next, Loop and Refresh controls.
+- Builds a separate personalized Up Next queue of up to 70 unique songs.
+- Learns from plays, likes, skips and listening progress.
+- Reduces repeated titles and consecutive artist/album repetition.
+- Shows explainable recommendation reasons.
+- Provides an admin-only, auto-refreshing data-science dashboard.
 
-## Setup (Windows PowerShell)
+## Recommendation architecture
 
-Extract the ZIP, open PowerShell in the project folder, then run:
+```text
+Live JioSaavn results + local catalog
+                ↓
+Candidate cleaning and feature enrichment
+                ↓
+Content, mood-cluster, collaborative and sequence signals
+                ↓
+Hybrid ranking
+                ↓
+Artist/album/recent-item diversity reranking
+                ↓
+Personalized 60–70 song queue
+```
+
+### Content and live-feature enrichment
+
+The local catalog contains approximately 4,000 tracks with artist, genre, popularity and audio features. The local content engine uses genre TF-IDF, artist TF-IDF, scaled audio features and cosine similarity.
+
+Live JioSaavn results are normalized using title, artist, album, language, year, duration, song ID and version type. When a live result matches the local catalog by normalized title and artist, it inherits:
+
+```text
+energy, tempo, valence, danceability, acousticness,
+instrumentalness, speechiness, liveness, loudness, popularity
+```
+
+When no local match exists, the system does not invent audio features. It uses metadata fallback signals: artist, album, language, year, title and session context.
+
+### Mood/style clustering
+
+`MiniBatchKMeans` clusters the local catalog using standardized audio features. The model learns up to 24 fast mood/style clusters, such as old acoustic, romantic Bollywood, high-energy dance, slow/sad and instrumental styles. A matched live song inherits its local cluster ID, and cluster similarity becomes part of ranking.
+
+### Implicit feedback and matrix factorization
+
+User actions become weighted interactions:
+
+```text
+Play start       +1
+Like             +3
+Skip             -1
+```
+
+The event store also records listening progress, session ID, timestamp and song metadata. TruncatedSVD factorizes the user-song interaction matrix into latent user and item factors. The collaborative score is the dot product between the user and candidate-song latent vectors.
+
+### Session transitions
+
+Adjacent play events inside a session create next-song signals:
+
+```text
+Song A → Song B
+Song A → Song C
+```
+
+If Song B frequently follows Song A, the transition score for A → B increases. This gives the Next queue a session-aware signal instead of relying only on long-term taste.
+
+## Ranking formula
+
+For every candidate song `i`, the current hybrid score is:
+
+```text
+score(i) =
+    0.50 × content_similarity(i)
+  + 0.25 × collaborative_score(i)
+  + 0.15 × transition_score(i)
+  + 0.10 × popularity_score(i)
+```
+
+For the current live song, seed-content similarity uses:
+
+```text
+0.40 × artist match
+0.17 × album match
+0.16 × era similarity
+0.10 × language match
+0.17 × mood-cluster match
+```
+
+The final reranker applies:
+
+```text
+artist repeat penalty: 0.22 per previous occurrence
+album repeat penalty: 0.05 per previous occurrence
+recently played penalty: 0.12
+```
+
+This prevents the same singer from filling the entire queue while preserving strong relevance.
+
+## Real-time behavior
+
+- Search answers the user’s query.
+- Playing a search result creates a fresh queue from that song.
+- Selecting an Up Next song makes it the new seed and regenerates recommendations.
+- Next logs the current song as skipped, starts the next song and rebuilds the queue.
+- Like updates the model and reranks the existing queue without removing all recommendations.
+- Refresh refits the model and builds a fresh queue excluding the current queue.
+- API responses are cached and candidate pages are fetched in controlled parallel batches.
+- The hybrid model is cached and refits only when new interaction events arrive.
+
+## Data and admin analytics
+
+Each behavior event contains:
+
+```text
+user_id, track_id, event_type, session_id,
+duration_ms, metadata_json, created_at
+```
+
+The admin dashboard refreshes every 10 seconds and displays registered users, total events, plays, likes, skips, listening hours, user-wise activity, listening trends, most-played artists, database backend, catalog size, mood clusters, live feature-enrichment match rate, metadata fallback count, interaction-matrix density, like rate, model weights and cluster distribution.
+
+## Database behavior
+
+```text
+No DATABASE_URL → local SQLite: tune_match_events.sqlite3
+mysql://...      → MySQL
+postgresql://... → PostgreSQL
+```
+
+Cloud deployment should use managed MySQL or PostgreSQL. This keeps accounts, password hashes, likes, skips, plays, listening time and recommendation events across restarts and redeploys. Never commit the real database URL or Streamlit secrets.
+
+## Run locally on Windows
 
 ```powershell
+cd D:\spotify_recommendation_engine
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-streamlit run spotify_recommendation_engine\app.py
+streamlit run app.py
 ```
 
-The app opens in your browser. Use **Similar to a song** to select a seed track and generate recommendations.
+Open `http://localhost:8501`.
 
-The app now starts with a normal TuneMatch account login. This local account is independent of Spotify and works without Spotify Premium. Playback controls log recommendation behavior and open a track in Spotify; the demo does not rehost or stream copyrighted audio.
-
-JioSaavn live discovery is an optional metadata layer. It does not require a JioSaavn login, but it uses an unofficial API and can temporarily fail. The app falls back to the local recommendation catalog automatically.
-
-## Import your downloaded Spotify history
-
-After Spotify sends your ZIP, extract it to a folder and run:
+If PowerShell blocks activation:
 
 ```powershell
-cd D:\spotify_recommendation_engine\spotify_recommendation_engine
-python import_spotify_history.py "C:\Users\YOUR_NAME\Downloads\SpotifyData" --output spotify_history.csv
+Set-ExecutionPolicy -Scope Process Bypass
+.\.venv\Scripts\Activate.ps1
 ```
 
-The importer supports Spotify Extended Streaming History JSON files and older Streaming History files. It creates a clean CSV with track, artist, album, timestamp, play duration, skip, and playback-context fields. It deliberately excludes IP addresses and technical log data. We can use this CSV next to build a time-aware personal profile and evaluate recommendations from your actual listening behavior.
+## Configure secrets
 
-## Enable real Spotify login and songs
+Create `.streamlit/secrets.toml` locally and do not commit it. An example is available at `.streamlit/secrets.toml.example`.
 
-1. Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
-2. Add this redirect URI to the app settings for local development:
-   `http://127.0.0.1:8501`
-3. Create `spotify_recommendation_engine/.streamlit/secrets.toml` with:
+```toml
+DATABASE_URL = "mysql://username:password@host:3306/tunematch"
+TUNEMATCH_ADMIN_EMAIL = "your-admin-email@example.com"
+```
+
+Optional Spotify credentials:
 
 ```toml
 SPOTIFY_CLIENT_ID = "your-client-id"
@@ -67,44 +172,70 @@ SPOTIFY_CLIENT_SECRET = "your-client-secret"
 SPOTIFY_REDIRECT_URI = "http://127.0.0.1:8501"
 ```
 
-4. Start the app and select **Log in with Spotify** in the sidebar.
+## Deploy on Streamlit Community Cloud
 
-Live mode uses Spotify OAuth and requests only `user-read-private`, `user-top-read`, `user-read-recently-played`, and `user-library-read`. It syncs the current user's profile, top tracks, recent plays, and saved tracks. Live catalog search links back to Spotify; this app does not download or rehost audio.
+1. Open [share.streamlit.io](https://share.streamlit.io).
+2. Sign in with the GitHub account that owns `Ritansh-7/MagicMusic`.
+3. Click **Create app**.
+4. Select:
 
-For local development, the app uses `tune_match_events.sqlite3`. For Streamlit Community Cloud or Render, add a persistent MySQL or PostgreSQL `DATABASE_URL` in the platform's secrets/settings. The app automatically switches to the configured cloud database for users, password hashes, likes, skips, plays, listening time and recommendation events, so data survives app restarts and redeploys. Never commit the real connection string.
+```text
+Repository: Ritansh-7/MagicMusic
+Branch: master
+Main file: app.py
+```
 
-Spotify data can improve personalization, but it is not automatically a good training set. Use explicit feedback and time-aware evaluation, separate users between train/validation/test, and never train on data without user consent.
+5. Deploy the app.
+6. Open **Manage app → Settings → Secrets** and add:
+
+```toml
+DATABASE_URL = "mysql://username:password@host:3306/tunematch"
+TUNEMATCH_ADMIN_EMAIL = "your-admin-email@example.com"
+```
+
+7. Reboot the app after saving secrets.
+
+Without `DATABASE_URL`, local SQLite is used and cloud data may not survive a restart. Existing local SQLite data is not automatically migrated to the cloud database.
 
 ## Deploy on Render
 
-Use the repository root as the Render service directory and use:
+The repository includes `render.yaml`.
 
 ```text
-Build command: pip install -r requirements.txt
-Start command: streamlit run app.py --server.address=0.0.0.0 --server.port=$PORT
+Build command:
+pip install -r requirements.txt
+
+Start command:
+streamlit run app.py --server.address=0.0.0.0 --server.port=$PORT
 ```
 
-The included `render.yaml` contains the same configuration. Add `TUNEMATCH_ADMIN_EMAIL` and `DATABASE_URL` as Render environment variables for the admin dashboard and persistent user data.
+Add `DATABASE_URL` and `TUNEMATCH_ADMIN_EMAIL` as Render environment variables. Render is the recommended target for this Streamlit server; Vercel is not the preferred target for a long-running Streamlit application.
 
-## Run tests
+## Test
 
 ```powershell
-python -m pip install pytest
 python -m pytest -q
 ```
 
-## How the ranking works
+Current test status: `4 passed`.
 
-The track representation combines three feature groups:
-- genre TF-IDF (weight 1.0)
-- artist TF-IDF (weight 0.35)
-- scaled audio features (weight 0.8)
+## Privacy and limitations
 
-Cosine similarity measures how close the combined track vectors are. The final seed-track score is:
+- Passwords are never stored in readable form; only salted PBKDF2 hashes are stored.
+- Do not commit `.streamlit/secrets.toml` or real database credentials.
+- JioSaavn integration uses an unofficial public API and may experience rate limits, missing metadata or temporary failures.
+- Audio features are inherited only for reliable local catalog matches; unmatched live songs use metadata fallback.
+- Production deployment should add consent, data export/deletion, stronger account recovery and database backups.
 
-`score = (1 - p) * similarity + p * (popularity / 100)`
+## Project structure
 
-where `p` is the popularity influence chosen in the UI. Home shelves additionally apply a light artist-diversity penalty so a single artist does not dominate the row. This score is a practical baseline, not a model trained on listening outcomes.
-
-## Dataset columns used
-`track_id`, `track_name`, `artists`, `album_name`, `track_genre`, `popularity`, `explicit`, and available audio features including `danceability`, `energy`, `acousticness`, `instrumentalness`, `valence`, `tempo`, `loudness`, and `duration_ms`.
+```text
+app.py                  Streamlit UI and application flow
+recommender.py          Content, hybrid, SVD and ranking logic
+jiosaavn_client.py      Live API adapter and normalization
+user_store.py           SQLite/MySQL/PostgreSQL accounts and events
+spotify_tracks_data.csv Local feature catalog
+tests/                  Recommendation tests
+render.yaml             Render deployment configuration
+.streamlit/config.toml  Theme and server configuration
+```
