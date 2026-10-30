@@ -662,7 +662,9 @@ class HybridRecommendationEngine:
             item["_intent_match"] = intent_match
             item["_era_delta"] = era_delta
             item["_same_era"] = same_era
-            if seed_artist_match and mood_match >= 0.62:
+            if album_match and (mood_match >= 0.62 or intent_match >= 0.5):
+                item["recommendation_reason"] = "Same soundtrack with verified mood"
+            elif seed_artist_match and mood_match >= 0.62:
                 item["recommendation_reason"] = "Same artist and current mood"
             elif seed_artist_match:
                 item["recommendation_reason"] = "Same artist, with a different mood"
@@ -803,7 +805,10 @@ class HybridRecommendationEngine:
                 # increasingly expensive, while still allowing a second song
                 # when the candidate pool is small.
                 adjusted -= 0.42 * artist_counts.get(artist_key, 0)
-                adjusted -= 0.10 * album_counts.get(album_key, 0)
+                # Album/soundtrack continuity is useful for the first result,
+                # but repeated items from the same album must make room for
+                # equally relevant songs from the seed's era and intent.
+                adjusted -= 0.22 * album_counts.get(album_key, 0)
                 if selected and artist_key == str(selected[-1].get("artists", "")).lower():
                     adjusted -= 0.30
                 eligible.append((index, adjusted))

@@ -754,6 +754,21 @@ def build_jio_up_next(
             f"{title} ghazal",
         ])
         related_queries.extend(f"{title} {intent}" for intent in sorted(verified_intents) if intent != "general")
+    try:
+        seed_year = int(str(seed.get("year", ""))[:4])
+    except ValueError:
+        seed_year = 0
+    if seed_year:
+        decade = (seed_year // 10) * 10
+        era_intents = [intent for intent in sorted(verified_intents) if intent != "general"] or ["songs"]
+        related_queries.extend([
+            f"bollywood {intent} songs {decade}s" for intent in era_intents
+        ])
+        related_queries.extend([
+            f"hindi songs from {decade}s",
+            f"bollywood songs from {seed_year}",
+            f"songs like {title} {decade}s" if title else "",
+        ])
     fallback_queries = [
         "popular songs", "trending songs", "bollywood songs",
         "classic songs", "romantic songs", "old songs",
@@ -812,6 +827,16 @@ def build_jio_up_next(
                 f"{artist} evergreen songs",
                 f"{artist} top 50 songs",
             ])
+        if seed_year:
+            decade = (seed_year // 10) * 10
+            broad_queries.extend([
+                f"hindi songs {decade}s",
+                f"bollywood hits {decade}s",
+            ])
+            broad_queries.extend(
+                f"{intent} songs {decade}s"
+                for intent in sorted(verified_intents) if intent != "general"
+            )
         collect_queries(broad_queries, page_limit=20)
     ranked = hybrid.rank_jio_results(
         enrich_live_items(collected),
