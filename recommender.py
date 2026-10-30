@@ -504,6 +504,29 @@ class HybridRecommendationEngine:
         }
         seed_styles = seed_styles or {"neutral"}
         seed_mood = np.asarray((seed or {}).get("mood_vector", []), dtype=float)
+        version_terms = (
+            ("jhankar", "Jhankar style"),
+            ("remix", "remix style"),
+            ("mashup", "mashup style"),
+            ("unplugged", "unplugged style"),
+            ("acoustic", "acoustic style"),
+            ("lofi", "lo-fi style"),
+            ("slowed", "slowed style"),
+            ("live", "live style"),
+            ("cover", "cover style"),
+        )
+
+        def version_tag(item: dict) -> tuple[str, str]:
+            text = " ".join(
+                str(item.get(field, "")).lower()
+                for field in ("title", "album")
+            )
+            for token, label in version_terms:
+                if token in text:
+                    return token, label
+            return "standard", "standard version"
+
+        seed_version, seed_version_label = version_tag(seed or {})
 
         def mood_similarity(item: dict) -> float:
             item_mood = np.asarray(item.get("mood_vector", []), dtype=float)
@@ -554,6 +577,9 @@ class HybridRecommendationEngine:
                 item_year = int(str(item.get("year", ""))[:4])
             except ValueError:
                 item_year = 0
+            version_key, version_label = version_tag(item)
+            era_delta = abs(seed_year - item_year) if seed_year and item_year else 0
+            same_era = bool(era_delta and era_delta <= 12)
             era_match = (
                 max(0.0, 1.0 - abs(seed_year - item_year) / 30.0)
                 if seed_year and item_year else 0.0
@@ -610,12 +636,22 @@ class HybridRecommendationEngine:
             item["_cluster_match"] = cluster_match
             item["_style_match"] = style_match
             item["_mood_match"] = mood_match
+            item["_version_key"] = version_key
+            item["_version_label"] = version_label
+            item["_era_delta"] = era_delta
+            item["_same_era"] = same_era
             if seed_artist_match and mood_match >= 0.62:
                 item["recommendation_reason"] = "Same artist and current mood"
             elif seed_artist_match:
                 item["recommendation_reason"] = "Same artist, with a different mood"
             elif album_match:
                 item["recommendation_reason"] = "Similar album or soundtrack"
+            elif mood_match >= 0.78 and same_era and version_key == seed_version:
+                item["recommendation_reason"] = f"Similar mood, era and {version_label}"
+            elif mood_match >= 0.78 and same_era:
+                item["recommendation_reason"] = "Similar mood and classic era"
+            elif mood_match >= 0.78 and era_delta > 25:
+                item["recommendation_reason"] = "Same mood with a newer sound"
             elif mood_match >= 0.78:
                 item["recommendation_reason"] = "Very similar mood and sound"
             elif style_match and language_match:
@@ -661,6 +697,7 @@ class HybridRecommendationEngine:
         selected: list[dict] = []
         artist_counts: dict[str, int] = {}
         album_counts: dict[str, int] = {}
+        version_counts: dict[str, int] = {}
         remaining = ranked.copy()
         while remaining:
             eligible: list[tuple[int, float]] = []
@@ -727,6 +764,19 @@ class HybridRecommendationEngine:
                 ):
                     continue
                 adjusted = float(base_score)
+                version_key = str(item.get("_version_key", "standard"))
+                # Keep a Jhankar/remix/mashup family from filling the queue.
+                # A matching version gets a small continuity benefit, but
+                # after two appearances diversity wins.
+                adjusted += 0.04 if version_key == seed_version else 0.0
+                adjusted -= 0.28 * max(0, version_counts.get(version_key, 0) - 1)
+                if (
+                    seed_year
+                    and int(item.get("_era_delta", 0) or 0) > 25
+                    and not float(item.get("_album_match", 0.0))
+                    and not float(item.get("_seed_artist_match", 0.0))
+                ):
+                    adjusted -= 0.20
                 # Prevent the same singer from appearing repeatedly. The
                 # first appearance is free; subsequent appearances are
                 # increasingly expensive, while still allowing a second song
@@ -747,9 +797,11 @@ class HybridRecommendationEngine:
             album_key = str(chosen.get("album", "")).lower()
             artist_counts[artist_key] = artist_counts.get(artist_key, 0) + 1
             album_counts[album_key] = album_counts.get(album_key, 0) + 1
+            version_key = str(chosen.get("_version_key", "standard"))
+            version_counts[version_key] = version_counts.get(version_key, 0) + 1
         for item in selected:
             item.pop("_context_score", None)
             item.pop("_profile_score", None)
-            for key in ("_seed_artist_match", "_album_match", "_language_match", "_language_conflict", "_era_match", "_cluster_match", "_style_match", "_mood_match"):
+            for key in ("_seed_artist_match", "_album_match", "_language_match", "_language_conflict", "_era_match", "_cluster_match", "_style_match", "_mood_match", "_version_key", "_version_label", "_era_delta", "_same_era"):
                 item.pop(key, None)
         return selected
