@@ -469,6 +469,48 @@ def personalize_jio_results(
     return [item for _, item in ranked]
 
 
+def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
+    """Restore exact search intent after taste reranking.
+
+    The recommendation ranker is intentionally taste-aware, but a search page
+    must still put the requested title/album first. Language-suffixed alternate
+    versions (for example ``- Tamil``) are kept, but ranked below the base
+    result unless the user searched for that variant explicitly.
+    """
+    query_key = _compact_key(query)
+    if not query_key:
+        return results
+    query_tokens = set(query_key.split())
+    language_terms = {"hindi", "tamil", "telugu", "punjabi", "bengali", "marathi", "malayalam", "kannada"}
+    query_languages = query_tokens.intersection(language_terms)
+
+    def score(item: dict) -> tuple[float, int]:
+        title = _compact_key(item.get("title", ""))
+        album = _compact_key(item.get("album", ""))
+        artists = _compact_key(item.get("artists", ""))
+        title_tokens = set(title.split())
+        exact_title = float(title == query_key)
+        title_match = float(query_key in title or query_tokens.issubset(title_tokens))
+        album_match = float(query_key in album or query_tokens.issubset(set(album.split())))
+        artist_match = float(query_key in artists)
+        language = str(item.get("language", "")).lower()
+        variant_penalty = 0.0
+        if not query_languages and any(term in title_tokens for term in language_terms):
+            variant_penalty = 2.0
+        if query_languages and language and not query_languages.intersection({language}):
+            variant_penalty += 1.0
+        return (
+            5.0 * exact_title
+            + 3.0 * title_match
+            + 2.0 * album_match
+            + 1.0 * artist_match
+            - variant_penalty,
+            0,
+        )
+
+    return [item for _, item in sorted(enumerate(results), key=lambda pair: (score(pair[1]), -pair[0]), reverse=True)]
+
+
 def build_jio_up_next(
     seed: dict,
     search_results: list[dict],
@@ -849,6 +891,7 @@ else:
         jio_results = hybrid_engine.rank_jio_results(
             enrich_live_items(jio_results), local_user_id, data, preferred_track_ids
         )
+        jio_results = prioritize_search_results(jio_results, search_query)
         if jio_results:
             search_cache[search_cache_key] = jio_results
         if jio_results:
