@@ -349,7 +349,16 @@ def log_behavior(
     metadata: dict | None = None,
 ) -> None:
     user_id = st.session_state.get("local_user_id")
-    if user_id:
+    if not user_id:
+        return
+
+    # Analytics must never take down the player or prevent a user from
+    # signing in. A sleeping cloud MySQL instance can time out while writing;
+    # pause writes briefly instead of blocking every Streamlit rerun.
+    retry_after = float(st.session_state.get("event_write_retry_after", 0.0))
+    if retry_after > time.time():
+        return
+    try:
         user_store.log_event(
             user_id=user_id,
             track_id=track_id,
@@ -358,8 +367,12 @@ def log_behavior(
             duration_ms=duration_ms,
             metadata_json=json.dumps(metadata or {}),
         )
-        st.session_state["events_dirty"] = True
-        st.session_state["summary_dirty"] = True
+    except Exception:
+        st.session_state["event_write_retry_after"] = time.time() + 30
+        st.session_state["event_write_warning"] = True
+        return
+    st.session_state["events_dirty"] = True
+    st.session_state["summary_dirty"] = True
 
 
 def cached_user_summary(user_id: str, session_id: str | None = None) -> dict[str, int]:

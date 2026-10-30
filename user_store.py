@@ -50,11 +50,23 @@ class _MySQLConnection:
     def __exit__(self, exc_type, exc_value, traceback):
         try:
             if exc_type:
-                self.connection.rollback()
+                # The server can close the socket while a query is in flight.
+                # Never mask the original database error with a second error
+                # from rollback on that already-dead connection.
+                try:
+                    self.connection.rollback()
+                except Exception:
+                    pass
             else:
-                self.connection.commit()
+                try:
+                    self.connection.commit()
+                except Exception:
+                    pass
         finally:
-            self.connection.close()
+            try:
+                self.connection.close()
+            except Exception:
+                pass
 
     def execute(self, query: str, parameters=()):
         cursor = self.connection.cursor()
