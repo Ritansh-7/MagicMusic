@@ -16,6 +16,54 @@ from user_store import UserStore
 
 st.set_page_config(page_title="TuneMatch | Spotify Recommender", page_icon="🎧", layout="wide")
 
+# A small bidirectional Streamlit component is used for the player because
+# st.audio does not expose the browser's `ended` event to Python. The event
+# lets the server advance the already-ranked queue without requiring a click.
+TUNEMATCH_AUDIO = st.components.v2.component(
+    "tunematch_audio_player",
+    html="""
+<div class="tm-audio-shell">
+  <div class="tm-audio-label" id="tm-audio-label"></div>
+  <audio id="tm-audio" controls preload="metadata"></audio>
+</div>
+""",
+    css="""
+.tm-audio-shell { padding: .2rem 0; }
+.tm-audio-label { color: #b6d3d1; font-size: .82rem; margin-bottom: .3rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+audio { width: 100%; min-height: 42px; }
+""",
+    js="""
+export default function(component) {
+  const { data, parentElement, setTriggerValue } = component;
+  const audio = parentElement.querySelector('#tm-audio');
+  const label = parentElement.querySelector('#tm-audio-label');
+  if (!audio || !data) return;
+
+  const src = data.url || '';
+  const changed = audio.dataset.tmSrc !== src;
+  audio.loop = Boolean(data.loop);
+  label.textContent = data.title || 'TuneMatch player';
+
+  if (changed) {
+    const shouldPlay = Boolean(data.autoplay);
+    audio.pause();
+    audio.src = src;
+    audio.dataset.tmSrc = src;
+    audio.load();
+    if (shouldPlay && src) {
+      const playPromise = audio.play();
+      if (playPromise && playPromise.catch) playPromise.catch(() => {});
+    }
+  }
+
+  audio.onended = () => {
+    if (!audio.loop) setTriggerValue('ended', { track_id: data.track_id });
+  };
+  return () => { audio.onended = null; };
+}
+""",
+)
+
 st.html("""
 <style>
 .stApp { background: radial-gradient(circle at 8% 0%, #203f35 0%, #0d1718 30%, #090b10 67%, #160d20 100%); }
@@ -41,6 +89,11 @@ header[data-testid="stHeader"] { height: 2.5rem; }
 .hero-chip { display: inline-block; margin: .95rem .45rem 0 0; padding: .32rem .72rem; border-radius: 999px; color: #eafff3; background: rgba(30,215,96,.12); border: 1px solid rgba(183,255,74,.32); font-size: .82rem; }
 .hero-chip:nth-child(2) { background: rgba(255,79,216,.12); border-color: rgba(255,79,216,.35); }
 .hero-chip:nth-child(3) { background: rgba(84,229,255,.1); border-color: rgba(84,229,255,.32); }
+.recommendation-banner { padding: 1rem 1.15rem; border-radius: 20px; border: 1px solid #5b4779; background: linear-gradient(110deg, rgba(44,29,68,.9), rgba(16,42,39,.82)); margin: .5rem 0 1rem; }
+.recommendation-kicker { color: #ff8cec; font-size: .76rem; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+.recommendation-title { color: #f4f7f5; font-size: 1.35rem; font-weight: 850; margin-top: .2rem; }
+.recommendation-meta { color: #b6d3d1; font-size: .9rem; }
+.recommendation-reason { color: #d8c8ff; font-size: .84rem; }
 @media (max-width: 760px) { .block-container { padding: 1rem .7rem 3rem; } }
 </style>
 """)
@@ -147,9 +200,9 @@ def enrich_live_items(items: list[dict]) -> list[dict]:
 
 
 @st.cache_resource
-def build_hybrid_engine(content_engine):
+def build_hybrid_engine(_content_engine):
     """Keep one fitted model service per app process instead of rebuilding it on every rerun."""
-    return HybridRecommendationEngine(content_engine)
+    return HybridRecommendationEngine(_content_engine)
 
 
 raw_data = load_data(DATA_PATH)
@@ -163,6 +216,7 @@ jio_client = JioSaavnClient()
 hybrid_engine = build_hybrid_engine(engine)
 st.session_state.setdefault("local_session_id", uuid.uuid4().hex)
 st.session_state.setdefault("jio_search_cache_v2", {})
+st.session_state.setdefault("jio_loop", False)
 # Migrate the old queue behavior: older sessions stored search results here.
 if "jio_queue_index" in st.session_state:
     st.session_state.pop("jio_queue", None)
@@ -650,6 +704,45 @@ preferred_track_ids = (
     + [track_labels[label] for label in onboarding_tracks]
 )
 
+
+def play_next_from_queue(mark_previous_as_skip: bool = True) -> bool:
+    """Promote the next ranked item and rebuild its queue context."""
+    queue = list(st.session_state.get("jio_queue", []))
+    if not queue:
+        return False
+    current_id = st.session_state.get("jio_current_track_id")
+    if current_id and mark_previous_as_skip:
+        log_behavior("jio_skip", str(current_id))
+    next_item = queue.pop(0)
+    st.session_state["jio_queue"] = queue
+    st.session_state["jio_now_playing"] = next_item
+    st.session_state["jio_current_track_id"] = str(
+        next_item.get("song_id") or next_item.get("title", "")
+    )
+    st.session_state["jio_started_at"] = time.time()
+    st.session_state["jio_last_accounted_at"] = st.session_state["jio_started_at"]
+    log_behavior(
+        "jio_play",
+        str(next_item.get("song_id") or next_item.get("title", "")),
+        metadata=next_item,
+    )
+    refresh_hybrid_model(force=True)
+    cached_results = st.session_state.get("jio_search_cache_v2", {}).get(search_query, [])
+    try:
+        st.session_state["jio_queue"] = build_jio_up_next(
+            next_item,
+            cached_results,
+            jio_client,
+            hybrid_engine,
+            local_user_id,
+            data,
+            preferred_track_ids,
+            exclude_items=[next_item, *queue],
+        )
+    except Exception:
+        st.session_state["jio_queue"] = queue
+    return True
+
 if not search_query:
     st.info("Search a song, artist, album, or genre to see matching music and play it.")
 else:
@@ -776,17 +869,27 @@ if jio_now:
     with now_cols[1]:
         st.markdown(f"**{jio_now.get('title', 'Unknown song')}**")
         st.caption(f"{jio_now.get('artists', '')} · {jio_now.get('album', '')}")
+        current_id = str(jio_now.get("song_id") or jio_now.get("title", ""))
         stream_url = jio_now.get("stream_url", "")
         perma_url = jio_now.get("perma_url", "")
         if stream_url:
-            st.audio(
-                stream_url,
-                format=jio_now.get("stream_format", "audio/mpeg"),
+            audio_result = TUNEMATCH_AUDIO(
+                data={
+                    "url": stream_url,
+                    "title": jio_now.get("title", "TuneMatch player"),
+                    "track_id": current_id,
+                    "autoplay": True,
+                    "loop": bool(st.session_state.get("jio_loop", False)),
+                },
+                key=f"tm_audio_{str(jio_now.get('song_id') or jio_now.get('title', ''))}",
+                on_ended_change=lambda: None,
             )
+            if getattr(audio_result, "ended", None) and not st.session_state.get("jio_loop", False):
+                if play_next_from_queue(mark_previous_as_skip=False):
+                    st.rerun()
         elif perma_url:
             st.warning("Audio preview unavailable for this song.")
             st.link_button("Open song", perma_url, width="stretch")
-        current_id = str(jio_now.get("song_id") or jio_now.get("title", ""))
         liked_ids = set(user_store.liked_track_ids(local_user_id))
         if current_id in liked_ids:
             st.success("♥ Liked")
@@ -823,41 +926,7 @@ if jio_now:
             st.rerun()
     with now_cols[2]:
         if st.button("⏭ Next", key="jio_next", width="stretch"):
-            queue = st.session_state.get("jio_queue", [])
-            if queue:
-                current_id = st.session_state.get("jio_current_track_id")
-                if current_id:
-                    log_behavior("jio_skip", str(current_id))
-                next_item = queue.pop(0)
-                st.session_state["jio_queue"] = queue
-                st.session_state["jio_now_playing"] = next_item
-                st.session_state["jio_current_track_id"] = str(
-                    next_item.get("song_id") or next_item.get("title", "")
-                )
-                st.session_state["jio_started_at"] = time.time()
-                st.session_state["jio_last_accounted_at"] = st.session_state["jio_started_at"]
-                log_behavior(
-                    "jio_play",
-                    str(next_item.get("song_id") or next_item.get("title", "")),
-                    metadata=next_item,
-                )
-                refresh_hybrid_model(force=True)
-                cached_results = st.session_state.get("jio_search_cache_v2", {}).get(
-                    search_query, []
-                )
-                try:
-                    st.session_state["jio_queue"] = build_jio_up_next(
-                        next_item,
-                        cached_results,
-                        jio_client,
-                        hybrid_engine,
-                        local_user_id,
-                        data,
-                        preferred_track_ids,
-                        exclude_items=[next_item, *queue],
-                    )
-                except Exception:
-                    st.session_state["jio_queue"] = queue
+            if play_next_from_queue():
                 st.rerun()
             else:
                 st.info("No personalized recommendation is ready yet. Play another search result first.")
@@ -873,14 +942,41 @@ if jio_now:
             up_next.append(item)
     st.session_state["jio_queue"] = up_next
     if up_next:
-        st.caption(f"Up next for you ({len(up_next)}): " + " · ".join(
-            str(item.get("title", "Unknown song")) for item in up_next[:5]
-        ))
+        st.markdown(f"<div class='shelf-subtitle'>Up next for you · {len(up_next)} personalized tracks</div>", unsafe_allow_html=True)
+        featured = up_next[0]
+        banner_left, banner_mid, banner_right = st.columns([1, 3, 1], vertical_alignment="center")
+        with banner_left:
+            if featured.get("image_url"):
+                st.image(featured["image_url"], width="stretch", alt=f"Artwork for {featured.get('title', 'recommended song')}")
+        with banner_mid:
+            st.markdown("<div class='recommendation-kicker'>01 · next in your mix</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='recommendation-title'>{featured.get('title', 'Unknown song')}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='recommendation-meta'>{featured.get('artists', '')} · {featured.get('album', '')}</div>", unsafe_allow_html=True)
+            if featured.get("recommendation_reason"):
+                st.markdown(f"<div class='recommendation-reason'>✦ {featured['recommendation_reason']}</div>", unsafe_allow_html=True)
+        with banner_right:
+            if st.button("▶ Play next", key=f"featured_play_{featured.get('song_id') or featured.get('title')}", width="stretch"):
+                st.session_state["jio_now_playing"] = featured
+                old_queue = list(up_next)
+                st.session_state["jio_queue"] = []
+                st.session_state["jio_current_track_id"] = str(featured.get("song_id") or featured.get("title", ""))
+                st.session_state["jio_started_at"] = time.time()
+                st.session_state["jio_last_accounted_at"] = st.session_state["jio_started_at"]
+                log_behavior("jio_play", st.session_state["jio_current_track_id"], metadata=featured)
+                refresh_hybrid_model(force=True)
+                try:
+                    st.session_state["jio_queue"] = build_jio_up_next(featured, jio_results if search_query else [], jio_client, hybrid_engine, local_user_id, data, preferred_track_ids, exclude_items=[featured, *old_queue])
+                except Exception:
+                    st.session_state["jio_queue"] = []
+                st.rerun()
+        st.caption(" · ".join(str(item.get("title", "Unknown song")) for item in up_next[:5]))
         with st.expander(f"See all {len(up_next)} personalized recommendations", expanded=True):
             recommendation_cols = st.columns(4)
-            for index, item in enumerate(up_next):
+            for index, item in enumerate(up_next[1:], start=1):
                 with recommendation_cols[index % 4]:
                     with st.container(border=True):
+                        if item.get("image_url"):
+                            st.image(item["image_url"], width="stretch", alt=f"Artwork for {item.get('title', 'recommended song')}")
                         st.caption(f"{index + 1}. {item.get('title', 'Unknown song')}")
                         st.caption(f"{item.get('artists', '')} · {item.get('album', '')}")
                         if item.get("recommendation_reason"):
