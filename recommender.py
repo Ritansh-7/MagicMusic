@@ -491,7 +491,7 @@ class HybridRecommendationEngine:
             for field in ("title", "album", "artists", "language")
         ).lower()
         style_groups = {
-            "high_energy": {"fight", "anthem", "rock", "zinda", "sultan", "brother", "run", "power", "action", "dance", "party", "bhangra", "bang", "fire", "dhamaka", "dhamaal", "warrior", "sher", "bhaag", "milkha"},
+            "high_energy": {"fight", "anthem", "rock", "zinda", "sultan", "brother", "run", "power", "action", "dance", "party", "bhangra", "bang", "fire", "dhamaka", "dhamaal", "warrior", "sher", "bhaag", "milkha", "singham", "chaiyya", "ramta", "appadipodu", "mappillai", "title track"},
             "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "dil", "jaan", "saiyaara"},
             "sad": {"sad", "heartbreak", "alone", "broken", "dard", "udaas"},
             "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "shiva", "ram"},
@@ -508,6 +508,20 @@ class HybridRecommendationEngine:
             item_mood = np.asarray(item.get("mood_vector", []), dtype=float)
             if seed_mood.size == 0 or item_mood.size == 0 or seed_mood.size != item_mood.size:
                 return 0.0
+            seed_confidence = float((seed or {}).get("mood_confidence", 0.0) or 0.0)
+            item_confidence = float(item.get("mood_confidence", 0.0) or 0.0)
+            seed_label = str((seed or {}).get("mood_label", "")).strip().lower()
+            item_label = str(item.get("mood_label", "")).strip().lower()
+            # Default/neutral metadata vectors are not evidence of similarity.
+            # Require a confident shared label for fallback-vs-fallback, while
+            # local audio vectors can compare directly.
+            if seed_confidence < 0.75 or item_confidence < 0.75:
+                if seed_confidence < 0.5 or item_confidence < 0.5:
+                    return 0.0
+                seed_labels = {part.strip() for part in seed_label.split(",") if part.strip() and part.strip() != "neutral"}
+                item_labels = {part.strip() for part in item_label.split(",") if part.strip() and part.strip() != "neutral"}
+                if not seed_labels.intersection(item_labels):
+                    return 0.0
             denominator = float(np.linalg.norm(seed_mood) * np.linalg.norm(item_mood))
             return max(0.0, float(np.dot(seed_mood, item_mood) / denominator)) if denominator else 0.0
 
@@ -589,8 +603,10 @@ class HybridRecommendationEngine:
             item["_cluster_match"] = cluster_match
             item["_style_match"] = style_match
             item["_mood_match"] = mood_match
-            if seed_artist_match:
-                item["recommendation_reason"] = "Same artist, with your current mood"
+            if seed_artist_match and mood_match >= 0.62:
+                item["recommendation_reason"] = "Same artist and current mood"
+            elif seed_artist_match:
+                item["recommendation_reason"] = "Same artist, with a different mood"
             elif album_match:
                 item["recommendation_reason"] = "Similar album or soundtrack"
             elif mood_match >= 0.78:
@@ -658,7 +674,13 @@ class HybridRecommendationEngine:
                 # Same language and era alone are not enough to turn a soft
                 # romantic song into a valid action/rock recommendation.
                 if has_seed and seed_styles != {"neutral"} and not (
-                    float(item.get("_seed_artist_match", 0.0))
+                    (
+                        float(item.get("_seed_artist_match", 0.0))
+                        and (
+                            float(item.get("_mood_match", 0.0)) >= 0.62
+                            or float(item.get("_style_match", 0.0))
+                        )
+                    )
                     or float(item.get("_album_match", 0.0))
                     or float(item.get("_cluster_match", 0.0))
                     or float(item.get("_mood_match", 0.0)) >= 0.62

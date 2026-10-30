@@ -197,7 +197,7 @@ def infer_metadata_mood(item: dict) -> dict:
     }
     labels = []
     groups = {
-        "energetic": {"fight", "anthem", "rock", "zinda", "sultan", "power", "action", "dance", "party", "bhangra", "bang", "fire", "dhamaka", "warrior", "bhaag", "milkha"},
+        "energetic": {"fight", "anthem", "rock", "zinda", "sultan", "power", "action", "dance", "party", "bhangra", "bang", "fire", "dhamaka", "warrior", "bhaag", "milkha", "singham", "chaiyya", "ramta", "appadipodu", "mappillai", "title track"},
         "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "dil", "jaan", "saiyaara"},
         "sad": {"sad", "heartbreak", "alone", "broken", "dard", "udaas"},
         "instrumental": {"theme", "score", "background", "instrumental", "bgm", "soundtrack"},
