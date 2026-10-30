@@ -845,6 +845,19 @@ def build_jio_up_next(
         preferred_track_ids,
         seed=seed,
     )
+    if not ranked and collected:
+        # Keep the continuous relevance score, but relax only the hard
+        # context gate. Freshness, duplicate removal, MMR diversity and the
+        # learned ranking signals still apply, so a queue is never blank just
+        # because live metadata was incomplete.
+        ranked = hybrid.rank_jio_results(
+            enrich_live_items(collected),
+            user_id,
+            catalog,
+            preferred_track_ids,
+            seed=seed,
+            relaxed_context=True,
+        )
     unique: list[dict] = []
     used_titles: set[str] = set()
     for item in ranked:

@@ -449,6 +449,7 @@ class HybridRecommendationEngine:
         catalog: pd.DataFrame,
         preferred_track_ids: list[str],
         seed: dict | None = None,
+        relaxed_context: bool = False,
     ) -> list[dict]:
         if not results:
             return []
@@ -769,11 +770,12 @@ class HybridRecommendationEngine:
                 # because both titles contain an energy keyword. Cross-
                 # language discovery remains possible through same-artist or
                 # same-album evidence, but not as an accidental fallback.
-                if has_seed and bool(item.get("_language_conflict", False)) and not same_artist_context and not float(item.get("_album_match", 0.0)):
+                if (not relaxed_context and has_seed and bool(item.get("_language_conflict", False))
+                        and not same_artist_context and not float(item.get("_album_match", 0.0))):
                     continue
-                if has_seed and not strong_context and float(item.get("_profile_score", 0.0)) < 0.35:
+                if not relaxed_context and has_seed and not strong_context and float(item.get("_profile_score", 0.0)) < 0.35:
                     continue
-                if has_seed and seed_styles != {"neutral"} and not (
+                if not relaxed_context and has_seed and seed_styles != {"neutral"} and not (
                     (
                         float(item.get("_seed_artist_match", 0.0))
                         and (
