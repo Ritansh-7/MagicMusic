@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 ERA_COMPATIBILITY_WINDOW_YEARS = 30
-HYBRID_MODEL_VERSION = "hybrid-v7-audio-metadata-baseline"
+HYBRID_MODEL_VERSION = "hybrid-v8-strict-track-radio"
 
 
 def _metadata_feature_tokens(item: dict) -> dict[str, float]:
@@ -847,6 +847,22 @@ class HybridRecommendationEngine:
                 + 0.03 * context_values
                 + 0.02 * popularity
             )
+            # Confidence-aware normalization: missing audio is not a zero
+            # observation. Redistribute weight across reliable signals while
+            # applying a small confidence penalty when evidence is sparse.
+            available_weight = (
+                0.35 * (audio_values > 0).astype(float)
+                + 0.15 * (metadata_values > 0).astype(float)
+                + 0.15 * (collaborative > 0).astype(float)
+                + 0.12 * ((short_values + medium_values) > 0).astype(float)
+                + 0.08 * (long_values > 0).astype(float)
+                + 0.10 * (transition_values > 0).astype(float)
+                + 0.03
+                + 0.02 * (popularity > 0).astype(float)
+            )
+            numerator = hybrid.copy()
+            hybrid = numerator / np.maximum(available_weight, 0.03)
+            hybrid *= 0.75 + 0.25 * np.minimum(1.0, available_weight)
         else:
             # Search results have no current-track anchor; preserve the
             # original taste/collaborative search ranking in that view.
@@ -893,32 +909,22 @@ class HybridRecommendationEngine:
                     and int(item.get("_era_delta", 0) or 0) > ERA_COMPATIBILITY_WINDOW_YEARS
                 ):
                     continue
-                # When the seed has a recognizable mood, a candidate must
-                # share that mood or a strong artist/album/audio-cluster link.
-                # Same language and era alone are not enough to turn a soft
-                # romantic song into a valid action/rock recommendation.
-                same_artist_context = (
-                    float(item.get("_seed_artist_match", 0.0))
-                    and (
-                        float(item.get("_mood_match", 0.0)) >= 0.62
-                        or float(item.get("_style_match", 0.0))
-                        or float(item.get("_metadata_similarity", 0.0)) >= 0.25
-                    )
-                )
+                # Strict musical relevance gate. Artist, era or popularity
+                # alone can never pass; a candidate needs verified audio,
+                # matching intent, same album/cluster, or strong metadata
+                # evidence. The queue may legitimately be shorter.
                 strong_context = (
-                    same_artist_context
-                    or float(item.get("_album_match", 0.0))
-                    or float(item.get("_cluster_match", 0.0))
-                    or float(item.get("_mood_match", 0.0)) >= 0.62
-                    or float(item.get("_metadata_similarity", 0.0)) >= 0.35
+                    float(item.get("_audio_match", 0.0)) >= 0.62
                     or float(item.get("_intent_match", 0.0)) >= 0.5
-                    or float(item.get("_metadata_similarity", 0.0)) >= 0.25
+                    or float(item.get("_album_match", 0.0)) >= 1.0
+                    or float(item.get("_cluster_match", 0.0)) >= 1.0
                     or (
-                        float(item.get("_style_match", 0.0))
-                        and (
-                            float(item.get("_language_match", 0.0))
-                            or float(item.get("_era_match", 0.0)) >= 0.65
-                        )
+                        float(item.get("_metadata_score", 0.0)) >= 0.55
+                        and float(item.get("_mood_match", 0.0)) >= 0.60
+                    )
+                    or (
+                        float(item.get("_seed_artist_match", 0.0))
+                        and float(item.get("_mood_match", 0.0)) >= 0.62
                     )
                 )
                 # Do not recommend a known different-language track merely
@@ -946,31 +952,7 @@ class HybridRecommendationEngine:
                     )
                 ):
                     continue
-                if not relaxed_context and has_seed and not strong_context and float(item.get("_profile_score", 0.0)) < 0.35:
-                    continue
-                if not relaxed_context and has_seed and seed_styles != {"neutral"} and not (
-                    (
-                        float(item.get("_seed_artist_match", 0.0))
-                        and (
-                            float(item.get("_mood_match", 0.0)) >= 0.62
-                            or float(item.get("_style_match", 0.0))
-                            or float(item.get("_metadata_similarity", 0.0)) >= 0.25
-                        )
-                    )
-                    or float(item.get("_album_match", 0.0))
-                    or float(item.get("_cluster_match", 0.0))
-                    or float(item.get("_mood_match", 0.0)) >= 0.62
-                    or float(item.get("_metadata_similarity", 0.0)) >= 0.35
-                    or float(item.get("_intent_match", 0.0)) >= 0.5
-                    or float(item.get("_metadata_similarity", 0.0)) >= 0.25
-                    or (
-                        float(item.get("_style_match", 0.0))
-                        and (
-                            float(item.get("_language_match", 0.0))
-                            or float(item.get("_era_match", 0.0)) >= 0.65
-                        )
-                    )
-                ):
+                if has_seed and not strong_context:
                     continue
                 adjusted = float(base_score)
                 # Maximal Marginal Relevance: preserve relevance while

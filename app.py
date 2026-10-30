@@ -690,38 +690,15 @@ def build_jio_up_next(
     # Ensure the playing seed has the same mood representation as candidates,
     # including when it came from the player refresh path rather than search.
     seed = enrich_live_items([seed])[0]
-    verified_candidates = enrich_live_items([dict(item) for item in search_results])
     title = str(seed.get("title", "")).strip()
     artists = str(seed.get("artists", "")).strip()
     album = str(seed.get("album", "")).strip()
 
-    # Verify intent from neighbouring search evidence instead of trusting one
-    # title keyword. Similar title/album neighbours vote for the intent; only
-    # labels supported by a meaningful share of the evidence are retained.
-    seed_intents = set(seed.get("intent_labels", ["general"]))
-    intent_votes: dict[str, float] = {}
-    seed_title_key_for_intent = re.sub(r"[^a-z0-9]+", " ", title.casefold()).strip()
-    seed_album_key_for_intent = re.sub(r"[^a-z0-9]+", " ", album.casefold()).strip()
-    for candidate in verified_candidates:
-        candidate_title_key = re.sub(r"[^a-z0-9]+", " ", str(candidate.get("title", "")).casefold()).strip()
-        candidate_album_key = re.sub(r"[^a-z0-9]+", " ", str(candidate.get("album", "")).casefold()).strip()
-        evidence = SequenceMatcher(None, seed_title_key_for_intent, candidate_title_key).ratio()
-        if seed_album_key_for_intent and candidate_album_key:
-            evidence = max(evidence, 0.65 * SequenceMatcher(None, seed_album_key_for_intent, candidate_album_key).ratio())
-        if evidence < 0.45:
-            continue
-        for intent in candidate.get("intent_labels", ["general"]):
-            intent_votes[intent] = intent_votes.get(intent, 0.0) + evidence
-    verified_intents = {
-        intent for intent, score in intent_votes.items()
-        if score / max(sum(intent_votes.values()), 1e-9) >= 0.16
-    }
-    if verified_intents:
-        shared_intents = seed_intents.intersection(verified_intents)
-        seed["intent_labels"] = sorted(shared_intents or verified_intents)
-    else:
-        seed["intent_labels"] = sorted(seed_intents)
-    verified_intents = set(seed["intent_labels"])
+    # Classify the seed independently. Search neighbours are candidate data,
+    # not evidence about the current track's intent; using them here caused a
+    # broad artist result (for example a motivational song) to redefine a
+    # romantic/acoustic seed.
+    verified_intents = set(seed.get("intent_labels", ["general"]))
 
     def valid_artist(value: object) -> bool:
         normalized = str(value or "").strip().casefold()
@@ -898,18 +875,8 @@ def build_jio_up_next(
             preferred_track_ids,
             seed=seed,
         )
-        if not ranked and collected:
-            # Keep the continuous relevance score, but relax only the hard
-            # context gate. Freshness, duplicate removal, MMR diversity and
-            # learned signals still apply.
-            ranked = hybrid.rank_jio_results(
-                enriched_collected,
-                user_id,
-                catalog,
-                preferred_track_ids,
-                seed=seed,
-                relaxed_context=True,
-            )
+        # Never relax the musical relevance gate merely to fill the queue.
+        # A shorter relevant radio is better than unrelated recommendations.
     except Exception:
         ranked = []
 
