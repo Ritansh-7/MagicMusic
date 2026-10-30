@@ -141,6 +141,16 @@ MOOD_VECTOR_FEATURES = (
     "instrumentalness", "speechiness", "liveness", "loudness", "popularity",
 )
 
+INTENT_TERMS = {
+    "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "pyar", "dil", "jaan", "saiyaara"},
+    "ghazal": {"ghazal", "ghazals", "shayar", "shayari", "mehfil", "rekhta"},
+    "motivational": {"motivation", "motivational", "zinda", "jeet", "victory", "fighter", "warrior", "rise", "goal", "inspire"},
+    "energetic": {"fight", "anthem", "rock", "power", "action", "dance", "party", "bhangra", "bang", "fire", "dhamaka", "dhamaal", "high", "energy"},
+    "sad": {"sad", "heartbreak", "alone", "broken", "dard", "udaas", "tanha", "judai"},
+    "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "shiva", "ram", "allah", "khuda"},
+    "calm": {"acoustic", "unplugged", "lofi", "sleep", "calm", "peace", "sukoon", "soothing", "instrumental"},
+}
+
 
 @st.cache_resource
 def build_catalog_clusters(data: pd.DataFrame) -> tuple[pd.DataFrame, StandardScaler, MiniBatchKMeans]:
@@ -228,6 +238,18 @@ def infer_metadata_mood(item: dict) -> dict:
     }
 
 
+def infer_music_intents(item: dict) -> list[str]:
+    """Infer a small intent set from live metadata in constant time."""
+    text = " ".join(
+        str(item.get(field, "")) for field in ("title", "album", "artists", "language")
+    ).casefold()
+    tokens = set(re.findall(r"[a-z0-9]+", text))
+    return [
+        label for label, terms in INTENT_TERMS.items()
+        if any((term in text if " " in term else term in tokens) for term in terms)
+    ] or ["general"]
+
+
 @st.cache_resource
 def build_live_catalog_lookup(data: pd.DataFrame) -> dict[tuple[str, str], dict]:
     lookup: dict[tuple[str, str], dict] = {}
@@ -304,6 +326,7 @@ def enrich_live_items(items: list[dict]) -> list[dict]:
         else:
             item.setdefault("feature_source", "live_metadata_fallback")
             item.update({key: value for key, value in infer_metadata_mood(item).items() if key not in item})
+        item["intent_labels"] = infer_music_intents(item)
     return items
 
 
@@ -615,9 +638,38 @@ def build_jio_up_next(
     # Ensure the playing seed has the same mood representation as candidates,
     # including when it came from the player refresh path rather than search.
     seed = enrich_live_items([seed])[0]
+    verified_candidates = enrich_live_items([dict(item) for item in search_results])
     title = str(seed.get("title", "")).strip()
     artists = str(seed.get("artists", "")).strip()
     album = str(seed.get("album", "")).strip()
+
+    # Verify intent from neighbouring search evidence instead of trusting one
+    # title keyword. Similar title/album neighbours vote for the intent; only
+    # labels supported by a meaningful share of the evidence are retained.
+    seed_intents = set(seed.get("intent_labels", ["general"]))
+    intent_votes: dict[str, float] = {}
+    seed_title_key_for_intent = re.sub(r"[^a-z0-9]+", " ", title.casefold()).strip()
+    seed_album_key_for_intent = re.sub(r"[^a-z0-9]+", " ", album.casefold()).strip()
+    for candidate in verified_candidates:
+        candidate_title_key = re.sub(r"[^a-z0-9]+", " ", str(candidate.get("title", "")).casefold()).strip()
+        candidate_album_key = re.sub(r"[^a-z0-9]+", " ", str(candidate.get("album", "")).casefold()).strip()
+        evidence = SequenceMatcher(None, seed_title_key_for_intent, candidate_title_key).ratio()
+        if seed_album_key_for_intent and candidate_album_key:
+            evidence = max(evidence, 0.65 * SequenceMatcher(None, seed_album_key_for_intent, candidate_album_key).ratio())
+        if evidence < 0.45:
+            continue
+        for intent in candidate.get("intent_labels", ["general"]):
+            intent_votes[intent] = intent_votes.get(intent, 0.0) + evidence
+    verified_intents = {
+        intent for intent, score in intent_votes.items()
+        if score / max(sum(intent_votes.values()), 1e-9) >= 0.16
+    }
+    if verified_intents:
+        shared_intents = seed_intents.intersection(verified_intents)
+        seed["intent_labels"] = sorted(shared_intents or verified_intents)
+    else:
+        seed["intent_labels"] = sorted(seed_intents)
+    verified_intents = set(seed["intent_labels"])
 
     def valid_artist(value: object) -> bool:
         normalized = str(value or "").strip().casefold()
@@ -690,6 +742,7 @@ def build_jio_up_next(
             f"{artist} popular songs",
             f"{artist} latest songs",
         ])
+        related_queries.extend(f"{artist} {intent}" for intent in sorted(verified_intents) if intent != "general")
     if album:
         related_queries.extend([f"{album} songs", f"{album} soundtrack"])
     if title:
@@ -700,6 +753,7 @@ def build_jio_up_next(
             f"{title} playlist",
             f"{title} ghazal",
         ])
+        related_queries.extend(f"{title} {intent}" for intent in sorted(verified_intents) if intent != "general")
     fallback_queries = [
         "popular songs", "trending songs", "bollywood songs",
         "classic songs", "romantic songs", "old songs",
