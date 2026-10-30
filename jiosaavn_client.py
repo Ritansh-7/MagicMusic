@@ -16,7 +16,7 @@ def _cached_search_page(base_url: str, query: str) -> tuple[dict[str, Any], ...]
         response = requests.get(
             f"{base_url}/result/",
             params={"query": query, "lyrics": "false"},
-            timeout=7,
+            timeout=5,
         )
         response.raise_for_status()
         payload = response.json()

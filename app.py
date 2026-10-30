@@ -823,32 +823,34 @@ def build_jio_up_next(
             seen.add(title_key)
             collected.append(item)
 
-    def collect_queries(queries: list[str], page_limit: int = 12) -> None:
-        # Fetch a small batch concurrently. The cap avoids overwhelming the
-        # public upstream API while cutting queue-build latency substantially.
-        queries = [query for query in queries if query]
-        for start in range(0, len(queries), 4):
-            batch = queries[start:start + 4]
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                pages = executor.map(lambda value: client.search_direct(value, limit=page_limit), batch)
-                for page in pages:
-                    collect_items(page)
-            if len(collected) >= limit:
-                break
+    def collect_queries(queries: list[str], page_limit: int = 12, max_queries: int = 16) -> None:
+        # One bounded concurrent wave is faster than sequential batches. The
+        # upstream client is cached, so repeated songs do not cause repeated
+        # network work across Streamlit reruns.
+        queries = list(dict.fromkeys(query for query in queries if query))[:max_queries]
+        if not queries:
+            return
+        with ThreadPoolExecutor(max_workers=min(8, len(queries))) as executor:
+            pages = executor.map(lambda value: client.search_direct(value, limit=page_limit), queries)
+            for page in pages:
+                collect_items(page)
 
-    collect_queries(related_queries, page_limit=12)
+    collect_queries(related_queries, page_limit=12, max_queries=16)
     # A full expanded artist page is used only when the related pages have not
     # produced enough candidates for the large Up Next shelf.
     if len(collected) < 60:
-        for artist in artist_names[:3]:
-            collect_items(client.search(f"{artist} songs", limit=30))
+        collect_queries(
+            [f"{artist} songs" for artist in artist_names[:3]],
+            page_limit=20,
+            max_queries=3,
+        )
     if len(collected) < 60:
-        collect_queries(fallback_queries, page_limit=15)
+        collect_queries(fallback_queries, page_limit=15, max_queries=6)
     # The public upstream service can return only a few rows per query. Use
     # broader but still seed-related pages as a final capacity pass so a
     # selected recommendation gets its own large queue instead of inheriting
     # the old queue's remainder.
-    if len(collected) < 60:
+    if len(collected) < 45:
         broad_queries = []
         for artist in artist_names[:2]:
             broad_queries.extend([
@@ -867,7 +869,7 @@ def build_jio_up_next(
                 f"{intent} songs {decade}s"
                 for intent in sorted(verified_intents) if intent != "general"
             )
-        collect_queries(broad_queries, page_limit=20)
+        collect_queries(broad_queries, page_limit=20, max_queries=10)
     enriched_collected = enrich_live_items(collected)
     try:
         ranked = hybrid.rank_jio_results(
