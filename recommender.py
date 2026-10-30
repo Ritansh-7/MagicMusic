@@ -5,6 +5,43 @@ import pandas as pd
 
 ERA_COMPATIBILITY_WINDOW_YEARS = 30
 HYBRID_MODEL_VERSION = "hybrid-v4-multistage"
+
+
+def _metadata_feature_tokens(item: dict) -> dict[str, float]:
+    """Create a generic sparse metadata vector for diversity scoring."""
+    text = " ".join(
+        str(item.get(field, "")).lower()
+        for field in ("title", "album", "artists", "language")
+    )
+    counts: dict[str, float] = {}
+    for token in re.findall(r"[a-z0-9]+", text):
+        counts[token] = counts.get(token, 0.0) + 1.0
+    return counts
+
+
+def _sparse_cosine(left: dict[str, float], right: dict[str, float]) -> float:
+    common = set(left).intersection(right)
+    numerator = sum(left[key] * right[key] for key in common)
+    left_norm = sum(value * value for value in left.values()) ** 0.5
+    right_norm = sum(value * value for value in right.values()) ** 0.5
+    return numerator / (left_norm * right_norm) if left_norm and right_norm else 0.0
+
+
+def _candidate_similarity(left: dict, right: dict) -> float:
+    """Cosine-like similarity used only for MMR diversity reranking."""
+    text_score = _sparse_cosine(
+        left.get("_feature_tokens", {}), right.get("_feature_tokens", {})
+    )
+    left_mood = np.asarray(left.get("mood_vector", []), dtype=float)
+    right_mood = np.asarray(right.get("mood_vector", []), dtype=float)
+    mood_score = 0.0
+    if left_mood.size and left_mood.size == right_mood.size:
+        denominator = float(np.linalg.norm(left_mood) * np.linalg.norm(right_mood))
+        mood_score = float(np.dot(left_mood, right_mood) / denominator) if denominator else 0.0
+    left_year = int(left.get("year", 0) or 0)
+    right_year = int(right.get("year", 0) or 0)
+    era_score = float(np.exp(-((left_year - right_year) / 18.0) ** 2)) if left_year and right_year else 0.0
+    return 0.55 * text_score + 0.30 * max(0.0, mood_score) + 0.15 * era_score
 import re
 from scipy.sparse import hstack, csr_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -508,42 +545,7 @@ class HybridRecommendationEngine:
         }
         seed_styles = seed_styles or {"neutral"}
         seed_mood = np.asarray((seed or {}).get("mood_vector", []), dtype=float)
-        def feature_tokens(item: dict) -> dict[str, float]:
-            """Create a generic sparse metadata vector for diversity scoring."""
-            text = " ".join(
-                str(item.get(field, "")).lower()
-                for field in ("title", "album", "artists", "language")
-            )
-            tokens = re.findall(r"[a-z0-9]+", text)
-            counts: dict[str, float] = {}
-            for token in tokens:
-                counts[token] = counts.get(token, 0.0) + 1.0
-            return counts
-
-        def sparse_cosine(left: dict[str, float], right: dict[str, float]) -> float:
-            common = set(left).intersection(right)
-            numerator = sum(left[key] * right[key] for key in common)
-            left_norm = sum(value * value for value in left.values()) ** 0.5
-            right_norm = sum(value * value for value in right.values()) ** 0.5
-            return numerator / (left_norm * right_norm) if left_norm and right_norm else 0.0
-
-        def candidate_similarity(left: dict, right: dict) -> float:
-            """Cosine-like similarity used only for MMR diversity reranking."""
-            text_score = sparse_cosine(
-                left.get("_feature_tokens", {}), right.get("_feature_tokens", {})
-            )
-            left_mood = np.asarray(left.get("mood_vector", []), dtype=float)
-            right_mood = np.asarray(right.get("mood_vector", []), dtype=float)
-            mood_score = 0.0
-            if left_mood.size and left_mood.size == right_mood.size:
-                denominator = float(np.linalg.norm(left_mood) * np.linalg.norm(right_mood))
-                mood_score = float(np.dot(left_mood, right_mood) / denominator) if denominator else 0.0
-            left_year = int(left.get("year", 0) or 0)
-            right_year = int(right.get("year", 0) or 0)
-            era_score = float(np.exp(-((left_year - right_year) / 18.0) ** 2)) if left_year and right_year else 0.0
-            return 0.55 * text_score + 0.30 * max(0.0, mood_score) + 0.15 * era_score
-
-        seed_feature_tokens = feature_tokens(seed or {})
+        seed_feature_tokens = _metadata_feature_tokens(seed or {})
         seed_confidence = float((seed or {}).get("mood_confidence", 0.0) or 0.0)
         seed_intents = set((seed or {}).get("intent_labels", [])) - {"general"}
 
@@ -627,7 +629,7 @@ class HybridRecommendationEngine:
                 and seed_styles.intersection(item_styles)
             ) else 0.0
             mood_match = mood_similarity(item)
-            metadata_similarity = sparse_cosine(seed_feature_tokens, feature_tokens(item))
+            metadata_similarity = _sparse_cosine(seed_feature_tokens, _metadata_feature_tokens(item))
             item_intents = set(item.get("intent_labels", [])) - {"general"}
             intent_match = (
                 len(seed_intents.intersection(item_intents)) / max(len(seed_intents), 1)
@@ -663,7 +665,7 @@ class HybridRecommendationEngine:
             item["_cluster_match"] = cluster_match
             item["_style_match"] = style_match
             item["_mood_match"] = mood_match
-            item["_feature_tokens"] = feature_tokens(item)
+            item["_feature_tokens"] = _metadata_feature_tokens(item)
             item["_metadata_similarity"] = metadata_similarity
             item["_intent_match"] = intent_match
             item["_intent_conflict"] = intent_conflict
@@ -820,7 +822,7 @@ class HybridRecommendationEngine:
                 # already selected. No version/artist/album names are special-
                 # cased; the metadata feature space determines the penalty.
                 if selected:
-                    redundancy = max(candidate_similarity(item, chosen) for chosen in selected)
+                    redundancy = max(_candidate_similarity(item, chosen) for chosen in selected)
                     adjusted = 0.82 * adjusted - 0.18 * redundancy
                 # Prevent the same singer from appearing repeatedly. The
                 # first appearance is free; subsequent appearances are

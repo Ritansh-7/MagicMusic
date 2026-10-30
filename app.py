@@ -1567,13 +1567,30 @@ if jio_now:
             if existing_queue:
                 # Re-rank the already fetched queue immediately. This keeps
                 # the full recommendation shelf visible after a live like.
-                st.session_state["jio_queue"] = hybrid_engine.rank_jio_results(
-                    existing_queue,
-                    local_user_id,
-                    data,
-                    preferred_track_ids,
-                    seed=jio_now,
-                )[:70]
+                try:
+                    st.session_state["jio_queue"] = hybrid_engine.rank_jio_results(
+                        existing_queue,
+                        local_user_id,
+                        data,
+                        preferred_track_ids,
+                        seed=jio_now,
+                    )[:70]
+                except Exception:
+                    # A like must never crash the player. Rebuild from the
+                    # current seed if a malformed queue item reaches ranking.
+                    try:
+                        st.session_state["jio_queue"] = build_jio_up_next(
+                            jio_now,
+                            st.session_state.get("jio_search_cache_v2", {}).get(search_query.strip().lower(), []),
+                            jio_client,
+                            hybrid_engine,
+                            local_user_id,
+                            data,
+                            preferred_track_ids,
+                            exclude_items=[jio_now],
+                        )
+                    except Exception:
+                        st.session_state["jio_queue"] = existing_queue
                 st.session_state["jio_queue_seed_id"] = current_id
             else:
                 cached_results = st.session_state.get("jio_search_cache_v2", {}).get(search_query.strip().lower(), [])
