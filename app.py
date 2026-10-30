@@ -618,7 +618,63 @@ def build_jio_up_next(
     title = str(seed.get("title", "")).strip()
     artists = str(seed.get("artists", "")).strip()
     album = str(seed.get("album", "")).strip()
-    artist_names = [name.strip() for name in artists.split(",") if name.strip()]
+
+    def valid_artist(value: object) -> bool:
+        normalized = str(value or "").strip().casefold()
+        return bool(normalized and normalized not in {"unknown", "n/a", "na", "-"})
+
+    # Two-step identity check for sparse live metadata:
+    # 1) compare title/album similarity against the seed;
+    # 2) let the strongest repeated artist vote become the resolved artist.
+    # This is query-local consensus, so no singer name is hardcoded.
+    seed_title_key = re.sub(r"[^a-z0-9]+", " ", title.casefold()).strip()
+    seed_album_key = re.sub(r"[^a-z0-9]+", " ", album.casefold()).strip()
+    artist_votes: dict[str, float] = {}
+    artist_display: dict[str, str] = {}
+    for candidate in [seed, *search_results]:
+        candidate_title = str(candidate.get("title", "")).strip()
+        candidate_artists = [
+            value.strip() for value in str(candidate.get("artists", "")).split(",")
+            if valid_artist(value)
+        ]
+        if not candidate_artists:
+            continue
+        candidate_title_key = re.sub(r"[^a-z0-9]+", " ", candidate_title.casefold()).strip()
+        candidate_album_key = re.sub(
+            r"[^a-z0-9]+", " ", str(candidate.get("album", "")).casefold()
+        ).strip()
+        title_similarity = SequenceMatcher(None, seed_title_key, candidate_title_key).ratio()
+        album_similarity = SequenceMatcher(None, seed_album_key, candidate_album_key).ratio() if seed_album_key and candidate_album_key else 0.0
+        evidence = max(title_similarity, 0.65 * album_similarity)
+        if candidate is seed:
+            evidence = 1.0
+        if evidence < 0.45:
+            continue
+        for artist in candidate_artists:
+            key = re.sub(r"\s+", " ", artist.casefold()).strip()
+            artist_votes[key] = artist_votes.get(key, 0.0) + evidence
+            artist_display.setdefault(key, artist)
+
+    existing_artists = [name.strip() for name in artists.split(",") if valid_artist(name)]
+    if artist_votes:
+        consensus_key, consensus_score = max(artist_votes.items(), key=lambda pair: pair[1])
+        total_votes = sum(artist_votes.values())
+        # Require a meaningful share of the evidence; otherwise preserve all
+        # upstream artists instead of forcing an uncertain identity.
+        if not existing_artists and (consensus_score / max(total_votes, 1e-9) >= 0.35):
+            existing_artists = [artist_display[consensus_key]]
+            seed["artists"] = existing_artists[0]
+        elif existing_artists and consensus_score > 1.0 and any(
+            consensus_key == re.sub(r"\s+", " ", artist.casefold()).strip()
+            for artist in existing_artists
+        ):
+            # Put the consensus artist first without discarding collaborators.
+            existing_artists = [artist_display[consensus_key]] + [
+                artist for artist in existing_artists
+                if artist.casefold() != artist_display[consensus_key].casefold()
+            ]
+            seed["artists"] = ", ".join(existing_artists)
+    artist_names = existing_artists
     related_queries = []
     for artist in artist_names[:5]:
         related_queries.extend([
@@ -628,6 +684,9 @@ def build_jio_up_next(
             f"{artist} old songs",
             f"{artist} classics",
             f"{artist} romantic songs",
+            f"{artist} ghazals",
+            f"{artist} best ghazals",
+            f"{artist} popular ghazals",
             f"{artist} popular songs",
             f"{artist} latest songs",
         ])
@@ -639,6 +698,7 @@ def build_jio_up_next(
             f"songs like {title}",
             f"{title} soundtrack",
             f"{title} playlist",
+            f"{title} ghazal",
         ])
     fallback_queries = [
         "popular songs", "trending songs", "bollywood songs",
