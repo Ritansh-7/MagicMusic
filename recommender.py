@@ -504,9 +504,6 @@ class HybridRecommendationEngine:
         }
         seed_styles = seed_styles or {"neutral"}
         seed_mood = np.asarray((seed or {}).get("mood_vector", []), dtype=float)
-        seed_feature_tokens = feature_tokens(seed or {})
-        seed_confidence = float((seed or {}).get("mood_confidence", 0.0) or 0.0)
-        seed_intents = set((seed or {}).get("intent_labels", [])) - {"general"}
         def feature_tokens(item: dict) -> dict[str, float]:
             """Create a generic sparse metadata vector for diversity scoring."""
             text = " ".join(
@@ -541,6 +538,10 @@ class HybridRecommendationEngine:
             right_year = int(right.get("year", 0) or 0)
             era_score = float(np.exp(-((left_year - right_year) / 18.0) ** 2)) if left_year and right_year else 0.0
             return 0.55 * text_score + 0.30 * max(0.0, mood_score) + 0.15 * era_score
+
+        seed_feature_tokens = feature_tokens(seed or {})
+        seed_confidence = float((seed or {}).get("mood_confidence", 0.0) or 0.0)
+        seed_intents = set((seed or {}).get("intent_labels", [])) - {"general"}
 
         def mood_similarity(item: dict) -> float:
             item_mood = np.asarray(item.get("mood_vector", []), dtype=float)
