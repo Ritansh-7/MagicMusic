@@ -109,9 +109,9 @@ def configured_database_url() -> str:
     """Use persistent cloud Postgres when configured, otherwise local SQLite."""
     database_url = os.getenv("DATABASE_URL", "").strip()
     if database_url:
-        return database_url
+        return database_url.strip().rstrip("\\").strip('"').strip("'")
     try:
-        return str(st.secrets.get("DATABASE_URL", "")).strip()
+        return str(st.secrets.get("DATABASE_URL", "")).strip().rstrip("\\").strip('"').strip("'")
     except (FileNotFoundError, KeyError, AttributeError):
         return ""
 
@@ -211,7 +211,19 @@ live_catalog_lookup = build_live_catalog_lookup(data)
 imported_history = load_imported_history(HISTORY_PATH)
 engine = build_engine(data)
 stats = engine.catalog_stats()
-user_store = UserStore(EVENT_DB_PATH, database_url=configured_database_url())
+database_url = configured_database_url()
+try:
+    user_store = UserStore(EVENT_DB_PATH, database_url=database_url)
+except Exception:
+    # Keep the UI usable while a cloud database is paused, misconfigured, or
+    # temporarily unreachable. Once DATABASE_URL is corrected and the app is
+    # rebooted, UserStore automatically returns to the configured MySQL DB.
+    user_store = UserStore(EVENT_DB_PATH)
+    if database_url:
+        st.warning(
+            "Cloud database is unavailable right now. TuneMatch is using temporary local storage; "
+            "fix DATABASE_URL and reboot to persist users and activity."
+        )
 jio_client = JioSaavnClient()
 hybrid_engine = build_hybrid_engine(engine)
 st.session_state.setdefault("local_session_id", uuid.uuid4().hex)
