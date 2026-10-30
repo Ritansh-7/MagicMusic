@@ -21,13 +21,13 @@ It is not Spotify's proprietary system. It is an explainable, deployable recomme
 ```text
 Live JioSaavn results + local catalog
                 ↓
-Candidate cleaning and feature enrichment
+Candidate cleaning and parallel multi-channel retrieval
                 ↓
-Content, mood-cluster, collaborative and sequence signals
+Audio content, mood/intent, long/short preference, collaborative and sequence signals
                 ↓
-Hybrid ranking
+Hybrid ranker + optional LambdaMART learning-to-rank correction
                 ↓
-Artist/album/recent-item diversity reranking
+MMR-style artist/album/recent-item diversity reranking
                 ↓
 Personalized 60–70 song queue
 ```
@@ -80,12 +80,28 @@ For every candidate song `i`, the current hybrid score is:
 
 ```text
 score(i) =
-    0.60 × current_song_context(i)
-  + 0.15 × user_taste(i)
-  + 0.15 × transition_score(i)
+    0.55 × current_song_context(i)
+  + 0.12 × transition_score(i)
+  + 0.12 × user_taste(i)
   + 0.05 × collaborative_score(i)
-  + 0.05 × popularity_score(i)
+  + 0.04 × popularity_score(i)
+  + 0.07 × short_term_preference(i)
+  + 0.05 × long_term_preference(i)
 ```
+
+The short-term preference decays over approximately 14 days and the long-term
+preference over approximately 180 days. The current song remains the strongest
+anchor, so a new play can change the next queue without waiting for retraining.
+When at least 30 impression-labelled examples and 5 positive outcomes exist,
+the optional `ranking_model.py` layer applies a small learned correction. It
+uses LightGBM LambdaMART when the optional package is installed; otherwise it
+uses a fast HistGradientBoosting fallback and never blocks playback.
+
+Recommendation impressions record the candidate feature vector, rank, score,
+source and model version. Later plays, likes and skips provide labels for
+Precision@10, NDCG@10 and exposure play-through. Users are assigned a stable
+control/diverse experiment variant so model changes can be compared instead of
+judged only by anecdotal sessions.
 
 For the current live song, seed-content similarity uses:
 

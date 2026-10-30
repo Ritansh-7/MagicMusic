@@ -319,9 +319,9 @@ class UserStore:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT user_id, track_id, event_type, session_id, duration_ms, created_at
+                SELECT user_id, track_id, event_type, session_id, duration_ms, metadata_json, created_at
                 FROM behavior_events
-                WHERE track_id IS NOT NULL
+                WHERE track_id IS NOT NULL OR event_type = 'recommendation_impression'
                 """
             ).fetchall()
         return [dict(row) for row in rows]

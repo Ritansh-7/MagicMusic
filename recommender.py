@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
+import re
 import numpy as np
 import pandas as pd
 
 ERA_COMPATIBILITY_WINDOW_YEARS = 30
-HYBRID_MODEL_VERSION = "hybrid-v4-multistage"
+HYBRID_MODEL_VERSION = "hybrid-v5-audio-ltr"
 
 
 def _metadata_feature_tokens(item: dict) -> dict[str, float]:
@@ -48,6 +50,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import TruncatedSVD
 from sklearn.preprocessing import MinMaxScaler, normalize
 from sklearn.metrics.pairwise import cosine_similarity
+from ranking_model import LearnedRanker
 
 
 AUDIO_FEATURES = [
@@ -406,9 +409,13 @@ class HybridRecommendationEngine:
         self.item_popularity: dict[str, float] = {}
         self.transition_scores: dict[str, dict[str, float]] = {}
         self.user_recent_items: dict[str, list[str]] = {}
+        self.short_artist_preferences: dict[str, dict[str, float]] = {}
+        self.long_artist_preferences: dict[str, dict[str, float]] = {}
+        self.learned_ranker = LearnedRanker()
 
     def fit(self, events: list[dict] | pd.DataFrame) -> "HybridRecommendationEngine":
         frame = pd.DataFrame(events)
+        self.learned_ranker.fit(frame)
         if frame.empty or not {"user_id", "track_id", "event_type"}.issubset(frame.columns):
             return self
         frame = frame.dropna(subset=["user_id", "track_id"]).copy()
@@ -422,6 +429,33 @@ class HybridRecommendationEngine:
             frame["created_at"] = pd.to_datetime(frame["created_at"], errors="coerce", utc=True)
         else:
             frame["created_at"] = pd.NaT
+        # Two preference horizons: recent intent should react quickly, while
+        # the long horizon keeps stable taste from disappearing after one skip.
+        self.short_artist_preferences = {}
+        self.long_artist_preferences = {}
+        now = pd.Timestamp.now(tz="UTC")
+        for row in frame.itertuples(index=False):
+            metadata = getattr(row, "metadata_json", "") or ""
+            try:
+                payload = json.loads(metadata) if isinstance(metadata, str) else {}
+            except (TypeError, ValueError):
+                payload = {}
+            artists = [part.strip().casefold() for part in str(payload.get("artists", "")).split(",") if part.strip()]
+            if not artists:
+                continue
+            try:
+                age_days = max(0.0, (now - getattr(row, "created_at")).total_seconds() / 86400.0)
+            except (AttributeError, TypeError, ValueError):
+                age_days = 30.0
+            weight = float(getattr(row, "weight", 0.0) or 0.0)
+            short_weight = weight * float(np.exp(-age_days / 14.0))
+            long_weight = weight * float(np.exp(-age_days / 180.0))
+            user = str(getattr(row, "user_id", ""))
+            short_map = self.short_artist_preferences.setdefault(user, {})
+            long_map = self.long_artist_preferences.setdefault(user, {})
+            for artist in artists:
+                short_map[artist] = short_map.get(artist, 0.0) + short_weight
+                long_map[artist] = long_map.get(artist, 0.0) + long_weight
         frame = frame.sort_values(["user_id", "session_id", "created_at"] if "session_id" in frame else ["user_id", "created_at"])
 
         # Recent listening context: used for freshness and repeat avoidance.
@@ -703,6 +737,31 @@ class HybridRecommendationEngine:
                 item["recommendation_reason"] = "Your taste, matched to this session"
             else:
                 item["recommendation_reason"] = "Fits your current listening context"
+        # Long-term and short-term artist embeddings are represented as
+        # recency-weighted preference vectors. They are cheap, interpretable,
+        # and remain useful when live IDs do not match the local catalog.
+        short_artist = self.short_artist_preferences.get(str(user_id), {})
+        long_artist = self.long_artist_preferences.get(str(user_id), {})
+        short_max = max([abs(value) for value in short_artist.values()] or [1.0])
+        long_max = max([abs(value) for value in long_artist.values()] or [1.0])
+        for item in results:
+            artists = [part.strip().casefold() for part in str(item.get("artists", "")).split(",") if part.strip()]
+            short_score = min(1.0, max([short_artist.get(artist, 0.0) for artist in artists] or [0.0]) / short_max)
+            long_score = min(1.0, max([long_artist.get(artist, 0.0) for artist in artists] or [0.0]) / long_max)
+            item["_short_term"] = max(0.0, short_score)
+            item["_long_term"] = max(0.0, long_score)
+            item["recommendation_features"] = {
+                "context": float(item.get("_context_score", 0.0)),
+                "mood": float(item.get("_mood_match", 0.0)),
+                "intent": float(item.get("_intent_match", 0.0)),
+                "metadata": float(item.get("_metadata_similarity", 0.0)),
+                "era": float(item.get("_era_match", 0.0)),
+                "language": float(item.get("_language_match", 0.0)),
+                "transition": float(transition_map.get(str(item.get("song_id") or item.get("title", "")), 0.0)),
+                "short_term": item["_short_term"],
+                "long_term": item["_long_term"],
+                "audio_confidence": float(item.get("mood_confidence", 0.0) or 0.0),
+            }
         content = np.asarray(content, dtype=float)
         popularity = np.asarray([
             self.item_popularity.get(item_id, 0.0) for item_id in item_ids
@@ -715,16 +774,31 @@ class HybridRecommendationEngine:
         profile_values = np.asarray([float(item.get("_profile_score", 0.0)) for item in results])
         if has_seed:
             hybrid = (
-                0.60 * context_values
-                + 0.15 * transition_values
-                + 0.15 * profile_values
+                0.55 * context_values
+                + 0.12 * transition_values
+                + 0.12 * profile_values
                 + 0.05 * collaborative
-                + 0.05 * popularity
+                + 0.04 * popularity
+                + 0.07 * np.asarray([item.get("_short_term", 0.0) for item in results])
+                + 0.05 * np.asarray([item.get("_long_term", 0.0) for item in results])
             )
         else:
             # Search results have no current-track anchor; preserve the
             # original taste/collaborative search ranking in that view.
-            hybrid = 0.50 * content + 0.25 * collaborative + 0.15 * transition_values + 0.10 * popularity
+            hybrid = (
+                0.45 * content + 0.22 * collaborative + 0.12 * transition_values
+                + 0.08 * popularity
+                + 0.08 * np.asarray([item.get("_short_term", 0.0) for item in results])
+                + 0.05 * np.asarray([item.get("_long_term", 0.0) for item in results])
+            )
+
+        # A learned layer is intentionally a small final correction. It only
+        # activates after impression/play labels pass its data threshold.
+        for item, score in zip(results, hybrid):
+            item["recommendation_score"] = float(score)
+        learned = self.learned_ranker.predict(results)
+        if learned.size and np.any(learned):
+            hybrid = 0.88 * hybrid + 0.12 * learned
 
         # Sequence-aware reranking: avoid immediate repeats and prevent one
         # artist/album from occupying the whole Up Next queue.
@@ -851,6 +925,9 @@ class HybridRecommendationEngine:
                 "era": round(float(chosen.get("_era_match", 0.0)), 4),
                 "language": round(float(chosen.get("_language_match", 0.0)), 4),
                 "transition": round(float(transition_map.get(str(chosen.get("song_id") or chosen.get("title", "")), 0.0)), 4),
+                "short_term": round(float(chosen.get("_short_term", 0.0)), 4),
+                "long_term": round(float(chosen.get("_long_term", 0.0)), 4),
+                "audio_confidence": round(float(chosen.get("mood_confidence", 0.0) or 0.0), 4),
             }
             chosen["recommendation_model_version"] = HYBRID_MODEL_VERSION
             selected.append(chosen)

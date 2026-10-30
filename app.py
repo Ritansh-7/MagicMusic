@@ -4,6 +4,7 @@ import time
 import uuid
 import re
 import json
+import hashlib
 from difflib import SequenceMatcher
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
@@ -405,6 +406,10 @@ except Exception:
 jio_client = JioSaavnClient()
 hybrid_engine = build_hybrid_engine(engine)
 st.session_state.setdefault("local_session_id", uuid.uuid4().hex)
+if "recommendation_variant" not in st.session_state:
+    variant_key = str(st.session_state.get("local_user_id") or st.session_state["local_session_id"])
+    bucket = int(hashlib.sha256(variant_key.encode("utf-8")).hexdigest()[:8], 16) % 2
+    st.session_state["recommendation_variant"] = "diverse" if bucket else "control"
 st.session_state.setdefault("jio_search_cache_v2", {})
 st.session_state.setdefault("jio_loop", False)
 st.session_state.setdefault("scroll_to_player", False)
@@ -982,6 +987,7 @@ def build_jio_up_next(
                 "recommendation_impression",
                 metadata={
                     "model_version": HYBRID_MODEL_VERSION,
+                    "experiment_variant": st.session_state.get("recommendation_variant", "control"),
                     "seed_track_id": str(seed.get("song_id") or seed.get("title", "")),
                     "seed_title": seed.get("title", ""),
                     "items": [
@@ -991,6 +997,7 @@ def build_jio_up_next(
                             "rank": item.get("recommendation_rank"),
                             "score": item.get("recommendation_score", 0.0),
                             "source": item.get("recommendation_source", "current_track_radio"),
+                            "features": item.get("recommendation_features", {}),
                         }
                         for item in queue[:25]
                     ],
@@ -1055,6 +1062,8 @@ with st.sidebar:
                 )
             if ok:
                 st.session_state["local_user_id"] = message
+                bucket = int(hashlib.sha256(str(message).encode("utf-8")).hexdigest()[:8], 16) % 2
+                st.session_state["recommendation_variant"] = "diverse" if bucket else "control"
                 st.session_state["local_session_started_at"] = time.time()
                 st.session_state["local_is_admin"] = user_store.is_admin(message)
                 log_behavior("session_start")
