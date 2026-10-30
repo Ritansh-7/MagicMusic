@@ -138,7 +138,7 @@ def build_engine(data):
 
 MOOD_FEATURES = (
     "energy", "tempo", "valence", "danceability", "acousticness",
-    "instrumentalness", "speechiness", "liveness", "loudness", "popularity",
+    "instrumentalness", "speechiness", "liveness", "loudness",
 )
 MOOD_VECTOR_FEATURES = (
     "energy", "tempo", "valence", "danceability", "acousticness",
@@ -213,7 +213,7 @@ def infer_metadata_mood(item: dict) -> dict:
     }
     labels = []
     groups = {
-        "energetic": {"fight", "anthem", "rock", "zinda", "sultan", "power", "action", "dance", "party", "bhangra", "bang", "fire", "dhamaka", "warrior", "bhaag", "milkha", "singham", "chaiyya", "ramta", "appadipodu", "mappillai", "title track"},
+        "energetic": {"fight", "anthem", "rock", "zinda", "sultan", "power", "action", "dance", "party", "bhangra", "bang", "fire", "dhamaka", "warrior", "bhaag", "milkha", "singham", "chaiyya", "ramta", "appadipodu", "mappillai"},
         "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "dil", "jaan", "saiyaara"},
         "sad": {"sad", "heartbreak", "alone", "broken", "dard", "udaas"},
         "instrumental": {"theme", "score", "background", "instrumental", "bgm", "soundtrack"},
@@ -784,17 +784,7 @@ def build_jio_up_next(
         related_queries.extend([
             f"{artist} songs",
             f"{artist} best songs",
-            f"{artist} hits",
-            f"{artist} old songs",
-            f"{artist} classics",
-            f"{artist} romantic songs",
-            f"{artist} hindi songs",
-            f"{artist} ghazals",
-            f"{artist} hindi ghazals",
-            f"{artist} best ghazals",
-            f"{artist} popular ghazals",
-            f"{artist} popular songs",
-            f"{artist} latest songs",
+            f"{artist} similar songs",
         ])
         related_queries.extend(f"{artist} {intent}" for intent in sorted(verified_intents) if intent != "general")
     if album:
@@ -804,9 +794,7 @@ def build_jio_up_next(
             f"{title} similar songs",
             f"songs like {title}",
             f"{title} soundtrack",
-            f"{title} playlist",
-            f"{title} ghazal",
-            f"{title} hindi song",
+            f"{title} acoustic songs" if "acoustic_indie" in verified_intents else f"{title} songs",
         ])
         related_queries.extend(f"{title} {intent}" for intent in sorted(verified_intents) if intent != "general")
     try:
@@ -845,7 +833,7 @@ def build_jio_up_next(
     for item in exclude_items or []:
         search_ids.add(str(item.get("song_id") or item.get("title", "")))
         search_titles.add(normalize_title(item.get("title", "")))
-    def collect_items(items: list[dict]) -> None:
+    def collect_items(items: list[dict], source: str = "metadata_discovery") -> None:
         for item in items:
             key = str(item.get("song_id") or item.get("title", ""))
             title_key = normalize_title(item.get("title", ""))
@@ -853,9 +841,10 @@ def build_jio_up_next(
                 continue
             seen.add(key)
             seen.add(title_key)
+            item.setdefault("candidate_source", source)
             collected.append(item)
 
-    def collect_queries(queries: list[str], page_limit: int = 12, max_queries: int = 16) -> None:
+    def collect_queries(queries: list[str], page_limit: int = 12, max_queries: int = 16, source: str = "metadata_discovery") -> None:
         # One bounded concurrent wave is faster than sequential batches. The
         # upstream client is cached, so repeated songs do not cause repeated
         # network work across Streamlit reruns.
@@ -865,9 +854,9 @@ def build_jio_up_next(
         with ThreadPoolExecutor(max_workers=min(8, len(queries))) as executor:
             pages = executor.map(lambda value: client.search_direct(value, limit=page_limit), queries)
             for page in pages:
-                collect_items(page)
+                collect_items(page, source)
 
-    collect_queries(related_queries, page_limit=12, max_queries=16)
+    collect_queries(related_queries, page_limit=12, max_queries=16, source="seed_artist_and_intent")
     # A full expanded artist page is used only when the related pages have not
     # produced enough candidates for the large Up Next shelf.
     if len(collected) < 60:
@@ -875,9 +864,10 @@ def build_jio_up_next(
             [f"{artist} songs" for artist in artist_names[:3]],
             page_limit=20,
             max_queries=3,
+            source="artist_discovery",
         )
     if len(collected) < 60:
-        collect_queries(fallback_queries, page_limit=15, max_queries=6)
+        collect_queries(fallback_queries, page_limit=15, max_queries=6, source="seed_metadata_similarity")
     # The public upstream service can return only a few rows per query. Use
     # broader but still seed-related pages as a final capacity pass so a
     # selected recommendation gets its own large queue instead of inheriting
@@ -898,7 +888,7 @@ def build_jio_up_next(
                 f"{intent} songs {decade}s"
                 for intent in sorted(verified_intents) if intent != "general"
             )
-        collect_queries(broad_queries, page_limit=20, max_queries=10)
+        collect_queries(broad_queries, page_limit=20, max_queries=10, source="era_intent_discovery")
     enriched_collected = enrich_live_items(collected)
     try:
         ranked = hybrid.rank_jio_results(
@@ -987,7 +977,7 @@ def build_jio_up_next(
     queue = unique[:limit]
     for position, item in enumerate(queue, start=1):
         item["recommendation_rank"] = position
-        item.setdefault("recommendation_source", "current_track_radio")
+        item.setdefault("recommendation_source", item.get("candidate_source", "current_track_radio"))
 
     # One compact impression event per generated queue gives us exposure data
     # without inserting one database row per visible recommendation.
@@ -1190,6 +1180,34 @@ def render_admin_dashboard() -> None:
             e3.metric("Exposure play-through", f"{recommended_plays / len(exposed_ids) * 100:.1f}%")
             e4.metric("Precision@10", f"{np.mean(precision_values) * 100:.1f}%" if precision_values else "—")
             e5.metric("NDCG@10", f"{np.mean(ndcg_values):.3f}" if ndcg_values else "—")
+        # Explainability audit: show the actual feature values that allowed
+        # the latest recommendations through the gate.
+        diagnostic_rows = []
+        for row in reversed(metadata_rows):
+            if not isinstance(row, dict) or not row.get("items"):
+                continue
+            for item in row.get("items", [])[:10]:
+                if not isinstance(item, dict):
+                    continue
+                features = item.get("features") or {}
+                diagnostic_rows.append({
+                    "track": item.get("title", item.get("track_id", "")),
+                    "rank": item.get("rank"),
+                    "score": item.get("score"),
+                    "audio": features.get("audio", 0.0),
+                    "mood": features.get("mood", 0.0),
+                    "intent": features.get("intent", 0.0),
+                    "metadata": features.get("metadata", 0.0),
+                    "era": features.get("era", 0.0),
+                    "collaborative": features.get("collaborative", 0.0),
+                    "transition": features.get("transition", 0.0),
+                    "source": item.get("source", ""),
+                })
+            break
+        if diagnostic_rows:
+            st.subheader("Latest recommendation diagnostics")
+            st.caption("Feature evidence behind the latest queue; metadata-only mood is not audio proof.")
+            st.dataframe(pd.DataFrame(diagnostic_rows), width="stretch", hide_index=True)
         source_counts = metadata.get("feature_source", pd.Series(dtype=str)).fillna("unknown").value_counts()
         matched = int(source_counts.get("local_audio_catalog", 0))
         fallback = int(source_counts.get("live_metadata_fallback", 0))
@@ -1302,8 +1320,8 @@ def render_admin_dashboard() -> None:
     st.caption("Low matrix density means the system should rely more on content, mood and cold-start signals than collaborative filtering.")
 
     model_table = pd.DataFrame({
-        "signal": ["current-song context", "user taste", "session transition", "collaborative/MF", "popularity", "diversity"],
-        "weight_or_rule": ["60%", "15%", "15%", "5%", "5%", "hard freshness + artist/album spacing"],
+        "signal": ["audio similarity", "metadata/mood", "collaborative/MF", "recent + long-term taste", "session transition", "context + popularity", "diversity"],
+        "weight_or_rule": ["35%", "15%", "15%", "20%", "10%", "3% + 2%", "hard freshness + artist/album spacing"],
     })
     with st.expander("Live model configuration", expanded=False):
         st.dataframe(model_table, width="stretch", hide_index=True)
@@ -1789,7 +1807,7 @@ with st.expander("How this recommender works"):
     2. **User taste injection:** likes and plays influence the queue, but only when the song also fits the current session context.
     3. **Collaborative filtering:** users with similar play/like behavior contribute implicit preference signals.
     4. **Matrix factorization:** TruncatedSVD learns latent user-song embeddings from the interaction matrix.
-    5. **Context-first hybrid ranking:** current-song context (60%), user taste (15%), session transitions (15%), collaborative/MF (5%) and popularity (5%) are blended.
+    5. **Audio-first hybrid ranking:** audio similarity (35%), metadata/mood (15%), collaborative/MF (15%), recent and long-term taste (20%), session transitions (10%), context (3%) and popularity (2%) are blended. Metadata-only mood is never described as verified audio similarity.
     6. **Freshness and diversity:** recently played/duplicate songs are removed, and artist/album spacing prevents repetitive queues.
     7. **Cold-start aware:** before enough events exist, context and onboarding signals carry the ranking.
 

@@ -44,6 +44,22 @@ def _candidate_similarity(left: dict, right: dict) -> float:
     right_year = int(right.get("year", 0) or 0)
     era_score = float(np.exp(-((left_year - right_year) / 18.0) ** 2)) if left_year and right_year else 0.0
     return 0.55 * text_score + 0.30 * max(0.0, mood_score) + 0.15 * era_score
+
+
+def _canonical_recording_key(item: dict) -> str:
+    """Collapse alternate releases of one recording for a recommendation queue."""
+    isrc = str(item.get("isrc") or item.get("external_id") or "").strip().casefold()
+    if isrc:
+        return f"isrc:{isrc}"
+    title = str(item.get("title", "")).casefold()
+    title = re.sub(
+        r"\b(vocals?\s*only|instrumental|karaoke|remix|reprise|live|lofi|slowed|reverb|unplugged|version\s*\w*|radio edit)\b",
+        " ", title,
+    )
+    title = re.sub(r"\([^)]*\)|\[[^]]*\]", " ", title)
+    title = re.sub(r"[^a-z0-9]+", " ", title).strip()
+    artists = re.sub(r"[^a-z0-9]+", " ", str(item.get("artists", "")).casefold()).strip()
+    return f"{title}|{artists}" if title else artists
 import re
 from scipy.sparse import hstack, csr_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -409,6 +425,7 @@ class HybridRecommendationEngine:
         self.item_popularity: dict[str, float] = {}
         self.transition_scores: dict[str, dict[str, float]] = {}
         self.user_recent_items: dict[str, list[str]] = {}
+        self.user_skipped_items: dict[str, set[str]] = {}
         self.short_artist_preferences: dict[str, dict[str, float]] = {}
         self.medium_artist_preferences: dict[str, dict[str, float]] = {}
         self.long_artist_preferences: dict[str, dict[str, float]] = {}
@@ -468,6 +485,10 @@ class HybridRecommendationEngine:
             str(user_id): group["track_id"].astype(str).tolist()[-30:]
             for user_id, group in frame.groupby("user_id")
         }
+        self.user_skipped_items = {
+            str(user_id): set(group.loc[group["event_type"].isin(["skip", "jio_skip"]), "track_id"].astype(str))
+            for user_id, group in frame.groupby("user_id")
+        }
 
         # Sequential transition model: what tracks followed a track in a
         # session? This is a lightweight next-track signal.
@@ -488,11 +509,10 @@ class HybridRecommendationEngine:
             return self
         self.user_index = {str(value): index for index, value in enumerate(interactions.index)}
         self.item_index = {str(value): index for index, value in enumerate(interactions.columns)}
-        matrix = interactions.to_numpy(dtype=float)
-        # Negative skips are useful as penalties but must not make the SVD
-        # unstable. Shift each user's row only for factorization; ranking uses
-        # the learned latent preference direction.
-        matrix = matrix - matrix.min(axis=1, keepdims=True)
+        # Factorize only positive implicit confidence. Shifting a row that
+        # contains a skip changes untouched zeroes into fake positive plays.
+        # Explicit skips remain a separate penalty in collaborative_scores.
+        matrix = np.clip(interactions.to_numpy(dtype=float), 0.0, None)
         if min(matrix.shape) < 2:
             self.user_factors = matrix
             self.item_factors = np.eye(matrix.shape[1], dtype=float)
@@ -519,6 +539,12 @@ class HybridRecommendationEngine:
         scores = np.asarray(raw, dtype=float)
         if scores.size and scores.max() > scores.min():
             scores = (scores - scores.min()) / (scores.max() - scores.min())
+        skipped = self.user_skipped_items.get(str(user_id), set())
+        if skipped:
+            scores = np.asarray([
+                max(0.0, float(score) - 0.35) if str(item_id) in skipped else float(score)
+                for item_id, score in zip(item_ids, scores)
+            ])
         return scores
 
     def rank_jio_results(
@@ -537,7 +563,7 @@ class HybridRecommendationEngine:
         deduped: list[dict] = []
         seen_result_keys: set[str] = set()
         for item in results:
-            result_key = str(item.get("song_id") or "").strip().lower()
+            result_key = _canonical_recording_key(item)
             if not result_key:
                 result_key = re.sub(
                     r"[^a-z0-9]+", " ",
@@ -554,6 +580,8 @@ class HybridRecommendationEngine:
         preferred_titles = [str(x).lower() for x in preferred.get("track_name", pd.Series(dtype=str)).tolist()]
         item_ids = [str(item.get("song_id") or item.get("title", "")) for item in results]
         collaborative = self.collaborative_scores(user_id, item_ids)
+        for item, value in zip(results, collaborative):
+            item["_collaborative_score"] = float(value)
         seed_id = str((seed or {}).get("song_id") or "")
         transition_map = self.transition_scores.get(seed_id, {})
         transition_values = np.asarray(
@@ -571,7 +599,7 @@ class HybridRecommendationEngine:
             for field in ("title", "album", "artists", "language")
         ).lower()
         style_groups = {
-            "high_energy": {"fight", "anthem", "rock", "zinda", "sultan", "brother", "run", "power", "action", "dance", "party", "bhangra", "bang", "fire", "dhamaka", "dhamaal", "warrior", "sher", "bhaag", "milkha", "singham", "chaiyya", "ramta", "appadipodu", "mappillai", "title track"},
+            "high_energy": {"fight", "anthem", "rock", "zinda", "sultan", "brother", "run", "power", "action", "dance", "party", "bhangra", "bang", "fire", "dhamaka", "dhamaal", "warrior", "sher", "bhaag", "milkha", "singham", "chaiyya", "ramta", "appadipodu", "mappillai"},
             "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "dil", "jaan", "saiyaara"},
             "sad": {"sad", "heartbreak", "alone", "broken", "dard", "udaas"},
             "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "shiva", "ram"},
@@ -726,6 +754,7 @@ class HybridRecommendationEngine:
             item["_intent_conflict"] = intent_conflict
             item["_era_delta"] = era_delta
             item["_same_era"] = same_era
+            audio_verified = audio_match >= 0.62
             if album_match and (mood_match >= 0.62 or intent_match >= 0.5):
                 item["recommendation_reason"] = "Same soundtrack with verified mood"
             elif seed_artist_match and mood_match >= 0.62:
@@ -734,12 +763,14 @@ class HybridRecommendationEngine:
                 item["recommendation_reason"] = "Same artist, with a different mood"
             elif album_match:
                 item["recommendation_reason"] = "Similar album or soundtrack"
-            elif mood_match >= 0.78 and same_era:
+            elif audio_verified and mood_match >= 0.78 and same_era:
                 item["recommendation_reason"] = "Similar mood, era and sound"
-            elif mood_match >= 0.78 and era_delta:
+            elif audio_verified and mood_match >= 0.78 and era_delta:
                 item["recommendation_reason"] = "Similar mood with a different era"
-            elif mood_match >= 0.78:
+            elif audio_verified and mood_match >= 0.78:
                 item["recommendation_reason"] = "Very similar mood and sound"
+            elif mood_match >= 0.62:
+                item["recommendation_reason"] = "Matching metadata mood; audio not verified"
             elif metadata_similarity >= 0.45:
                 item["recommendation_reason"] = "Similar title, album and artist context"
             elif intent_match >= 0.5:
@@ -777,6 +808,7 @@ class HybridRecommendationEngine:
             item["_long_term"] = max(0.0, long_score)
             item["recommendation_features"] = {
                 "context": float(item.get("_context_score", 0.0)),
+                "collaborative": float(item.get("_collaborative_score", 0.0)),
                 "mood": float(item.get("_mood_match", 0.0)),
                 "audio": float(item.get("_audio_match", 0.0)),
                 "intent": float(item.get("_intent_match", 0.0)),
@@ -969,6 +1001,7 @@ class HybridRecommendationEngine:
             chosen["recommendation_score"] = round(float(max(0.0, max(eligible, key=lambda pair: pair[1])[1])), 6)
             chosen["recommendation_features"] = {
                 "context": round(float(chosen.get("_context_score", 0.0)), 4),
+                "collaborative": round(float(chosen.get("_collaborative_score", 0.0)), 4),
                 "mood": round(float(chosen.get("_mood_match", 0.0)), 4),
                 "audio": round(float(chosen.get("_audio_match", 0.0)), 4),
                 "intent": round(float(chosen.get("_intent_match", 0.0)), 4),
@@ -990,6 +1023,6 @@ class HybridRecommendationEngine:
         for item in selected:
             item.pop("_context_score", None)
             item.pop("_profile_score", None)
-            for key in ("_seed_artist_match", "_album_match", "_language_match", "_language_conflict", "_era_match", "_cluster_match", "_style_match", "_mood_match", "_audio_match", "_metadata_score", "_feature_tokens", "_metadata_similarity", "_intent_match", "_intent_conflict", "_era_delta", "_same_era", "_short_term", "_medium_term", "_long_term"):
+            for key in ("_seed_artist_match", "_album_match", "_language_match", "_language_conflict", "_era_match", "_cluster_match", "_style_match", "_mood_match", "_audio_match", "_metadata_score", "_collaborative_score", "_feature_tokens", "_metadata_similarity", "_intent_match", "_intent_conflict", "_era_delta", "_same_era", "_short_term", "_medium_term", "_long_term"):
                 item.pop(key, None)
         return selected

@@ -7,14 +7,16 @@ TuneMatch is a Spotify-inspired Streamlit music discovery application. It has tw
 1. A local catalog engine built from `spotify_tracks_data.csv`.
 2. A live music discovery layer that retrieves external song metadata and audio URLs, then ranks those results for the signed-in TuneMatch user.
 
-The current live ranking is a hybrid, context-first, sequence-aware recommender. It combines:
+The current live ranking is an audio-first, semantic-gated, sequence-aware recommender. It combines:
 
 ```text
-current-song context     60%
-user taste               15%
-next-track transitions   15%
-collaborative/MF score    5%
-popularity                5%
+audio similarity         35%
+metadata/mood            15%
+collaborative/MF         15%
+recent + long-term taste 20%
+next-track transitions   10%
+session context           3%
+popularity                2%
 ```
 
 The app records implicit feedback—plays, likes, skips, and listening duration—in SQLite. After a play, like, skip, or explicit refresh, the interaction model is refit and the `Up next for you` queue is rebuilt.
@@ -310,26 +312,34 @@ This is a lightweight sequential recommender. It is not a transformer or reinfor
 
 ```text
 hybrid_score =
-    0.60 × current_song_context
-  + 0.15 × user_taste
-  + 0.15 × transition_score
-  + 0.05 × collaborative_score
-  + 0.05 × popularity_score
+    0.35 × audio_similarity
+  + 0.15 × metadata_similarity
+  + 0.15 × collaborative_score
+  + 0.12 × recent_preference
+  + 0.08 × long_term_preference
+  + 0.10 × transition_score
+  + 0.03 × session_context
+  + 0.02 × popularity_score
 ```
 
-The results are sorted descending by this score.
+The results are sorted descending by this score. Popularity is only a tie-breaker;
+metadata-only mood is kept separate from verified local audio features.
 
 ## 8. How `Up next` is generated
 
-When a user presses Play, the app does not reuse the search-result list. It creates new candidates from:
+When a user presses Play, the app does not reuse the search-result list. It creates separate candidate channels from:
 
 - each individual artist’s songs;
 - artist similar-song searches;
 - album songs;
 - title similar-song searches;
-- popular songs;
-- trending songs;
-- Bollywood fallback songs.
+- current-track/title similarity;
+- seed artist/album discovery;
+- verified intent and era pages;
+- user-history and collaborative candidates.
+
+Global popular/trending pages are not used as a generic seed fallback because
+they pollute mood-specific queues.
 
 The current search-result IDs and normalized song titles are removed. The remaining candidates are ranked by the hybrid model and truncated to 70 items. The final reranker penalizes recently played tracks, repeated artists, and repeated albums.
 

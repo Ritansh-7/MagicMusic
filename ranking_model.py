@@ -8,7 +8,6 @@ the deterministic hybrid score until there is enough labelled data.
 from __future__ import annotations
 
 import json
-from collections import defaultdict
 from typing import Iterable
 
 import numpy as np
@@ -16,7 +15,7 @@ import pandas as pd
 
 
 RANK_FEATURES = (
-    "base_score", "context", "mood", "audio", "intent", "metadata", "era",
+    "base_score", "context", "mood", "audio", "intent", "metadata", "era", "collaborative",
     "language", "transition", "short_term", "medium_term", "long_term", "audio_confidence",
     "popularity", "rank_position",
 )
@@ -32,6 +31,7 @@ def _feature_row(item: dict) -> list[float]:
         float(features.get("intent", 0.0) or 0.0),
         float(features.get("metadata", 0.0) or 0.0),
         float(features.get("era", 0.0) or 0.0),
+        float(features.get("collaborative", 0.0) or 0.0),
         float(features.get("language", 0.0) or 0.0),
         float(features.get("transition", 0.0) or 0.0),
         float(features.get("short_term", 0.0) or 0.0),
@@ -39,7 +39,7 @@ def _feature_row(item: dict) -> list[float]:
         float(features.get("long_term", 0.0) or 0.0),
         float(features.get("audio_confidence", 0.0) or 0.0),
         float(item.get("popularity", 0.0) or 0.0) / 100.0,
-        float(item.get("recommendation_rank", 0.0) or 0.0) / 70.0,
+        float(item.get("rank", item.get("recommendation_rank", 0.0)) or 0.0) / 70.0,
     ]
 
 
@@ -47,13 +47,13 @@ class LearnedRanker:
     """LambdaMART when available, guarded by a small-data fallback.
 
     Labels are generated from later implicit feedback after an impression:
-    like=2, play=1, skip=0.  No label means a neutral impression and is not
-    used as a positive example.  This is deliberately conservative to avoid
-    training on unobserved negatives.
+    like=2, play=1, skip=-1. Unknown/no-response items are censored and are
+    not treated as negatives.
     """
 
-    min_examples = 30
-    min_positive = 5
+    min_examples = 100
+    min_positive = 20
+    attribution_window_hours = 24
 
     def __init__(self) -> None:
         self.model = None
@@ -80,22 +80,26 @@ class LearnedRanker:
                 continue
             later = events.iloc[index + 1:] if isinstance(index, (int, np.integer)) else events.loc[index:]
             later = later[later.get("user_id", pd.Series(dtype=str)).astype(str) == str(row.get("user_id"))]
+            impression_time = row.get("created_at")
+            if pd.notna(impression_time) and "created_at" in later:
+                delta_seconds = (later["created_at"] - impression_time).dt.total_seconds()
+                later = later[later["created_at"].notna() & delta_seconds.ge(0) & delta_seconds.le(3600 * LearnedRanker.attribution_window_hours)]
             outcomes: dict[str, float] = {}
             for _, event in later.iterrows():
                 track_id = str(event.get("track_id") or "")
                 if not track_id:
                     continue
                 event_type = str(event.get("event_type") or "")
-                value = 2.0 if event_type in {"like", "jio_like"} else 1.0 if event_type in {"play_start", "jio_play"} else 0.0
+                value = 2.0 if event_type in {"like", "jio_like"} else 1.0 if event_type in {"play_start", "jio_play"} else -1.0 if event_type in {"skip", "jio_skip"} else None
+                if value is None:
+                    continue
                 outcomes[track_id] = max(outcomes.get(track_id, 0.0), value)
             for item in items:
                 if not isinstance(item, dict):
                     continue
                 track_id = str(item.get("track_id") or "")
-                # Every exposed item becomes a zero/positive pair. This makes
-                # the training data a real ranking query instead of learning
-                # only from tracks that were eventually clicked.
-                yield _feature_row(item), outcomes.get(track_id, 0.0), str(row.get("user_id")), query_id
+                if track_id in outcomes:
+                    yield _feature_row(item), outcomes[track_id], str(row.get("user_id")), query_id
             query_id += 1
 
     def fit(self, events: pd.DataFrame | list[dict]) -> "LearnedRanker":
