@@ -497,9 +497,10 @@ class HybridRecommendationEngine:
             "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "shiva", "ram"},
             "lofi": {"lofi", "acoustic", "unplugged", "instrumental", "slowed", "reverb"},
         }
+        seed_tokens = set(re.findall(r"[a-z0-9]+", seed_text))
         seed_styles = {
             group for group, words in style_groups.items()
-            if any(word in seed_text for word in words)
+            if any((word in seed_text if " " in word else word in seed_tokens) for word in words)
         }
         seed_styles = seed_styles or {"neutral"}
         seed_mood = np.asarray((seed or {}).get("mood_vector", []), dtype=float)
@@ -573,9 +574,13 @@ class HybridRecommendationEngine:
             ).lower()
             item_styles = {
                 group for group, words in style_groups.items()
-                if any(word in item_text for word in words)
+                if any((word in item_text if " " in word else word in set(re.findall(r"[a-z0-9]+", item_text))) for word in words)
             } or {"neutral"}
-            style_match = 1.0 if seed_styles.intersection(item_styles) else 0.0
+            style_match = 1.0 if (
+                seed_styles != {"neutral"}
+                and item_styles != {"neutral"}
+                and seed_styles.intersection(item_styles)
+            ) else 0.0
             mood_match = mood_similarity(item)
             # Current-track context is deliberately stronger than history.
             context_score = (
@@ -667,12 +672,32 @@ class HybridRecommendationEngine:
                 # has meaningful session/context evidence.
                 if item_id in recent_items or title_key in recent_items:
                     continue
-                if has_seed and float(item.get("_context_score", 0.0)) < 0.20 and float(item.get("_profile_score", 0.0)) < 0.35:
-                    continue
                 # When the seed has a recognizable mood, a candidate must
                 # share that mood or a strong artist/album/audio-cluster link.
                 # Same language and era alone are not enough to turn a soft
                 # romantic song into a valid action/rock recommendation.
+                same_artist_context = (
+                    float(item.get("_seed_artist_match", 0.0))
+                    and (
+                        float(item.get("_mood_match", 0.0)) >= 0.62
+                        or float(item.get("_style_match", 0.0))
+                    )
+                )
+                strong_context = (
+                    same_artist_context
+                    or float(item.get("_album_match", 0.0))
+                    or float(item.get("_cluster_match", 0.0))
+                    or float(item.get("_mood_match", 0.0)) >= 0.62
+                    or (
+                        float(item.get("_style_match", 0.0))
+                        and (
+                            float(item.get("_language_match", 0.0))
+                            or float(item.get("_era_match", 0.0)) >= 0.65
+                        )
+                    )
+                )
+                if has_seed and not strong_context and float(item.get("_profile_score", 0.0)) < 0.35:
+                    continue
                 if has_seed and seed_styles != {"neutral"} and not (
                     (
                         float(item.get("_seed_artist_match", 0.0))

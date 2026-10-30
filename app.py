@@ -203,7 +203,11 @@ def infer_metadata_mood(item: dict) -> dict:
         "instrumental": {"theme", "score", "background", "instrumental", "bgm", "soundtrack"},
         "acoustic": {"acoustic", "unplugged", "lofi", "slowed", "reverb"},
     }
-    matched = {label for label, words in groups.items() if any(word in text for word in words)}
+    tokens = set(re.findall(r"[a-z0-9]+", text))
+    matched = {
+        label for label, words in groups.items()
+        if any((word in text if " " in word else word in tokens) for word in words)
+    }
     if "energetic" in matched:
         vector.update(energy=0.85, tempo=135.0, valence=0.72, danceability=0.72, acousticness=0.18, loudness=-6.0)
     elif "sad" in matched:
