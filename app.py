@@ -670,8 +670,8 @@ def render_admin_dashboard() -> None:
     st.caption("Low matrix density means the system should rely more on content, mood and cold-start signals than collaborative filtering.")
 
     model_table = pd.DataFrame({
-        "signal": ["content", "collaborative/MF", "session transition", "popularity", "diversity"],
-        "weight_or_rule": ["50%", "25%", "15%", "10%", "artist/album/recent penalties"],
+        "signal": ["current-song context", "user taste", "session transition", "collaborative/MF", "popularity", "diversity"],
+        "weight_or_rule": ["60%", "15%", "15%", "5%", "5%", "hard freshness + artist/album spacing"],
     })
     with st.expander("Live model configuration", expanded=False):
         st.dataframe(model_table, width="stretch", hide_index=True)
@@ -1090,12 +1090,13 @@ with st.expander("Current session activity and data-science metrics", expanded=T
 
 with st.expander("How this recommender works"):
     st.markdown("""
-    1. **Content-based filtering:** artist/title taste signals are matched against each music result.
-    2. **Collaborative filtering:** users with similar play/like behavior contribute implicit preference signals.
-    3. **Matrix factorization:** TruncatedSVD learns latent user-song embeddings from the interaction matrix.
-    4. **Sequential hybrid ranking:** content (50%), collaborative/matrix-factorization (25%), next-track transitions (15%), and popularity (10%) are blended.
-    5. **Freshness and diversity:** recent repeats, artist repetition, and album repetition are penalized.
-    6. **Cold-start aware:** before enough events exist, content and onboarding signals carry the ranking.
+    1. **Current-song context first:** the playing song's artist, album, language, era, mood/style and local audio cluster drive the next-track candidates.
+    2. **User taste injection:** likes and plays influence the queue, but only when the song also fits the current session context.
+    3. **Collaborative filtering:** users with similar play/like behavior contribute implicit preference signals.
+    4. **Matrix factorization:** TruncatedSVD learns latent user-song embeddings from the interaction matrix.
+    5. **Context-first hybrid ranking:** current-song context (60%), user taste (15%), session transitions (15%), collaborative/MF (5%) and popularity (5%) are blended.
+    6. **Freshness and diversity:** recently played/duplicate songs are removed, and artist/album spacing prevents repetitive queues.
+    7. **Cold-start aware:** before enough events exist, context and onboarding signals carry the ranking.
 
     Every play, like, and skip improves the local implicit-feedback model for the next search.
     """)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import re
 from scipy.sparse import hstack, csr_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import TruncatedSVD
@@ -451,6 +452,23 @@ class HybridRecommendationEngine:
     ) -> list[dict]:
         if not results:
             return []
+        # Normalize duplicate API versions before scoring so one song cannot
+        # occupy multiple positions in the ranked queue.
+        deduped: list[dict] = []
+        seen_result_keys: set[str] = set()
+        for item in results:
+            result_key = str(item.get("song_id") or "").strip().lower()
+            if not result_key:
+                result_key = re.sub(
+                    r"[^a-z0-9]+", " ",
+                    f"{item.get('title', '')} {item.get('artists', '')}".lower(),
+                ).strip()
+            if result_key and result_key not in seen_result_keys:
+                seen_result_keys.add(result_key)
+                deduped.append(item)
+        results = deduped
+        if not results:
+            return []
         preferred = catalog[catalog["track_id"].astype(str).isin({str(x) for x in preferred_track_ids})]
         preferred_artists = [str(x).lower() for x in preferred.get("artists", pd.Series(dtype=str)).tolist()]
         preferred_titles = [str(x).lower() for x in preferred.get("track_name", pd.Series(dtype=str)).tolist()]
@@ -463,7 +481,27 @@ class HybridRecommendationEngine:
         )
         if transition_values.size and transition_values.max() > 0:
             transition_values = transition_values / transition_values.max()
-        recent_items = set(self.user_recent_items.get(str(user_id), [])[-15:])
+        # Recent items are a hard freshness constraint for a recommendation
+        # queue. Repeated songs are annoying even when their collaborative
+        # score is high; the current seed is already excluded by the caller.
+        recent_items = set(self.user_recent_items.get(str(user_id), [])[-30:])
+        has_seed = bool(seed and any((seed.get(field) or "") for field in ("title", "artists", "album")))
+        seed_text = " ".join(
+            str((seed or {}).get(field, ""))
+            for field in ("title", "album", "artists", "language")
+        ).lower()
+        style_groups = {
+            "high_energy": {"fight", "anthem", "rock", "zinda", "sultan", "brother", "run", "power", "action", "dance", "party", "bhangra", "bang", "fire", "dhamaka", "dhamaal", "warrior", "sher", "bhaag", "milkha"},
+            "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "dil", "jaan", "saiyaara"},
+            "sad": {"sad", "heartbreak", "alone", "broken", "dard", "udaas"},
+            "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "shiva", "ram"},
+            "lofi": {"lofi", "acoustic", "unplugged", "instrumental", "slowed", "reverb"},
+        }
+        seed_styles = {
+            group for group, words in style_groups.items()
+            if any(word in seed_text for word in words)
+        }
+        seed_styles = seed_styles or {"neutral"}
 
         content = []
         seed_artists = [
@@ -507,6 +545,24 @@ class HybridRecommendationEngine:
             )
             # Metadata-level semantics: singer, album, era and language are
             # stronger evidence than title overlap alone for external songs.
+            item_text = " ".join(
+                str(item.get(field, ""))
+                for field in ("title", "album", "artists", "language")
+            ).lower()
+            item_styles = {
+                group for group, words in style_groups.items()
+                if any(word in item_text for word in words)
+            } or {"neutral"}
+            style_match = 1.0 if seed_styles.intersection(item_styles) else 0.0
+            # Current-track context is deliberately stronger than history.
+            context_score = (
+                0.30 * seed_artist_match
+                + 0.15 * album_match
+                + 0.15 * era_match
+                + 0.10 * language_match
+                + 0.15 * cluster_match
+                + 0.15 * style_match
+            )
             seed_content = (
                 0.40 * seed_artist_match
                 + 0.17 * album_match
@@ -515,18 +571,30 @@ class HybridRecommendationEngine:
                 + 0.17 * cluster_match
             )
             content.append(max(profile_content, seed_content))
+            item["_context_score"] = context_score
+            item["_profile_score"] = profile_content
+            item["_seed_artist_match"] = seed_artist_match
+            item["_album_match"] = album_match
+            item["_language_match"] = language_match
+            item["_era_match"] = era_match
+            item["_cluster_match"] = cluster_match
+            item["_style_match"] = style_match
             if seed_artist_match:
-                item["recommendation_reason"] = "Because you played this singer"
+                item["recommendation_reason"] = "Same artist, with your current mood"
             elif album_match:
                 item["recommendation_reason"] = "Similar album or soundtrack"
+            elif style_match and language_match:
+                item["recommendation_reason"] = "Similar energy and language"
+            elif style_match:
+                item["recommendation_reason"] = "Similar energy and style"
             elif language_match and era_match >= 0.65:
                 item["recommendation_reason"] = "Similar language and era"
             elif cluster_match:
                 item["recommendation_reason"] = "Similar mood and sound cluster"
             elif era_match >= 0.65:
                 item["recommendation_reason"] = "Similar era and listening style"
-            elif artist_match:
-                item["recommendation_reason"] = "Because it matches your taste"
+            elif artist_match and context_score >= 0.35:
+                item["recommendation_reason"] = "Your taste, matched to this session"
             else:
                 item["recommendation_reason"] = "Fits your current listening context"
         content = np.asarray(content, dtype=float)
@@ -535,12 +603,22 @@ class HybridRecommendationEngine:
         ], dtype=float)
         # Content dominates cold-start. Once enough events exist, the
         # transition and collaborative signals influence the next-track order.
-        hybrid = (
-            0.50 * content
-            + 0.25 * collaborative
-            + 0.15 * transition_values
-            + 0.10 * popularity
-        )
+        # Context-first ranking: the current track defines the mood, while
+        # history is injected only as a controlled secondary signal.
+        context_values = np.asarray([float(item.get("_context_score", 0.0)) for item in results])
+        profile_values = np.asarray([float(item.get("_profile_score", 0.0)) for item in results])
+        if has_seed:
+            hybrid = (
+                0.60 * context_values
+                + 0.15 * transition_values
+                + 0.15 * profile_values
+                + 0.05 * collaborative
+                + 0.05 * popularity
+            )
+        else:
+            # Search results have no current-track anchor; preserve the
+            # original taste/collaborative search ranking in that view.
+            hybrid = 0.50 * content + 0.25 * collaborative + 0.15 * transition_values + 0.10 * popularity
 
         # Sequence-aware reranking: avoid immediate repeats and prevent one
         # artist/album from occupying the whole Up Next queue.
@@ -550,28 +628,60 @@ class HybridRecommendationEngine:
         album_counts: dict[str, int] = {}
         remaining = ranked.copy()
         while remaining:
-            best_index = 0
-            best_score = float("-inf")
+            eligible: list[tuple[int, float]] = []
             for index, (base_score, item) in enumerate(remaining):
                 item_id = str(item.get("song_id") or item.get("title", ""))
                 artist_key = str(item.get("artists", "")).lower()
                 album_key = str(item.get("album", "")).lower()
+                title_key = re.sub(r"[^a-z0-9]+", " ", str(item.get("title", "")).lower()).strip()
+                # Do not surface recently played songs or weak fallback items.
+                # A user-history recommendation is allowed only when it also
+                # has meaningful session/context evidence.
+                if item_id in recent_items or title_key in recent_items:
+                    continue
+                if has_seed and float(item.get("_context_score", 0.0)) < 0.20 and float(item.get("_profile_score", 0.0)) < 0.35:
+                    continue
+                # When the seed has a recognizable mood, a candidate must
+                # share that mood or a strong artist/album/audio-cluster link.
+                # Same language and era alone are not enough to turn a soft
+                # romantic song into a valid action/rock recommendation.
+                if has_seed and seed_styles != {"neutral"} and not (
+                    float(item.get("_seed_artist_match", 0.0))
+                    or float(item.get("_album_match", 0.0))
+                    or float(item.get("_cluster_match", 0.0))
+                    or (
+                        float(item.get("_style_match", 0.0))
+                        and (
+                            float(item.get("_language_match", 0.0))
+                            or float(item.get("_era_match", 0.0)) >= 0.65
+                        )
+                    )
+                ):
+                    continue
                 adjusted = float(base_score)
                 # Prevent the same singer from appearing repeatedly. The
                 # first appearance is free; subsequent appearances are
                 # increasingly expensive, while still allowing a second song
                 # when the candidate pool is small.
-                adjusted -= 0.22 * artist_counts.get(artist_key, 0)
-                adjusted -= 0.05 * album_counts.get(album_key, 0)
-                if item_id in recent_items:
-                    adjusted -= 0.12
-                if adjusted > best_score:
-                    best_score = adjusted
-                    best_index = index
+                adjusted -= 0.42 * artist_counts.get(artist_key, 0)
+                adjusted -= 0.10 * album_counts.get(album_key, 0)
+                if selected and artist_key == str(selected[-1].get("artists", "")).lower():
+                    adjusted -= 0.30
+                eligible.append((index, adjusted))
+            # If every remaining candidate was rejected by the freshness or
+            # relevance gate, finish cleanly instead of leaking weak fallbacks.
+            if not eligible:
+                break
+            best_index = max(eligible, key=lambda pair: pair[1])[0]
             _, chosen = remaining.pop(best_index)
             selected.append(chosen)
             artist_key = str(chosen.get("artists", "")).lower()
             album_key = str(chosen.get("album", "")).lower()
             artist_counts[artist_key] = artist_counts.get(artist_key, 0) + 1
             album_counts[album_key] = album_counts.get(album_key, 0) + 1
+        for item in selected:
+            item.pop("_context_score", None)
+            item.pop("_profile_score", None)
+            for key in ("_seed_artist_match", "_album_match", "_language_match", "_era_match", "_cluster_match", "_style_match"):
+                item.pop(key, None)
         return selected
