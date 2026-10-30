@@ -69,20 +69,39 @@ def load_imported_history(path):
 def build_engine(data):
     return SpotifyRecommendationEngine(data)
 
+
+@st.cache_resource
+def build_hybrid_engine(content_engine):
+    """Keep one fitted model service per app process instead of rebuilding it on every rerun."""
+    return HybridRecommendationEngine(content_engine)
+
+
 data = load_data(DATA_PATH)
 imported_history = load_imported_history(HISTORY_PATH)
 engine = build_engine(data)
 stats = engine.catalog_stats()
 user_store = UserStore(EVENT_DB_PATH, database_url=configured_database_url())
 jio_client = JioSaavnClient()
-hybrid_engine = HybridRecommendationEngine(engine)
-hybrid_engine.fit(user_store.interaction_events())
+hybrid_engine = build_hybrid_engine(engine)
 st.session_state.setdefault("local_session_id", uuid.uuid4().hex)
 st.session_state.setdefault("jio_search_cache_v2", {})
 # Migrate the old queue behavior: older sessions stored search results here.
 if "jio_queue_index" in st.session_state:
     st.session_state.pop("jio_queue", None)
     st.session_state.pop("jio_queue_index", None)
+
+
+def refresh_hybrid_model(force: bool = False) -> None:
+    """Refit only when the event store has changed; keeps UI reruns fast."""
+    events = user_store.interaction_events()
+    latest_event = events[-1].get("created_at") if events else ""
+    signature = (len(events), str(latest_event))
+    if force or st.session_state.get("hybrid_model_signature") != signature:
+        hybrid_engine.fit(events)
+        st.session_state["hybrid_model_signature"] = signature
+
+
+refresh_hybrid_model()
 
 
 def log_behavior(
@@ -576,7 +595,7 @@ else:
                             try:
                                 # Refit immediately so this play is included
                                 # in the live collaborative/MF ranking.
-                                hybrid_engine.fit(user_store.interaction_events())
+                                refresh_hybrid_model(force=True)
                                 st.session_state["jio_queue"] = build_jio_up_next(
                                     item,
                                     jio_results,
@@ -599,7 +618,7 @@ else:
                             # queue. Preserve the existing queue and rerank it
                             # in memory so the action stays instant and does
                             # not shrink 55 recommendations to a few API rows.
-                            hybrid_engine.fit(user_store.interaction_events())
+                            refresh_hybrid_model(force=True)
                             existing_queue = list(st.session_state.get("jio_queue", []))
                             if existing_queue:
                                 st.session_state["jio_queue"] = hybrid_engine.rank_jio_results(
@@ -670,7 +689,7 @@ if jio_now:
             st.success("♥ Liked")
         elif st.button("♡ Like this song", key=f"player_like_{current_id}", width="stretch"):
             log_behavior("jio_like", current_id, metadata=jio_now)
-            hybrid_engine.fit(user_store.interaction_events())
+            refresh_hybrid_model(force=True)
             existing_queue = list(st.session_state.get("jio_queue", []))
             if existing_queue:
                 # Re-rank the already fetched queue immediately. This keeps
@@ -719,7 +738,7 @@ if jio_now:
                     str(next_item.get("song_id") or next_item.get("title", "")),
                     metadata=next_item,
                 )
-                hybrid_engine.fit(user_store.interaction_events())
+                refresh_hybrid_model(force=True)
                 cached_results = st.session_state.get("jio_search_cache_v2", {}).get(
                     search_query, []
                 )
@@ -784,7 +803,7 @@ if jio_now:
                                 str(item.get("song_id") or item.get("title", "")),
                                 metadata=item,
                             )
-                            hybrid_engine.fit(user_store.interaction_events())
+                            refresh_hybrid_model(force=True)
                             cached_results = st.session_state.get("jio_search_cache_v2", {}).get(
                                 search_query, []
                             )
@@ -805,7 +824,7 @@ if jio_now:
     else:
         st.caption("No more personalized recommendations in this queue.")
     if st.button("↻ Refresh recommendations", key="refresh_recommendations"):
-        hybrid_engine.fit(user_store.interaction_events())
+        refresh_hybrid_model(force=True)
         cached_results = st.session_state.get("jio_search_cache_v2", {}).get(search_query, [])
         try:
             st.session_state["jio_queue"] = build_jio_up_next(
