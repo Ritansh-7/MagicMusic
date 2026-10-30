@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 ERA_COMPATIBILITY_WINDOW_YEARS = 30
-HYBRID_MODEL_VERSION = "hybrid-v6-semantic-gated"
+HYBRID_MODEL_VERSION = "hybrid-v7-audio-metadata-baseline"
 
 
 def _metadata_feature_tokens(item: dict) -> dict[str, float]:
@@ -410,6 +410,7 @@ class HybridRecommendationEngine:
         self.transition_scores: dict[str, dict[str, float]] = {}
         self.user_recent_items: dict[str, list[str]] = {}
         self.short_artist_preferences: dict[str, dict[str, float]] = {}
+        self.medium_artist_preferences: dict[str, dict[str, float]] = {}
         self.long_artist_preferences: dict[str, dict[str, float]] = {}
         self.learned_ranker = LearnedRanker()
 
@@ -432,6 +433,7 @@ class HybridRecommendationEngine:
         # Two preference horizons: recent intent should react quickly, while
         # the long horizon keeps stable taste from disappearing after one skip.
         self.short_artist_preferences = {}
+        self.medium_artist_preferences = {}
         self.long_artist_preferences = {}
         now = pd.Timestamp.now(tz="UTC")
         for row in frame.itertuples(index=False):
@@ -452,9 +454,12 @@ class HybridRecommendationEngine:
             long_weight = weight * float(np.exp(-age_days / 180.0))
             user = str(getattr(row, "user_id", ""))
             short_map = self.short_artist_preferences.setdefault(user, {})
+            medium_map = self.medium_artist_preferences.setdefault(user, {})
             long_map = self.long_artist_preferences.setdefault(user, {})
             for artist in artists:
                 short_map[artist] = short_map.get(artist, 0.0) + short_weight
+                medium_weight = weight * float(np.exp(-age_days / 30.0))
+                medium_map[artist] = medium_map.get(artist, 0.0) + medium_weight
                 long_map[artist] = long_map.get(artist, 0.0) + long_weight
         frame = frame.sort_values(["user_id", "session_id", "created_at"] if "session_id" in frame else ["user_id", "created_at"])
 
@@ -663,6 +668,13 @@ class HybridRecommendationEngine:
                 and seed_styles.intersection(item_styles)
             ) else 0.0
             mood_match = mood_similarity(item)
+            # Cosine similarity is audio evidence only when both sides have
+            # real catalog features. Metadata fallback vectors must not
+            # masquerade as audio.
+            audio_match = mood_match if (
+                str((seed or {}).get("mood_source", "")).startswith("local_audio")
+                and str(item.get("mood_source", "")).startswith("local_audio")
+            ) else 0.0
             metadata_similarity = _sparse_cosine(seed_feature_tokens, _metadata_feature_tokens(item))
             item_intents = set(item.get("intent_labels", [])) - {"general"}
             intent_match = (
@@ -670,6 +682,13 @@ class HybridRecommendationEngine:
                 if seed_intents else 0.0
             )
             intent_conflict = bool(seed_intents and item_intents and not seed_intents.intersection(item_intents))
+            metadata_score = (
+                0.35 * intent_match
+                + 0.20 * era_match
+                + 0.15 * language_match
+                + 0.15 * style_match
+                + 0.15 * metadata_similarity
+            )
             # Current-track context is deliberately stronger than history.
             context_score = (
                 0.25 * seed_artist_match
@@ -699,6 +718,8 @@ class HybridRecommendationEngine:
             item["_cluster_match"] = cluster_match
             item["_style_match"] = style_match
             item["_mood_match"] = mood_match
+            item["_audio_match"] = audio_match
+            item["_metadata_score"] = metadata_score
             item["_feature_tokens"] = _metadata_feature_tokens(item)
             item["_metadata_similarity"] = metadata_similarity
             item["_intent_match"] = intent_match
@@ -741,24 +762,30 @@ class HybridRecommendationEngine:
         # recency-weighted preference vectors. They are cheap, interpretable,
         # and remain useful when live IDs do not match the local catalog.
         short_artist = self.short_artist_preferences.get(str(user_id), {})
+        medium_artist = self.medium_artist_preferences.get(str(user_id), {})
         long_artist = self.long_artist_preferences.get(str(user_id), {})
         short_max = max([abs(value) for value in short_artist.values()] or [1.0])
+        medium_max = max([abs(value) for value in medium_artist.values()] or [1.0])
         long_max = max([abs(value) for value in long_artist.values()] or [1.0])
         for item in results:
             artists = [part.strip().casefold() for part in str(item.get("artists", "")).split(",") if part.strip()]
             short_score = min(1.0, max([short_artist.get(artist, 0.0) for artist in artists] or [0.0]) / short_max)
+            medium_score = min(1.0, max([medium_artist.get(artist, 0.0) for artist in artists] or [0.0]) / medium_max)
             long_score = min(1.0, max([long_artist.get(artist, 0.0) for artist in artists] or [0.0]) / long_max)
             item["_short_term"] = max(0.0, short_score)
+            item["_medium_term"] = max(0.0, medium_score)
             item["_long_term"] = max(0.0, long_score)
             item["recommendation_features"] = {
                 "context": float(item.get("_context_score", 0.0)),
                 "mood": float(item.get("_mood_match", 0.0)),
+                "audio": float(item.get("_audio_match", 0.0)),
                 "intent": float(item.get("_intent_match", 0.0)),
                 "metadata": float(item.get("_metadata_similarity", 0.0)),
                 "era": float(item.get("_era_match", 0.0)),
                 "language": float(item.get("_language_match", 0.0)),
                 "transition": float(transition_map.get(str(item.get("song_id") or item.get("title", "")), 0.0)),
                 "short_term": item["_short_term"],
+                "medium_term": item["_medium_term"],
                 "long_term": item["_long_term"],
                 "audio_confidence": float(item.get("mood_confidence", 0.0) or 0.0),
             }
@@ -772,15 +799,21 @@ class HybridRecommendationEngine:
         # history is injected only as a controlled secondary signal.
         context_values = np.asarray([float(item.get("_context_score", 0.0)) for item in results])
         profile_values = np.asarray([float(item.get("_profile_score", 0.0)) for item in results])
+        audio_values = np.asarray([float(item.get("_audio_match", 0.0)) for item in results])
+        metadata_values = np.asarray([float(item.get("_metadata_score", 0.0)) for item in results])
+        short_values = np.asarray([item.get("_short_term", 0.0) for item in results])
+        medium_values = np.asarray([item.get("_medium_term", 0.0) for item in results])
+        long_values = np.asarray([item.get("_long_term", 0.0) for item in results])
         if has_seed:
             hybrid = (
-                0.55 * context_values
-                + 0.12 * transition_values
-                + 0.12 * profile_values
-                + 0.05 * collaborative
-                + 0.04 * popularity
-                + 0.07 * np.asarray([item.get("_short_term", 0.0) for item in results])
-                + 0.05 * np.asarray([item.get("_long_term", 0.0) for item in results])
+                0.35 * audio_values
+                + 0.15 * metadata_values
+                + 0.15 * collaborative
+                + 0.12 * (0.60 * short_values + 0.40 * medium_values)
+                + 0.08 * long_values
+                + 0.10 * transition_values
+                + 0.03 * context_values
+                + 0.02 * popularity
             )
         else:
             # Search results have no current-track anchor; preserve the
@@ -788,8 +821,8 @@ class HybridRecommendationEngine:
             hybrid = (
                 0.45 * content + 0.22 * collaborative + 0.12 * transition_values
                 + 0.08 * popularity
-                + 0.08 * np.asarray([item.get("_short_term", 0.0) for item in results])
-                + 0.05 * np.asarray([item.get("_long_term", 0.0) for item in results])
+                + 0.08 * short_values
+                + 0.05 * long_values
             )
 
         # A learned layer is intentionally a small final correction. It only
@@ -937,12 +970,14 @@ class HybridRecommendationEngine:
             chosen["recommendation_features"] = {
                 "context": round(float(chosen.get("_context_score", 0.0)), 4),
                 "mood": round(float(chosen.get("_mood_match", 0.0)), 4),
+                "audio": round(float(chosen.get("_audio_match", 0.0)), 4),
                 "intent": round(float(chosen.get("_intent_match", 0.0)), 4),
-                "metadata": round(float(chosen.get("_metadata_similarity", 0.0)), 4),
+                "metadata": round(float(chosen.get("_metadata_score", 0.0)), 4),
                 "era": round(float(chosen.get("_era_match", 0.0)), 4),
                 "language": round(float(chosen.get("_language_match", 0.0)), 4),
                 "transition": round(float(transition_map.get(str(chosen.get("song_id") or chosen.get("title", "")), 0.0)), 4),
                 "short_term": round(float(chosen.get("_short_term", 0.0)), 4),
+                "medium_term": round(float(chosen.get("_medium_term", 0.0)), 4),
                 "long_term": round(float(chosen.get("_long_term", 0.0)), 4),
                 "audio_confidence": round(float(chosen.get("mood_confidence", 0.0) or 0.0), 4),
             }
@@ -955,6 +990,6 @@ class HybridRecommendationEngine:
         for item in selected:
             item.pop("_context_score", None)
             item.pop("_profile_score", None)
-            for key in ("_seed_artist_match", "_album_match", "_language_match", "_language_conflict", "_era_match", "_cluster_match", "_style_match", "_mood_match", "_feature_tokens", "_metadata_similarity", "_intent_match", "_intent_conflict", "_era_delta", "_same_era"):
+            for key in ("_seed_artist_match", "_album_match", "_language_match", "_language_conflict", "_era_match", "_cluster_match", "_style_match", "_mood_match", "_audio_match", "_metadata_score", "_feature_tokens", "_metadata_similarity", "_intent_match", "_intent_conflict", "_era_delta", "_same_era", "_short_term", "_medium_term", "_long_term"):
                 item.pop(key, None)
         return selected

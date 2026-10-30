@@ -951,6 +951,18 @@ def build_jio_up_next(
             item_intents = set(item.get("intent_labels", [])) - {"general"}
             if seed_intents and item_intents and not seed_intents.intersection(item_intents):
                 continue
+            if seed_intents and not item_intents:
+                same_artist = bool(
+                    set(str(seed.get("artists", "")).casefold().split(","))
+                    & set(str(item.get("artists", "")).casefold().split(","))
+                )
+                same_album = bool(
+                    str(seed.get("album", "")).casefold().strip()
+                    and str(seed.get("album", "")).casefold().strip()
+                    == str(item.get("album", "")).casefold().strip()
+                )
+                if not (same_artist or same_album or float(item.get("mood_confidence", 0.0) or 0.0) >= 0.65):
+                    continue
             seed_language = str(seed.get("language", "")).casefold().strip()
             item_language = str(item.get("language", "")).casefold().strip()
             if seed_language and item_language and seed_language != item_language:

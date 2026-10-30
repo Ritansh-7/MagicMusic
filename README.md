@@ -80,18 +80,19 @@ For every candidate song `i`, the current hybrid score is:
 
 ```text
 score(i) =
-    0.55 × current_song_context(i)
-  + 0.12 × transition_score(i)
-  + 0.12 × user_taste(i)
-  + 0.05 × collaborative_score(i)
-  + 0.04 × popularity_score(i)
-  + 0.07 × short_term_preference(i)
-  + 0.05 × long_term_preference(i)
+    0.35 × audio_similarity(i)
+  + 0.15 × metadata_similarity(i)
+  + 0.15 × collaborative_score(i)
+  + 0.12 × recent_preference(i)
+  + 0.08 × long_term_preference(i)
+  + 0.10 × sequence_score(i)
+  + 0.03 × session_context(i)
+  + 0.02 × popularity_score(i)
 ```
 
-The short-term preference decays over approximately 14 days and the long-term
-preference over approximately 180 days. The current song remains the strongest
-anchor, so a new play can change the next queue without waiting for retraining.
+The recent preference is a 60/40 blend of 14-day and 30-day artist profiles;
+the long-term profile decays over approximately 180 days. The current song
+remains the strongest semantic anchor, while popularity is only a tie-breaker.
 When at least 30 impression-labelled examples and 5 positive outcomes exist,
 the optional `ranking_model.py` layer applies a small learned correction. It
 uses LightGBM LambdaMART when the optional package is installed; otherwise it

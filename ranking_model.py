@@ -16,8 +16,8 @@ import pandas as pd
 
 
 RANK_FEATURES = (
-    "base_score", "context", "mood", "intent", "metadata", "era",
-    "language", "transition", "short_term", "long_term", "audio_confidence",
+    "base_score", "context", "mood", "audio", "intent", "metadata", "era",
+    "language", "transition", "short_term", "medium_term", "long_term", "audio_confidence",
     "popularity", "rank_position",
 )
 
@@ -28,12 +28,14 @@ def _feature_row(item: dict) -> list[float]:
         float(item.get("recommendation_score", features.get("base_score", 0.0)) or 0.0),
         float(features.get("context", 0.0) or 0.0),
         float(features.get("mood", 0.0) or 0.0),
+        float(features.get("audio", 0.0) or 0.0),
         float(features.get("intent", 0.0) or 0.0),
         float(features.get("metadata", 0.0) or 0.0),
         float(features.get("era", 0.0) or 0.0),
         float(features.get("language", 0.0) or 0.0),
         float(features.get("transition", 0.0) or 0.0),
         float(features.get("short_term", 0.0) or 0.0),
+        float(features.get("medium_term", 0.0) or 0.0),
         float(features.get("long_term", 0.0) or 0.0),
         float(features.get("audio_confidence", 0.0) or 0.0),
         float(item.get("popularity", 0.0) or 0.0) / 100.0,
