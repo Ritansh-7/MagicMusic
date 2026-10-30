@@ -827,6 +827,29 @@ def render_admin_dashboard() -> None:
             )
             st.bar_chart(artist_counts.to_frame(), horizontal=True)
 
+        # Live audit trail: show the actual recent play metadata rather than
+        # only aggregate artist counts. This makes the current singer/song
+        # visible as soon as the next 10-second fragment refresh runs.
+        play_metadata = metadata.loc[
+            events["event_type"].isin(["jio_play", "play_start"]).to_numpy()
+        ].copy()
+        play_events = events.loc[
+            events["event_type"].isin(["jio_play", "play_start"])
+        ].copy()
+        if not play_metadata.empty:
+            user_names = {str(row["id"]): row["email"] for row in users.to_dict("records")}
+            recent_rows = []
+            for event, meta in zip(play_events.tail(15).iloc[::-1].to_dict("records"), play_metadata.tail(15).iloc[::-1].to_dict("records")):
+                recent_rows.append({
+                    "time": event.get("created_at"),
+                    "user": user_names.get(str(event.get("user_id")), f"user {event.get('user_id')}"),
+                    "song": meta.get("title") or meta.get("track_name") or event.get("track_id"),
+                    "artist": meta.get("artists") or meta.get("artist") or "Unknown",
+                    "album": meta.get("album") or "",
+                })
+            st.subheader("Live recent plays")
+            st.dataframe(pd.DataFrame(recent_rows), width="stretch", hide_index=True)
+
         quality_columns = [column for column in ("title", "artists", "album", "stream_url", "image_url") if column in metadata]
         if quality_columns:
             quality = pd.DataFrame({column: metadata[column].fillna("").astype(str).str.strip().ne("") for column in quality_columns})

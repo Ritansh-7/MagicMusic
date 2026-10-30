@@ -504,29 +504,40 @@ class HybridRecommendationEngine:
         }
         seed_styles = seed_styles or {"neutral"}
         seed_mood = np.asarray((seed or {}).get("mood_vector", []), dtype=float)
-        version_terms = (
-            ("jhankar", "Jhankar style"),
-            ("remix", "remix style"),
-            ("mashup", "mashup style"),
-            ("unplugged", "unplugged style"),
-            ("acoustic", "acoustic style"),
-            ("lofi", "lo-fi style"),
-            ("slowed", "slowed style"),
-            ("live", "live style"),
-            ("cover", "cover style"),
-        )
-
-        def version_tag(item: dict) -> tuple[str, str]:
+        def feature_tokens(item: dict) -> dict[str, float]:
+            """Create a generic sparse metadata vector for diversity scoring."""
             text = " ".join(
                 str(item.get(field, "")).lower()
-                for field in ("title", "album")
+                for field in ("title", "album", "artists", "language")
             )
-            for token, label in version_terms:
-                if token in text:
-                    return token, label
-            return "standard", "standard version"
+            tokens = re.findall(r"[a-z0-9]+", text)
+            counts: dict[str, float] = {}
+            for token in tokens:
+                counts[token] = counts.get(token, 0.0) + 1.0
+            return counts
 
-        seed_version, seed_version_label = version_tag(seed or {})
+        def sparse_cosine(left: dict[str, float], right: dict[str, float]) -> float:
+            common = set(left).intersection(right)
+            numerator = sum(left[key] * right[key] for key in common)
+            left_norm = sum(value * value for value in left.values()) ** 0.5
+            right_norm = sum(value * value for value in right.values()) ** 0.5
+            return numerator / (left_norm * right_norm) if left_norm and right_norm else 0.0
+
+        def candidate_similarity(left: dict, right: dict) -> float:
+            """Cosine-like similarity used only for MMR diversity reranking."""
+            text_score = sparse_cosine(
+                left.get("_feature_tokens", {}), right.get("_feature_tokens", {})
+            )
+            left_mood = np.asarray(left.get("mood_vector", []), dtype=float)
+            right_mood = np.asarray(right.get("mood_vector", []), dtype=float)
+            mood_score = 0.0
+            if left_mood.size and left_mood.size == right_mood.size:
+                denominator = float(np.linalg.norm(left_mood) * np.linalg.norm(right_mood))
+                mood_score = float(np.dot(left_mood, right_mood) / denominator) if denominator else 0.0
+            left_year = int(left.get("year", 0) or 0)
+            right_year = int(right.get("year", 0) or 0)
+            era_score = float(np.exp(-((left_year - right_year) / 18.0) ** 2)) if left_year and right_year else 0.0
+            return 0.55 * text_score + 0.30 * max(0.0, mood_score) + 0.15 * era_score
 
         def mood_similarity(item: dict) -> float:
             item_mood = np.asarray(item.get("mood_vector", []), dtype=float)
@@ -577,13 +588,12 @@ class HybridRecommendationEngine:
                 item_year = int(str(item.get("year", ""))[:4])
             except ValueError:
                 item_year = 0
-            version_key, version_label = version_tag(item)
             era_delta = abs(seed_year - item_year) if seed_year and item_year else 0
-            same_era = bool(era_delta and era_delta <= 12)
             era_match = (
-                max(0.0, 1.0 - abs(seed_year - item_year) / 30.0)
+                float(np.exp(-((seed_year - item_year) / 18.0) ** 2))
                 if seed_year and item_year else 0.0
             )
+            same_era = bool(era_match >= 0.70)
             language_match = 1.0 if seed_language and language and seed_language == language else 0.0
             language_conflict = bool(seed_language and language and seed_language != language)
             seed_cluster = (seed or {}).get("cluster_id")
@@ -636,8 +646,7 @@ class HybridRecommendationEngine:
             item["_cluster_match"] = cluster_match
             item["_style_match"] = style_match
             item["_mood_match"] = mood_match
-            item["_version_key"] = version_key
-            item["_version_label"] = version_label
+            item["_feature_tokens"] = feature_tokens(item)
             item["_era_delta"] = era_delta
             item["_same_era"] = same_era
             if seed_artist_match and mood_match >= 0.62:
@@ -646,12 +655,10 @@ class HybridRecommendationEngine:
                 item["recommendation_reason"] = "Same artist, with a different mood"
             elif album_match:
                 item["recommendation_reason"] = "Similar album or soundtrack"
-            elif mood_match >= 0.78 and same_era and version_key == seed_version:
-                item["recommendation_reason"] = f"Similar mood, era and {version_label}"
             elif mood_match >= 0.78 and same_era:
-                item["recommendation_reason"] = "Similar mood and classic era"
-            elif mood_match >= 0.78 and era_delta > 25:
-                item["recommendation_reason"] = "Same mood with a newer sound"
+                item["recommendation_reason"] = "Similar mood, era and sound"
+            elif mood_match >= 0.78 and era_delta:
+                item["recommendation_reason"] = "Similar mood with a different era"
             elif mood_match >= 0.78:
                 item["recommendation_reason"] = "Very similar mood and sound"
             elif style_match and language_match:
@@ -697,7 +704,6 @@ class HybridRecommendationEngine:
         selected: list[dict] = []
         artist_counts: dict[str, int] = {}
         album_counts: dict[str, int] = {}
-        version_counts: dict[str, int] = {}
         remaining = ranked.copy()
         while remaining:
             eligible: list[tuple[int, float]] = []
@@ -764,19 +770,13 @@ class HybridRecommendationEngine:
                 ):
                     continue
                 adjusted = float(base_score)
-                version_key = str(item.get("_version_key", "standard"))
-                # Keep a Jhankar/remix/mashup family from filling the queue.
-                # A matching version gets a small continuity benefit, but
-                # after two appearances diversity wins.
-                adjusted += 0.04 if version_key == seed_version else 0.0
-                adjusted -= 0.28 * max(0, version_counts.get(version_key, 0) - 1)
-                if (
-                    seed_year
-                    and int(item.get("_era_delta", 0) or 0) > 25
-                    and not float(item.get("_album_match", 0.0))
-                    and not float(item.get("_seed_artist_match", 0.0))
-                ):
-                    adjusted -= 0.20
+                # Maximal Marginal Relevance: preserve relevance while
+                # continuously penalising candidates too similar to songs
+                # already selected. No version/artist/album names are special-
+                # cased; the metadata feature space determines the penalty.
+                if selected:
+                    redundancy = max(candidate_similarity(item, chosen) for chosen in selected)
+                    adjusted = 0.82 * adjusted - 0.18 * redundancy
                 # Prevent the same singer from appearing repeatedly. The
                 # first appearance is free; subsequent appearances are
                 # increasingly expensive, while still allowing a second song
@@ -797,11 +797,9 @@ class HybridRecommendationEngine:
             album_key = str(chosen.get("album", "")).lower()
             artist_counts[artist_key] = artist_counts.get(artist_key, 0) + 1
             album_counts[album_key] = album_counts.get(album_key, 0) + 1
-            version_key = str(chosen.get("_version_key", "standard"))
-            version_counts[version_key] = version_counts.get(version_key, 0) + 1
         for item in selected:
             item.pop("_context_score", None)
             item.pop("_profile_score", None)
-            for key in ("_seed_artist_match", "_album_match", "_language_match", "_language_conflict", "_era_match", "_cluster_match", "_style_match", "_mood_match", "_version_key", "_version_label", "_era_delta", "_same_era"):
+            for key in ("_seed_artist_match", "_album_match", "_language_match", "_language_conflict", "_era_match", "_cluster_match", "_style_match", "_mood_match", "_feature_tokens", "_era_delta", "_same_era"):
                 item.pop(key, None)
         return selected
