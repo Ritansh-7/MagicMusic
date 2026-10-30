@@ -1126,10 +1126,30 @@ def render_admin_dashboard() -> None:
     metadata = pd.DataFrame(metadata_rows)
     if not metadata.empty:
         exposed_ids: set[str] = set()
+        ndcg_values: list[float] = []
+        precision_values: list[float] = []
         for index, row in enumerate(metadata_rows):
             if index >= len(events) or events.iloc[index]["event_type"] != "recommendation_impression":
                 continue
-            for item in row.get("items", []) if isinstance(row, dict) else []:
+            if not isinstance(row, dict):
+                continue
+            user_id = events.iloc[index]["user_id"]
+            user_played = {
+                str(value) for value in plays.loc[plays["user_id"] == user_id, "track_id"].dropna().tolist()
+            }
+            ranked_items = row.get("items", [])
+            relevance = [
+                int(str(item.get("track_id")) in user_played)
+                for item in ranked_items[:10]
+                if isinstance(item, dict) and item.get("track_id")
+            ]
+            if relevance:
+                precision_values.append(sum(relevance) / len(relevance))
+                dcg = sum((2 ** value - 1) / np.log2(position + 2) for position, value in enumerate(relevance))
+                ideal = sorted(relevance, reverse=True)
+                idcg = sum((2 ** value - 1) / np.log2(position + 2) for position, value in enumerate(ideal))
+                ndcg_values.append(dcg / idcg if idcg else 0.0)
+            for item in ranked_items:
                 if isinstance(item, dict) and item.get("track_id"):
                     exposed_ids.add(str(item["track_id"]))
         played_ids = {
@@ -1138,10 +1158,12 @@ def render_admin_dashboard() -> None:
         recommended_plays = len(exposed_ids.intersection(played_ids))
         if exposed_ids:
             st.subheader("Recommendation evaluation")
-            e1, e2, e3 = st.columns(3)
+            e1, e2, e3, e4, e5 = st.columns(5)
             e1.metric("Tracks exposed", f"{len(exposed_ids):,}")
             e2.metric("Exposed tracks played", f"{recommended_plays:,}")
             e3.metric("Exposure play-through", f"{recommended_plays / len(exposed_ids) * 100:.1f}%")
+            e4.metric("Precision@10", f"{np.mean(precision_values) * 100:.1f}%" if precision_values else "—")
+            e5.metric("NDCG@10", f"{np.mean(ndcg_values):.3f}" if ndcg_values else "—")
         source_counts = metadata.get("feature_source", pd.Series(dtype=str)).fillna("unknown").value_counts()
         matched = int(source_counts.get("local_audio_catalog", 0))
         fallback = int(source_counts.get("live_metadata_fallback", 0))
