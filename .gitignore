@@ -2,3 +2,5 @@
 tune_match_events.sqlite3
 __pycache__/
 *.pyc
+streamlit.out.log
+streamlit.err.log

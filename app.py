@@ -5,6 +5,7 @@ import uuid
 import re
 import json
 import hashlib
+import hmac
 from difflib import SequenceMatcher
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
@@ -71,25 +72,25 @@ export default function(component) {
 
 st.html("""
 <style>
-.stApp { background: radial-gradient(circle at 8% 0%, #203f35 0%, #0d1718 30%, #090b10 67%, #160d20 100%); }
-.block-container { max-width: 1440px; padding-top: 1rem; padding-bottom: 4rem; }
+ .stApp { background: linear-gradient(145deg, #0d1117 0%, #101820 55%, #171326 100%); }
+ .block-container { max-width: 1240px; padding-top: .8rem; padding-bottom: 2.5rem; }
 header[data-testid="stHeader"], [data-testid="stToolbar"] { background: transparent !important; }
 header[data-testid="stHeader"] { height: 2.5rem; }
 [data-testid="stDecoration"] { display: none; }
 [data-testid="stSidebar"] { background: linear-gradient(180deg, #12152a 0%, #0b1115 52%, #160d20 100%); border-right: 1px solid #3d4269; }
-[data-testid="stMetric"] { background: linear-gradient(145deg, rgba(25,51,41,.92), rgba(24,18,43,.92)); border: 1px solid #3c6b61; padding: 14px; border-radius: 16px; box-shadow: 0 8px 24px rgba(0,0,0,.18); }
+ [data-testid="stMetric"] { background: rgba(22, 31, 42, .82); border: 1px solid #29384a; padding: 12px; border-radius: 14px; }
 [data-testid="stMetricValue"] { color: #d9ffe9; }
-.stButton > button, .stLinkButton > a { border-radius: 999px; border: 1px solid #467b70; background: linear-gradient(100deg, rgba(30,215,96,.13), rgba(139,92,246,.13)); transition: all .15s ease; }
-.stButton > button:hover, .stLinkButton > a:hover { border-color: #b7ff4a; color: #f2fff8; box-shadow: 0 0 22px rgba(30,215,96,.22); transform: translateY(-1px); }
-[data-testid="stVerticalBlockBorderWrapper"] { border-color: #38545a; border-radius: 18px; background: linear-gradient(145deg, rgba(17,35,29,.74), rgba(24,18,43,.62)); box-shadow: 0 12px 30px rgba(0,0,0,.12); }
+ .stButton > button, .stLinkButton > a { border-radius: 999px; border: 1px solid #34475d; background: #172333; transition: border-color .15s ease, transform .15s ease; }
+ .stButton > button:hover, .stLinkButton > a:hover { border-color: #70e1ff; color: #ffffff; transform: translateY(-1px); }
+ [data-testid="stVerticalBlockBorderWrapper"] { border-color: #29384a; border-radius: 16px; background: rgba(17, 25, 36, .74); }
 [data-testid="stImage"] img { border-radius: 14px; }
 .stTextInput input, .stMultiSelect div[data-baseweb="select"] { border-radius: 12px; }
 [data-testid="stTextInputRootElement"] { border: 1px solid #3e6a66; border-radius: 14px; background: rgba(11,20,24,.75); }
 [data-testid="stTextInputRootElement"]:focus-within { border-color: #ff4fd8; box-shadow: 0 0 0 3px rgba(255,79,216,.14); }
 .shelf-title { color: #f4f7f5; font-size: 1.35rem; font-weight: 800; margin: 1.35rem 0 .4rem; letter-spacing: -.02em; }
 .shelf-subtitle { color: #a8c7d0; margin-bottom: .8rem; }
-.hero-panel { padding: 1.55rem 1.7rem; border-radius: 26px; border: 1px solid #315b58; background: linear-gradient(120deg, rgba(25,65,51,.76), rgba(42,21,65,.62) 72%, rgba(16,32,45,.7)); box-shadow: 0 18px 50px rgba(0,0,0,.2); }
-.hero-title { font-size: clamp(2.2rem, 5vw, 4.5rem); line-height: .95; font-weight: 900; letter-spacing: -.07em; background: linear-gradient(100deg, #ffffff 0%, #baffd2 42%, #ff8cec 86%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+ .hero-panel { padding: 1.2rem 1.35rem; border-radius: 20px; border: 1px solid #2d4259; background: rgba(20, 30, 43, .72); }
+ .hero-title { font-size: clamp(2rem, 4vw, 3.5rem); line-height: .95; font-weight: 850; letter-spacing: -.06em; background: linear-gradient(100deg, #ffffff 0%, #8cecff 48%, #d3a8ff 90%); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .hero-copy { color: #b6d3d1; font-size: 1.05rem; max-width: 760px; margin-top: .65rem; }
 .hero-chip { display: inline-block; margin: .95rem .45rem 0 0; padding: .32rem .72rem; border-radius: 999px; color: #eafff3; background: rgba(30,215,96,.12); border: 1px solid rgba(183,255,74,.32); font-size: .82rem; }
 .hero-chip:nth-child(2) { background: rgba(255,79,216,.12); border-color: rgba(255,79,216,.35); }
@@ -99,6 +100,8 @@ header[data-testid="stHeader"] { height: 2.5rem; }
 .recommendation-title { color: #f4f7f5; font-size: 1.35rem; font-weight: 850; margin-top: .2rem; }
 .recommendation-meta { color: #b6d3d1; font-size: .9rem; }
 .recommendation-reason { color: #d8c8ff; font-size: .84rem; }
+ .feedback-card { padding: .8rem; border: 1px solid #34475d; border-radius: 16px; background: rgba(22, 31, 42, .86); }
+ .feedback-title { color: #8cecff; font-size: .76rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 @media (max-width: 760px) { .block-container { padding: 1rem .7rem 3rem; } }
 </style>
 """)
@@ -108,6 +111,46 @@ st.markdown('''<div class="hero-panel"><div class="hero-title">🎧 TuneMatch</d
 DATA_PATH = Path(__file__).parent / "spotify_tracks_data.csv"
 EVENT_DB_PATH = Path(__file__).parent / "tune_match_events.sqlite3"
 HISTORY_PATH = Path(__file__).parent / "spotify_history.csv"
+AUTH_SESSION_PARAM = "tm_session"
+AUTH_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
+
+
+def _auth_session_secret() -> bytes:
+    """Use a stable signing key so a browser refresh can restore login safely."""
+    configured = os.getenv("TUNEMATCH_SESSION_SECRET", "").strip()
+    if not configured:
+        try:
+            configured = str(st.secrets.get("TUNEMATCH_SESSION_SECRET", "")).strip()
+        except (FileNotFoundError, KeyError, AttributeError):
+            configured = ""
+    configured = configured or f"tunematch-local:{EVENT_DB_PATH.resolve()}"
+    return configured.encode("utf-8")
+
+
+def _make_auth_session_ticket(user_id: str) -> str:
+    issued_at = int(time.time())
+    payload = f"{user_id}.{issued_at}"
+    signature = hmac.new(_auth_session_secret(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{payload}.{signature}"
+
+
+def _read_auth_session_ticket() -> tuple[str, int] | None:
+    token = str(st.query_params.get(AUTH_SESSION_PARAM, "") or "")
+    parts = token.split(".")
+    if len(parts) != 3 or not parts[0] or not parts[1] or not parts[2]:
+        return None
+    user_id, issued_text, signature = parts
+    payload = f"{user_id}.{issued_text}"
+    expected = hmac.new(_auth_session_secret(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    try:
+        issued_at = int(issued_text)
+    except ValueError:
+        return None
+    if not hmac.compare_digest(signature, expected):
+        return None
+    if time.time() - issued_at > AUTH_SESSION_TTL_SECONDS:
+        return None
+    return user_id, issued_at
 
 
 def configured_database_url() -> str:
@@ -193,6 +236,12 @@ def _recommendation_title_key(value: str) -> str:
         key,
     )
     return re.sub(r"\s+", " ", key).strip()
+
+
+def _visible_recording_key(item: dict) -> str:
+    """Collapse alternate releases of one recording for search shelves."""
+    title = _recommendation_title_key(item.get("title", ""))
+    return title
 
 
 def _mood_vector(values: dict) -> list[float]:
@@ -370,6 +419,37 @@ def enrich_live_items(items: list[dict]) -> list[dict]:
     return items
 
 
+@st.cache_data(ttl=3600, max_entries=20, show_spinner=False)
+def fetch_dashboard_posters(
+    items: tuple[tuple[str, str, str], ...],
+    base_url: str,
+) -> dict[str, dict]:
+    """Resolve artwork for the visible local shelf cards from the live provider."""
+    client = JioSaavnClient(base_url)
+
+    def resolve(record: tuple[str, str, str]) -> tuple[str, dict]:
+        track_id, title, artist = record
+        try:
+            candidates = client.search_direct(f"{title} {artist}".strip(), limit=5)
+        except Exception:
+            candidates = []
+        title_key = _compact_key(title)
+        artist_key = _compact_key(artist.split(",")[0])
+        chosen = next(
+            (
+                item for item in candidates
+                if _compact_key(item.get("title", "")) == title_key
+                and artist_key
+                and artist_key in _compact_key(item.get("artists", ""))
+            ),
+            next((item for item in candidates if _compact_key(item.get("title", "")) == title_key), None),
+        )
+        return track_id, chosen or {}
+
+    with ThreadPoolExecutor(max_workers=min(6, max(1, len(items)))) as executor:
+        return dict(executor.map(resolve, items))
+
+
 @st.cache_resource
 def build_hybrid_engine(_content_engine, model_version: str):
     """Keep one fitted model service per app process instead of rebuilding it on every rerun."""
@@ -424,10 +504,10 @@ st.session_state.setdefault("jio_search_cache_v4", {})
 st.session_state.pop("jio_search_cache_v3", None)
 st.session_state.pop("jio_search_cache_v2", None)
 # Invalidate shelves created before the full artist/film catalogue policy.
-if st.session_state.get("jio_search_cache_policy") != "full-live-results-v2":
+if st.session_state.get("jio_search_cache_policy") != "filtered-recordings-v5":
     st.session_state.pop("jio_search_cache_v4", None)
     st.session_state["jio_search_cache_v4"] = {}
-    st.session_state["jio_search_cache_policy"] = "full-live-results-v2"
+    st.session_state["jio_search_cache_policy"] = "filtered-recordings-v5"
 st.session_state.setdefault("jio_loop", False)
 st.session_state.setdefault("scroll_to_player", False)
 # Never keep a queue generated by an older relevance policy. This is
@@ -664,6 +744,7 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
         title = _compact_key(item.get("title", ""))
         album = _compact_key(item.get("album", ""))
         artists = _compact_key(item.get("artists", ""))
+        starring = _compact_key(item.get("starring", ""))
         title_tokens = set(title.split())
         # Providers commonly append recording variants to the title. Treat
         # those as exact title hits for ordering, while preserving the full
@@ -682,6 +763,7 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
             query_key in title and any(marker in title for marker in ("from", "title track", "soundtrack"))
         )
         artist_match = float(query_key in artists)
+        cast_match = float(query_key in starring or (meaningful_query and meaningful_query.issubset(set(starring.split()))))
         language = str(item.get("language", "")).lower()
         variant_penalty = 0.0
         if not query_languages and any(term in title_tokens for term in language_terms):
@@ -695,6 +777,7 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
             + 1.5 * title_match
             + 1.5 * album_match
             + 1.0 * artist_match
+            + 1.0 * cast_match
             - variant_penalty,
             0,
         )
@@ -702,16 +785,20 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
         title = _compact_key(item.get("title", ""))
         album = _compact_key(item.get("album", ""))
         artists = _compact_key(item.get("artists", ""))
+        starring = _compact_key(item.get("starring", ""))
         meaningful = query_tokens - generic_terms
         title_hit = bool(query_key in title or (meaningful and meaningful.issubset(set(title.split()))))
         artist_hit = bool(query_key in artists or (meaningful and meaningful.issubset(set(artists.split()))))
         album_hit = bool(query_key in album or (meaningful and meaningful.issubset(set(album.split()))))
+        cast_hit = bool(query_key in starring or (meaningful and meaningful.issubset(set(starring.split()))))
         if title_hit:
             return "title"
         if artist_hit:
             return "artist"
         if album_hit:
             return "album"
+        if cast_hit:
+            return "cast"
         return ""
 
     kinds = [match_kind(item) for item in results]
@@ -723,7 +810,7 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
     specialized_query_intents = query_intents.intersection(
         {"devotional", "ghazal", "motivational", "romantic", "sad", "acoustic_indie", "energetic", "rap_hiphop"}
     )
-    if False and specialized_query_intents:
+    if specialized_query_intents:
         intent_matches = [
             item for item in results
             if specialized_query_intents.intersection(set(item.get("intent_labels", [])))
@@ -732,7 +819,7 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
             results = intent_matches
             kinds = [match_kind(item) for item in results]
     devotional_search = any(token in query_key for token in ("bajrang", "bajran", "hanuman", "anjaney"))
-    if False and devotional_search:
+    if devotional_search:
         devotional_terms = ("bajrang", "hanuman", "anjaney", "bhajan", "chalisa", "aarti", "kirtan", "mantra", "devotional")
         devotional_matches = [
             item for item in results
@@ -765,23 +852,33 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
             and meaningful_query.issubset(set(_compact_key(item.get("album", "")).split()))
         )
     ]
+    cast_entity_matches = [
+        item for item in results
+        if query_key in _compact_key(item.get("starring", ""))
+        or (
+            meaningful_query
+            and meaningful_query.issubset(set(_compact_key(item.get("starring", "")).split()))
+        )
+    ]
     entity_catalog_search = bool(
         meaningful_query
         and not exact_title_query
-        and (artist_entity_matches or album_entity_matches)
+        and (artist_entity_matches or album_entity_matches or cast_entity_matches)
     )
-    if False and meaningful_query and artist_entity_matches and not exact_title_query:
+    if meaningful_query and artist_entity_matches and not exact_title_query:
         # An artist query is an entity search, not a title-token search.
         # Keep the artist's actual catalogue first; generic provider rows are
         # only allowed in the related fallback section.
         filtered = artist_entity_matches
-    elif False and meaningful_query and album_entity_matches and not exact_title_query:
+    elif meaningful_query and album_entity_matches and not exact_title_query:
         filtered = album_entity_matches
-    elif False and meaningful_query and "title" in kinds:
+    elif meaningful_query and cast_entity_matches and not exact_title_query:
+        filtered = cast_entity_matches
+    elif meaningful_query and "title" in kinds:
         filtered = [item for item, kind in zip(results, kinds) if kind == "title"]
-    elif False and meaningful_query and "artist" in kinds:
+    elif meaningful_query and "artist" in kinds:
         filtered = [item for item, kind in zip(results, kinds) if kind == "artist"]
-    elif False and meaningful_query and ("artist" in kinds or "album" in kinds):
+    elif meaningful_query and ("artist" in kinds or "album" in kinds):
         filtered = [item for item, kind in zip(results, kinds) if kind in {"artist", "album"}]
     else:
         filtered = list(results)
@@ -829,10 +926,7 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
     unique: list[dict] = []
     seen: set[str] = set()
     for item in ordered:
-        key = "|".join(
-            _compact_key(item.get(field, ""))
-            for field in ("title", "artists", "album")
-        )
+        key = _visible_recording_key(item)
         if key and key in seen:
             continue
         seen.add(key)
@@ -924,6 +1018,18 @@ def build_jio_up_next(
     if album:
         related_queries.append(f"{album} songs")
     related_queries.extend(f"{artist} songs" for artist in artist_names[:2])
+    # Some live providers return only the seed for a niche artist/title query.
+    # Add a bounded language/style bridge so a radio can still start without
+    # falling back to unrelated songs or an empty queue.
+    seed_language = str(seed.get("language", "")).strip().lower()
+    if seed_language:
+        related_queries.extend([
+            f"{seed_language} pop songs",
+            f"{seed_language} chill songs",
+            f"feel good {seed_language} songs",
+        ])
+    else:
+        related_queries.append("pop songs")
     try:
         seed_year = int(str(seed.get("year", ""))[:4])
     except ValueError:
@@ -1000,7 +1106,19 @@ def build_jio_up_next(
         [dict(item) for item in search_results if isinstance(item, dict)],
         source="seed_search_results",
     )
-    collect_queries(related_queries, page_limit=20, max_queries=3, source="seed_title_album_artist")
+    collect_queries(related_queries, page_limit=20, max_queries=6, source="seed_title_album_artist")
+    # Artist radio needs the provider's expanded catalogue endpoint. The
+    # narrow direct query often returns only one or two Coldplay recordings;
+    # this extra artist-only fetch stays inside the recommendation pipeline,
+    # where the ranker still enforces the seed's language, mood and era.
+    for artist in artist_names[:1]:
+        try:
+            collect_items(
+                client.search(artist, limit=60),
+                source="seed_artist_catalogue",
+            )
+        except Exception:
+            provider_failures += 1
     enriched_collected = enrich_live_items(collected)
     try:
         ranked = hybrid.rank_jio_results(
@@ -1014,6 +1132,22 @@ def build_jio_up_next(
         ranking_error = type(exc).__name__
         ranking_error_detail = str(exc)
         ranked = []
+    # A strict pass is preferred, but sparse live metadata should not leave
+    # the player with an empty queue when a language/era/style bridge exists.
+    if len(ranked) < 3 and enriched_collected:
+        try:
+            relaxed_ranked = hybrid.rank_jio_results(
+                enriched_collected,
+                user_id,
+                catalog,
+                preferred_track_ids,
+                seed=seed,
+                relaxed_context=True,
+            )
+            if len(relaxed_ranked) > len(ranked):
+                ranked = relaxed_ranked
+        except Exception:
+            pass
     if not ranked:
         seed_artists = {
             _compact_key(part)
@@ -1060,11 +1194,6 @@ def build_jio_up_next(
     for position, item in enumerate(queue, start=1):
         item["recommendation_rank"] = position
         item.setdefault("recommendation_source", item.get("candidate_source", "current_track_radio"))
-    if queue:
-        st.session_state["recommendation_feedback_pending_seed"] = str(
-            seed.get("song_id") or seed.get("title", "")
-        )
-
     # One compact impression event per generated queue gives us exposure data
     # without inserting one database row per visible recommendation.
     if queue and st.session_state.get("local_user_id"):
@@ -1105,6 +1234,13 @@ spotify_taste = st.session_state.get("spotify_taste")
 with st.sidebar:
     st.header("Your TuneMatch account")
     local_user_id = st.session_state.get("local_user_id")
+    if not local_user_id:
+        restored_session = _read_auth_session_ticket()
+        if restored_session:
+            local_user_id, issued_at = restored_session
+            st.session_state["local_user_id"] = local_user_id
+            st.session_state.setdefault("local_session_started_at", issued_at)
+            st.session_state["local_is_admin"] = user_store.is_admin(local_user_id)
     if local_user_id:
         summary = cached_user_summary(local_user_id)
         st.success("Signed in")
@@ -1121,6 +1257,7 @@ with st.sidebar:
             st.session_state.pop("local_user_id", None)
             st.session_state.pop("local_is_admin", None)
             st.session_state.pop("user_summary_cache", None)
+            st.query_params.pop(AUTH_SESSION_PARAM, None)
             st.rerun()
     else:
         st.subheader("Welcome to TuneMatch")
@@ -1159,6 +1296,7 @@ with st.sidebar:
                 st.session_state["recommendation_variant"] = "diverse" if bucket else "control"
                 st.session_state["local_session_started_at"] = time.time()
                 st.session_state["local_is_admin"] = user_store.is_admin(message)
+                st.query_params[AUTH_SESSION_PARAM] = _make_auth_session_ticket(message)
                 log_behavior("session_start")
                 st.rerun()
             else:
@@ -1427,11 +1565,6 @@ if st.session_state.get("local_is_admin", False):
 
 st.markdown(f"## Good evening, listener")
 st.caption("Your recommendations are ready. Search only when you want something specific.")
-search_query = st.text_input(
-    "Search songs, artists, albums, or genres",
-    placeholder="What do you want to listen to?",
-    key="global_search",
-)
 
 genre_options = sorted(data["track_genre"].dropna().astype(str).unique().tolist())
 popular = data.sort_values("popularity", ascending=False).head(100)
@@ -1454,6 +1587,151 @@ preferred_track_ids = (
     + live_track_ids
     + imported_track_ids
     + [track_labels[label] for label in onboarding_tracks]
+)
+
+
+def _dashboard_language_frames(profile: object, excluded_ids: list[str]) -> dict[str, pd.DataFrame]:
+    """Build broad, personalized local shelves once per profile state."""
+    ranked = engine.recommend_for_profile(
+        profile,
+        n=min(len(data), 1400),
+        exclude_ids=excluded_ids,
+        allow_explicit=False,
+        popularity_weight=0.10,
+        diversity=0.12,
+    )
+    genre_text = data["track_genre"].fillna("").astype(str).str.casefold()
+    hindi_mask = genre_text.str.contains(
+        r"bollywood|filmi|hindi|indian|bhangra|punjabi|desi pop|sufi|tollywood|bhojpuri|marathi",
+        regex=True,
+    )
+    # The local dataset has sparse language labels. Treat the remaining
+    # catalogue as English/global so the dashboard can still provide a full
+    # 100+ track shelf without pretending every row has verified language.
+    english_mask = ~hindi_mask
+    ranked_ids = set(ranked["track_id"].astype(str)) if not ranked.empty else set()
+
+    def shelf(mask: pd.Series) -> pd.DataFrame:
+        selected = ranked[ranked["track_id"].astype(str).isin(set(data.loc[mask, "track_id"].astype(str)))]
+        selected = selected.drop_duplicates(subset=["track_name", "artists"])
+        if len(selected) < 100:
+            fallback = data.loc[mask].copy()
+            fallback = fallback[~fallback["track_id"].astype(str).isin(ranked_ids)]
+            fallback = fallback.sort_values(["popularity", "track_name"], ascending=[False, True])
+            selected = pd.concat([selected, fallback], ignore_index=True)
+        return selected.drop_duplicates(subset=["track_name", "artists"]).head(1000).reset_index(drop=True)
+
+    return {"Hindi": shelf(hindi_mask), "English / global": shelf(english_mask)}
+
+
+def _recommendation_feedback(track_id: str, section: str, rating: str) -> None:
+    log_behavior(
+        "recommendation_feedback",
+        str(track_id),
+        metadata={"rating": rating, "section": section},
+    )
+    st.toast("Got it — your dashboard will learn from this")
+
+
+def render_dashboard_shelf(language: str, tracks: pd.DataFrame) -> None:
+    page_key = f"dashboard_page_{language}"
+    page_size = 12
+    page_count = max(1, int(np.ceil(len(tracks) / page_size)))
+    page = min(int(st.session_state.get(page_key, 0)), page_count - 1)
+    st.session_state[page_key] = page
+    start = page * page_size
+    visible = tracks.iloc[start:start + page_size]
+    st.markdown(f"<div class='shelf-title'>{language} picks</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='shelf-subtitle'>100+ personalized picks · showing {start + 1}–{start + len(visible)} of {len(tracks)}</div>",
+        unsafe_allow_html=True,
+    )
+    browse_page = st.selectbox(
+        "Jump to page",
+        list(range(1, page_count + 1)),
+        index=page,
+        key=f"dashboard_browse_{language}",
+    )
+    if browse_page - 1 != page:
+        st.session_state[page_key] = browse_page - 1
+        st.rerun()
+    poster_records = tuple(
+        (
+            str(row.get("track_id", "")),
+            str(row.get("track_name", "")),
+            str(row.get("artists", "")),
+        )
+        for _, row in visible.iterrows()
+    )
+    posters = fetch_dashboard_posters(poster_records, jio_client.base_url)
+    for row_start in range(0, len(visible), 4):
+        shelf_cols = st.columns(4)
+        for column_index, (_, row) in enumerate(visible.iloc[row_start:row_start + 4].iterrows()):
+            with shelf_cols[column_index], st.container(border=True):
+                title = str(row.get("track_name", "Unknown song"))
+                artist = str(row.get("artists", "Unknown artist"))
+                album = str(row.get("album_name", ""))
+                artwork = posters.get(str(row.get("track_id", "")), {}).get("image_url", "")
+                if artwork:
+                    st.image(artwork, width="stretch", alt=f"Artwork for {title}")
+                st.caption(f"{start + row_start + column_index + 1:02d}")
+                st.markdown(f"**{title}**")
+                st.caption(f"{artist}{f' · {album}' if album else ''}")
+                yes_col, no_col = st.columns(2)
+                feedback_key = str(row.get("track_id", title))
+                if yes_col.button("Yes", key=f"dash_yes_{language}_{feedback_key}", width="stretch"):
+                    _recommendation_feedback(feedback_key, language, "good")
+                if no_col.button("No", key=f"dash_no_{language}_{feedback_key}", width="stretch"):
+                    _recommendation_feedback(feedback_key, language, "bad")
+    prev_col, page_col, next_col = st.columns([1, 2, 1])
+    with prev_col:
+        if st.button("← Previous", key=f"dash_prev_{language}", disabled=page <= 0, width="stretch"):
+            st.session_state[page_key] = page - 1
+            st.session_state[f"dashboard_browse_{language}"] = page
+            st.rerun()
+    with page_col:
+        st.caption(f"Page {page + 1} of {page_count}", text_alignment="center")
+    with next_col:
+        if st.button("Next →", key=f"dash_next_{language}", disabled=page >= page_count - 1, width="stretch"):
+            st.session_state[page_key] = page + 1
+            st.session_state[f"dashboard_browse_{language}"] = page + 2
+            st.rerun()
+
+
+dashboard_profile = engine.build_user_profile(
+    track_ids=preferred_track_ids,
+    genres=onboarding_genres,
+)
+dashboard_signature = "|".join([
+    ",".join(sorted(map(str, preferred_track_ids))),
+    ",".join(sorted(map(str, onboarding_genres))),
+])
+if st.session_state.get("dashboard_signature") != dashboard_signature:
+    st.session_state["dashboard_shelves"] = _dashboard_language_frames(
+        dashboard_profile,
+        preferred_track_ids,
+    )
+    st.session_state["dashboard_signature"] = dashboard_signature
+dashboard_shelves = st.session_state["dashboard_shelves"]
+with st.container(border=True):
+    st.markdown("### Your music dashboard")
+    total_dashboard_tracks = len(dashboard_shelves["Hindi"]) + len(dashboard_shelves["English / global"])
+    count_a, count_b, count_c = st.columns(3)
+    count_a.metric("Dashboard library", f"{total_dashboard_tracks:,} tracks")
+    count_b.metric("Hindi shelf", f"{len(dashboard_shelves['Hindi']):,} picks")
+    count_c.metric("English / global shelf", f"{len(dashboard_shelves['English / global']):,} picks")
+    st.caption("Two mood-aware shelves with 1000+ tracks across the dashboard. Use Jump to page to browse the full library.")
+    hindi_tab, english_tab = st.tabs(["Hindi", "English / global"])
+    with hindi_tab:
+        render_dashboard_shelf("Hindi", dashboard_shelves["Hindi"])
+    with english_tab:
+        render_dashboard_shelf("English / global", dashboard_shelves["English / global"])
+
+
+search_query = st.text_input(
+    "Search songs, artists, albums, or genres",
+    placeholder="What do you want to listen to?",
+    key="global_search",
 )
 
 
@@ -1562,7 +1840,13 @@ else:
                             st.image(image_url, width="stretch")
                         st.caption(f"Search result {i}")
                         st.markdown(f"**{title}**")
-                        st.caption(f"{artists}\n{album}")
+                        era = str(item.get("year", "")).strip()
+                        details = f"Singer: {artists}"
+                        if album:
+                            details += f" · {album}"
+                        if era:
+                            details += f" · {era}"
+                        st.caption(details)
                         if st.button("▶ Play", key=f"jio_play_{i}_{song_id or title}", width="stretch"):
                             # Set the selected song first; recommendation
                             # fetching must never make the player disappear.
@@ -1692,7 +1976,12 @@ if jio_now:
             st.image(jio_now["image_url"], width="stretch", alt=jio_now.get("title", "TuneMatch song"))
     with now_cols[1]:
         st.markdown(f"**{jio_now.get('title', 'Unknown song')}**")
-        st.caption(f"{jio_now.get('artists', '')} · {jio_now.get('album', '')}")
+        now_details = f"Singer: {jio_now.get('artists', '')}"
+        if jio_now.get("album"):
+            now_details += f" · {jio_now.get('album')}"
+        if jio_now.get("year"):
+            now_details += f" · {jio_now.get('year')}"
+        st.caption(now_details)
         current_id = str(jio_now.get("song_id") or jio_now.get("title", ""))
         # Component-v2 IDs cannot contain its internal `__` delimiter. Live
         # providers occasionally return titles/IDs containing underscores.
@@ -1789,47 +2078,22 @@ if jio_now:
             seen_up_next_titles.add(title_key)
             up_next.append(item)
     st.session_state["jio_queue"] = up_next
-    current_feedback_seed = str(jio_now.get("song_id") or jio_now.get("title", ""))
-    pending_feedback = st.session_state.get("recommendation_feedback_pending_seed")
-    answered_feedback = st.session_state.get("recommendation_feedback_answered_seed")
-
-    if up_next and pending_feedback == current_feedback_seed and answered_feedback != current_feedback_seed:
-        @st.dialog("Quick recommendation feedback")
-        def recommendation_feedback_dialog():
-            st.write("Are these recommendations matching what you want to hear?")
-            good_col, bad_col = st.columns(2)
-            with good_col:
-                if st.button("👍 Good", use_container_width=True):
-                    log_behavior("recommendation_feedback", current_feedback_seed, metadata={"rating": "good", "queue_size": len(up_next)})
-                    st.session_state["recommendation_feedback_answered_seed"] = current_feedback_seed
-                    st.session_state.pop("recommendation_feedback_pending_seed", None)
-                    st.toast("Great — I’ll keep this direction")
-                    st.rerun()
-            with bad_col:
-                if st.button("👎 Not good", use_container_width=True):
-                    log_behavior("recommendation_feedback", current_feedback_seed, metadata={"rating": "bad", "queue_size": len(up_next)})
-                    refresh_hybrid_model(force=True)
-                    cached_feedback_results = st.session_state.get("jio_search_cache_v4", {}).get(search_query.strip().lower(), [])
-                    try:
-                        fresh_queue = build_jio_up_next(
-                            jio_now,
-                            cached_feedback_results,
-                            jio_client,
-                            hybrid_engine,
-                            local_user_id,
-                            data,
-                            preferred_track_ids,
-                            exclude_items=[jio_now, *up_next],
-                        )
-                    except Exception:
-                        fresh_queue = []
-                    st.session_state["jio_queue"] = fresh_queue
-                    st.session_state["recommendation_feedback_answered_seed"] = current_feedback_seed
-                    st.session_state.pop("recommendation_feedback_pending_seed", None)
-                    st.toast("Refreshing with a different recommendation direction")
-                    st.rerun()
-
-        recommendation_feedback_dialog()
+    if up_next:
+        feedback_left, feedback_right = st.columns([3, 1], vertical_alignment="center")
+        with feedback_right:
+            st.markdown(
+                "<div class='feedback-card'><div class='feedback-title'>Quick vibe check</div>"
+                "<div style='color:#c7d4e3;font-size:.86rem;margin:.25rem 0 .55rem'>Is this mix hitting?</div></div>",
+                unsafe_allow_html=True,
+            )
+            yes_col, no_col = st.columns(2)
+            feedback_seed = str(jio_now.get("song_id") or jio_now.get("title", ""))
+            if yes_col.button("Yes", key=f"feedback_yes_{feedback_seed}", width="stretch"):
+                log_behavior("recommendation_feedback", feedback_seed, metadata={"rating": "good", "queue_size": len(up_next)})
+                st.toast("Love that — keeping this vibe")
+            if no_col.button("No", key=f"feedback_no_{feedback_seed}", width="stretch"):
+                log_behavior("recommendation_feedback", feedback_seed, metadata={"rating": "bad", "queue_size": len(up_next)})
+                st.toast("Got it — I’ll learn from this")
     if up_next:
         st.markdown(f"<div class='shelf-subtitle'>Up next for you · {len(up_next)} personalized tracks</div>", unsafe_allow_html=True)
         featured = up_next[0]
@@ -1840,7 +2104,12 @@ if jio_now:
         with banner_mid:
             st.markdown("<div class='recommendation-kicker'>01 · next in your mix</div>", unsafe_allow_html=True)
             st.markdown(f"<div class='recommendation-title'>{featured.get('title', 'Unknown song')}</div>", unsafe_allow_html=True)
-            st.markdown(f"<div class='recommendation-meta'>{featured.get('artists', '')} · {featured.get('album', '')}</div>", unsafe_allow_html=True)
+            featured_details = f"Singer: {featured.get('artists', '')}"
+            if featured.get("album"):
+                featured_details += f" · {featured.get('album')}"
+            if featured.get("year"):
+                featured_details += f" · {featured.get('year')}"
+            st.markdown(f"<div class='recommendation-meta'>{featured_details}</div>", unsafe_allow_html=True)
             if featured.get("recommendation_reason"):
                 st.markdown(f"<div class='recommendation-reason'>✦ {featured['recommendation_reason']}</div>", unsafe_allow_html=True)
         with banner_right:
@@ -1863,6 +2132,12 @@ if jio_now:
                 except Exception:
                     st.session_state["jio_queue"] = []
                 st.rerun()
+            featured_feedback_id = str(featured.get("song_id") or featured.get("title", ""))
+            featured_yes, featured_no = st.columns(2)
+            if featured_yes.button("Yes", key=f"upnext_yes_featured_{featured_feedback_id}", width="stretch"):
+                _recommendation_feedback(featured_feedback_id, "up_next", "good")
+            if featured_no.button("No", key=f"upnext_no_featured_{featured_feedback_id}", width="stretch"):
+                _recommendation_feedback(featured_feedback_id, "up_next", "bad")
         st.caption(" · ".join(str(item.get("title", "Unknown song")) for item in up_next[:5]))
         with st.expander(f"See all {len(up_next)} personalized recommendations", expanded=True):
             recommendation_cols = st.columns(4)
@@ -1872,7 +2147,12 @@ if jio_now:
                         if item.get("image_url"):
                             st.image(item["image_url"], width="stretch", alt=f"Artwork for {item.get('title', 'recommended song')}")
                         st.caption(f"{index + 1}. {item.get('title', 'Unknown song')}")
-                        st.caption(f"{item.get('artists', '')} · {item.get('album', '')}")
+                        rec_details = f"Singer: {item.get('artists', '')}"
+                        if item.get("album"):
+                            rec_details += f" · {item.get('album')}"
+                        if item.get("year"):
+                            rec_details += f" · {item.get('year')}"
+                        st.caption(rec_details)
                         if item.get("recommendation_reason"):
                             st.caption(f"💡 {item['recommendation_reason']}")
                         if st.button(
@@ -1919,6 +2199,12 @@ if jio_now:
                             except Exception:
                                 st.session_state["jio_queue"] = []
                             st.rerun()
+                        rec_feedback_id = str(item.get("song_id") or item.get("title", ""))
+                        rec_yes, rec_no = st.columns(2)
+                        if rec_yes.button("Yes", key=f"upnext_yes_{index}_{rec_feedback_id}", width="stretch"):
+                            _recommendation_feedback(rec_feedback_id, "up_next", "good")
+                        if rec_no.button("No", key=f"upnext_no_{index}_{rec_feedback_id}", width="stretch"):
+                            _recommendation_feedback(rec_feedback_id, "up_next", "bad")
     else:
         st.caption("No more personalized recommendations in this queue.")
         status = st.session_state.get("jio_queue_status", {})
@@ -1968,11 +2254,15 @@ if jio_now:
                 local_user_id,
                 data,
                 preferred_track_ids,
-                exclude_items=[jio_now],
+                # A manual refresh should move to a different set of songs,
+                # not simply rerank the cards already on screen.
+                exclude_items=[jio_now, *existing_queue],
             )
-            st.session_state["jio_queue"] = refreshed_queue or existing_queue
+            # Never put the old queue back after a refresh: that makes the
+            # button look broken and repeatedly surfaces the same first song.
+            st.session_state["jio_queue"] = refreshed_queue
         except Exception:
-            st.session_state["jio_queue"] = existing_queue
+            st.session_state["jio_queue"] = []
         st.session_state["jio_queue_seed_id"] = current_seed_id
         st.session_state["jio_queue_attempted_id"] = current_seed_id
         st.rerun()

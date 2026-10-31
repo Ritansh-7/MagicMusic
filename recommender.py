@@ -66,6 +66,30 @@ def _canonical_recording_key(item: dict) -> str:
     title = re.sub(r"[^a-z0-9]+", " ", title).strip()
     artists = re.sub(r"[^a-z0-9]+", " ", str(item.get("artists", "")).casefold()).strip()
     return f"{title}|{artists}" if title else artists
+
+
+INTENT_KEYWORDS = {
+    "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "pyar", "dil", "jaan", "milan", "sanam", "aashiqui", "prem", "saiyaara"},
+    "ghazal": {"ghazal", "ghazals", "mehfil", "rekhta", "shayari", "ghulam ali", "chupke chupke classics"},
+    "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "shiva", "shivay", "mahadev", "krishna", "radhe", "aarti", "qawwali devotional"},
+    "motivational": {"motivation", "motivational", "victory", "fighter", "warrior", "zinda", "jeet", "inspire", "goal", "champion"},
+    "energetic": {"anthem", "rock", "dance", "party", "bhangra", "dhamaka", "dhamaal", "energetic", "power", "action"},
+    "acoustic_indie": {"acoustic", "unplugged", "indie", "folk", "coke studio", "singer songwriter"},
+    "rap_hiphop": {"rap", "hip hop", "hiphop", "freestyle", "gully", "mixtape"},
+}
+
+
+def _infer_candidate_intents(item: dict) -> set[str]:
+    """Infer musical intent from the track's own metadata, never its artist."""
+    text = " ".join(
+        str(item.get(field, ""))
+        for field in ("title", "album", "track_genre", "genre", "language")
+    ).casefold()
+    tokens = set(re.findall(r"[a-z0-9]+", text))
+    return {
+        label for label, terms in INTENT_KEYWORDS.items()
+        if any(term in text if " " in term else term in tokens for term in terms)
+    }
 import re
 from scipy.sparse import hstack, csr_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -420,6 +444,7 @@ class HybridRecommendationEngine:
         "like": 3.0,
         "jio_like": 3.0,
         "skip": -1.0,
+        "jio_skip": -1.0,
     }
 
     def __init__(self, content_engine: SpotifyRecommendationEngine):
@@ -441,6 +466,17 @@ class HybridRecommendationEngine:
 
     def fit(self, events: list[dict] | pd.DataFrame) -> "HybridRecommendationEngine":
         frame = pd.DataFrame(events)
+        self.user_index = {}
+        self.item_index = {}
+        self.user_factors = np.empty((0, 0))
+        self.item_factors = np.empty((0, 0))
+        self.item_popularity = {}
+        self.transition_scores = {}
+        self.user_recent_items = {}
+        self.user_skipped_items = {}
+        self.short_artist_preferences = {}
+        self.medium_artist_preferences = {}
+        self.long_artist_preferences = {}
         self.learned_ranker.fit(frame)
         self.bandit_counts = {}
         self.bandit_rewards = {}
@@ -512,9 +548,10 @@ class HybridRecommendationEngine:
         frame = frame.sort_values(["user_id", "session_id", "created_at"] if "session_id" in frame else ["user_id", "created_at"])
 
         # Recent listening context: used for freshness and repeat avoidance.
+        played_events = frame[frame["event_type"].isin(["jio_play", "play_start"])]
         self.user_recent_items = {
-            str(user_id): group["track_id"].astype(str).tolist()[-30:]
-            for user_id, group in frame.groupby("user_id")
+            str(user_id): group["track_id"].astype(str).tolist()[-12:]
+            for user_id, group in played_events.groupby("user_id")
         }
         self.user_skipped_items = {
             str(user_id): set(group.loc[group["event_type"].isin(["skip", "jio_skip"]), "track_id"].astype(str))
@@ -627,7 +664,10 @@ class HybridRecommendationEngine:
         # Recent items are a hard freshness constraint for a recommendation
         # queue. Repeated songs are annoying even when their collaborative
         # score is high; the current seed is already excluded by the caller.
-        recent_items = set(self.user_recent_items.get(str(user_id), [])[-30:])
+        # Keep freshness as a soft signal for sparse candidate pools. A hard
+        # exclusion of every recently played track can remove the entire
+        # relevant set for users with short histories.
+        recent_items = set(self.user_recent_items.get(str(user_id), [])[-12:])
         has_seed = bool(seed and any((seed.get(field) or "") for field in ("title", "artists", "album")))
         seed_text = " ".join(
             str((seed or {}).get(field, ""))
@@ -650,7 +690,7 @@ class HybridRecommendationEngine:
         seed_mood = np.asarray((seed or {}).get("mood_vector", []), dtype=float)
         seed_feature_tokens = _metadata_feature_tokens(seed or {})
         seed_confidence = float((seed or {}).get("mood_confidence", 0.0) or 0.0)
-        seed_intents = set((seed or {}).get("intent_labels", [])) - {"general"}
+        seed_intents = _infer_candidate_intents(seed or {})
 
         def mood_similarity(item: dict) -> float:
             item_mood = np.asarray(item.get("mood_vector", []), dtype=float)
@@ -736,11 +776,11 @@ class HybridRecommendationEngine:
             # real catalog features. Metadata fallback vectors must not
             # masquerade as audio.
             audio_match = mood_match if (
-                str((seed or {}).get("mood_source", "")).startswith("local_audio")
-                and str(item.get("mood_source", "")).startswith("local_audio")
+                str((seed or {}).get("mood_source", "")) == "local_audio_catalog"
+                and str(item.get("mood_source", "")) == "local_audio_catalog"
             ) else 0.0
             metadata_similarity = _sparse_cosine(seed_feature_tokens, _metadata_feature_tokens(item))
-            item_intents = set(item.get("intent_labels", [])) - {"general"}
+            item_intents = _infer_candidate_intents(item)
             intent_match = (
                 len(seed_intents.intersection(item_intents)) / max(len(seed_intents), 1)
                 if seed_intents else 0.0
@@ -885,42 +925,25 @@ class HybridRecommendationEngine:
         medium_values = np.asarray([item.get("_medium_term", 0.0) for item in results])
         long_values = np.asarray([item.get("_long_term", 0.0) for item in results])
         if has_seed:
+            # Audio and mood are the same cosine signal when both items have
+            # verified features. Use metadata mood only as a fallback, and do
+            # not renormalize by positive-score count: a legitimate zero is
+            # evidence of dissimilarity, not missing data.
+            mood_fallback_values = np.where(audio_values > 0.0, 0.0, mood_values)
             hybrid = (
-                0.25 * audio_values
-                + 0.15 * metadata_values
+                0.28 * audio_values
+                + 0.14 * metadata_values
                 + 0.07 * collaborative
-                + 0.07 * (0.60 * short_values + 0.40 * medium_values)
-                + 0.04 * long_values
+                + 0.10 * (0.60 * short_values + 0.40 * medium_values)
                 + 0.07 * transition_values
-                + 0.18 * context_values
+                + 0.16 * context_values
                 + 0.06 * artist_anchor_values
                 + 0.06 * era_values
-                + 0.04 * mood_values
+                + 0.04 * mood_fallback_values
                 + 0.03 * intent_values
-                + 0.04 * bandit_values
+                + 0.03 * bandit_values
                 + 0.01 * popularity
             )
-            # Confidence-aware normalization: missing audio is not a zero
-            # observation. Redistribute weight across reliable signals while
-            # applying a small confidence penalty when evidence is sparse.
-            available_weight = (
-                0.25 * (audio_values > 0).astype(float)
-                + 0.15 * (metadata_values > 0).astype(float)
-                + 0.07 * (collaborative > 0).astype(float)
-                + 0.07 * ((short_values + medium_values) > 0).astype(float)
-                + 0.04 * (long_values > 0).astype(float)
-                + 0.07 * (transition_values > 0).astype(float)
-                + 0.18 * (context_values > 0).astype(float)
-                + 0.06 * (artist_anchor_values > 0).astype(float)
-                + 0.06 * (era_values > 0).astype(float)
-                + 0.04 * (mood_values > 0).astype(float)
-                + 0.03 * (intent_values > 0).astype(float)
-                + 0.04 * (bandit_values > 0).astype(float)
-                + 0.01 * (popularity > 0).astype(float)
-            )
-            numerator = hybrid.copy()
-            hybrid = numerator / np.maximum(available_weight, 0.03)
-            hybrid *= 0.75 + 0.25 * np.minimum(1.0, available_weight)
         else:
             # Search results have no current-track anchor; preserve the
             # original taste/collaborative search ranking in that view.
@@ -958,8 +981,12 @@ class HybridRecommendationEngine:
                 # Do not surface recently played songs or weak fallback items.
                 # A user-history recommendation is allowed only when it also
                 # has meaningful session/context evidence.
-                if item_id in recent_items or title_key in recent_items:
-                    continue
+                recently_played = item_id in recent_items or title_key in recent_items
+                # Search is an explicit retrieval request: a user must still
+                # be able to find a song they played recently. Freshness is a
+                # recommendation-queue rule only.
+                if not has_seed:
+                    recently_played = False
                 # When both release years are known, prevent a large era jump
                 # before score-based ranking. Missing years stay eligible and
                 # are handled by the other metadata/mood signals.
@@ -1015,19 +1042,35 @@ class HybridRecommendationEngine:
                 low_confidence_seed = float((seed or {}).get("mood_confidence", 0.0) or 0.0) < 0.5
                 if low_confidence_seed and (direct_artist_evidence or sparse_metadata_bridge):
                     strong_context = True
+                # Live providers often omit mood/language metadata. A shared
+                # artist is safe evidence when the candidate has no
+                # contradictory intent or language signal; this prevents
+                # valid sparse-metadata artist radios from going empty while
+                # still rejecting incompatible tracks.
+                if (
+                    direct_artist_evidence
+                    and not bool(item.get("_intent_conflict", False))
+                    and not bool(item.get("_language_conflict", False))
+                    and not _infer_candidate_intents(item)
+                ):
+                    strong_context = True
                 # Do not recommend a known different-language track merely
                 # because both titles contain an energy keyword. Cross-
                 # language discovery remains possible through same-artist or
                 # same-album evidence, but not as an accidental fallback.
-                if has_seed and bool(item.get("_language_conflict", False)) and not direct_link:
+                safe_link = (
+                    float(item.get("_album_match", 0.0)) >= 1.0
+                    or float(item.get("_cluster_match", 0.0)) >= 1.0
+                )
+                if has_seed and bool(item.get("_language_conflict", False)) and not safe_link:
                     continue
-                if bool(item.get("_intent_conflict", False)) and not direct_link:
+                if bool(item.get("_intent_conflict", False)) and not safe_link:
                     continue
-                candidate_intents = set(item.get("intent_labels", [])) - {"general"}
+                candidate_intents = item_intents
                 specialized_intents = {"devotional", "ghazal", "motivational", "acoustic_indie", "energetic", "rap_hiphop"}
                 seed_specialized = seed_intents.intersection(specialized_intents)
                 candidate_specialized = candidate_intents.intersection(specialized_intents)
-                if candidate_specialized and not seed_specialized.intersection(candidate_specialized) and not direct_link:
+                if candidate_specialized and not seed_specialized.intersection(candidate_specialized) and not safe_link:
                     continue
                 # A confident seed intent is a hard semantic contract. A
                 # candidate with no evidence for that intent is not allowed
@@ -1045,8 +1088,30 @@ class HybridRecommendationEngine:
                 ):
                     continue
                 if has_seed and not strong_context:
-                    continue
+                    if not relaxed_context:
+                        continue
+                    # Sparse live metadata (for example a single English pop
+                    # track with no album catalogue) still needs a useful
+                    # radio. In the relaxed pass, require at least one
+                    # language, era, style, or metadata bridge instead of
+                    # accepting arbitrary popularity.
+                    relaxed_bridge = (
+                        float(item.get("_language_match", 0.0)) >= 1.0
+                        or float(item.get("_era_match", 0.0)) >= 0.45
+                        or float(item.get("_style_match", 0.0)) >= 1.0
+                        or float(item.get("_metadata_similarity", 0.0)) >= 0.15
+                    )
+                    # The provider sometimes returns no singer, year, language,
+                    # or audio metadata for a perfectly valid live seed. The
+                    # bounded language/style discovery pool is still safer than
+                    # leaving the listener with an empty queue.
+                    if relaxed_context and str(item.get("candidate_source", "")).startswith("seed_title_album_artist"):
+                        relaxed_bridge = True
+                    if not relaxed_bridge:
+                        continue
                 base_relevance = float(np.clip(base_score, 0.0, 1.0))
+                if recently_played:
+                    base_relevance *= 0.88
                 adjusted = base_relevance
                 redundancy = 0.0
                 # Maximal Marginal Relevance: preserve relevance while
@@ -1108,6 +1173,35 @@ class HybridRecommendationEngine:
             album_key = str(chosen.get("album", "")).lower()
             artist_counts[artist_key] = artist_counts.get(artist_key, 0) + 1
             album_counts[album_key] = album_counts.get(album_key, 0) + 1
+
+        # Make the queue travel through time naturally. For a 1990s seed,
+        # same-decade tracks lead, followed by the 1980s, then the 1970s;
+        # newer decades and missing-year items come after the descending-era
+        # bridge. This changes presentation order only after relevance,
+        # intent, freshness and diversity gates have already passed.
+        if seed_year and selected:
+            seed_decade = (seed_year // 10) * 10
+
+            def era_progression(item: dict) -> tuple[int, int]:
+                try:
+                    year = int(str(item.get("year", ""))[:4])
+                except (TypeError, ValueError):
+                    year = 0
+                if not year:
+                    return (3, 999)
+                decade = (year // 10) * 10
+                if decade == seed_decade:
+                    return (0, 0)
+                if decade < seed_decade:
+                    return (1, seed_decade - decade)
+                return (2, decade - seed_decade)
+
+            selected = [
+                item for _, item in sorted(
+                    enumerate(selected),
+                    key=lambda pair: (*era_progression(pair[1]), pair[0]),
+                )
+            ]
         for item in selected:
             item.pop("_context_score", None)
             item.pop("_profile_score", None)
