@@ -701,6 +701,21 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
 
     kinds = [match_kind(item) for item in results]
     meaningful_query = query_tokens - generic_terms
+    query_intents = {
+        label for label, terms in INTENT_TERMS.items()
+        if any((term in query_key if " " in term else term in query_tokens) for term in terms)
+    }
+    specialized_query_intents = query_intents.intersection(
+        {"devotional", "ghazal", "motivational", "romantic", "sad", "acoustic_indie", "energetic"}
+    )
+    if specialized_query_intents:
+        intent_matches = [
+            item for item in results
+            if specialized_query_intents.intersection(set(item.get("intent_labels", [])))
+        ]
+        if intent_matches:
+            results = intent_matches
+            kinds = [match_kind(item) for item in results]
     devotional_search = any(token in query_key for token in ("bajrang", "bajran", "hanuman", "anjaney"))
     if devotional_search:
         devotional_terms = ("bajrang", "hanuman", "anjaney", "bhajan", "chalisa", "aarti", "kirtan", "mantra", "devotional")
@@ -1496,10 +1511,11 @@ else:
                 fallback_query = f"{guess['track_name']} {guess.get('album_name', '')}".strip()
                 jio_results = jio_client.search(fallback_query, limit=30)
         raw_jio_results = list(jio_results or [])
-        query_matches = prioritize_search_results(raw_jio_results, search_query)
+        enriched_search_results = enrich_live_items(raw_jio_results)
+        query_matches = prioritize_search_results(enriched_search_results, search_query)
         try:
             jio_results = hybrid_engine.rank_jio_results(
-                enrich_live_items(query_matches), local_user_id, data, preferred_track_ids
+                query_matches, local_user_id, data, preferred_track_ids
             )
             # Personalization can reorder valid search matches, but it must
             # never make a real search appear empty.
