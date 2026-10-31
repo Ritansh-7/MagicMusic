@@ -1596,11 +1596,24 @@ if st.session_state.get("local_is_admin", False):
 st.markdown(f"## Good evening, listener")
 st.caption("Your recommendations are ready. Search only when you want something specific.")
 
-search_query = st.text_input(
-    "Search songs, artists, albums, or genres",
-    placeholder="What do you want to listen to?",
-    key="global_search",
-)
+st.session_state.setdefault("active_search_query", "")
+with st.form("global_search_form", border=False):
+    search_input, search_action = st.columns([6, 1], vertical_alignment="bottom")
+    with search_input:
+        typed_search_query = st.text_input(
+            "Search songs, artists, albums, or genres",
+            placeholder="What do you want to listen to?",
+            key="global_search_input",
+        )
+    with search_action:
+        submitted_search = st.form_submit_button(
+            "Search",
+            icon=":material/search:",
+            width="stretch",
+        )
+if submitted_search:
+    st.session_state["active_search_query"] = typed_search_query.strip()
+search_query = st.session_state.get("active_search_query", "")
 
 # Personalization is learned from plays, likes, imported history, and the
 # live recommendation feedback pipeline; no extra taste form is needed here.
