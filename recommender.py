@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 ERA_COMPATIBILITY_WINDOW_YEARS = 30
-HYBRID_MODEL_VERSION = "hybrid-v9-specialized-intent-gates"
+HYBRID_MODEL_VERSION = "hybrid-v10-strict-diagnostics"
 
 
 def _metadata_feature_tokens(item: dict) -> dict[str, float]:
@@ -48,10 +48,16 @@ def _candidate_similarity(left: dict, right: dict) -> float:
 
 def _canonical_recording_key(item: dict) -> str:
     """Collapse alternate releases of one recording for a recommendation queue."""
-    isrc = str(item.get("isrc") or item.get("external_id") or "").strip().casefold()
+    # Only an actual ISRC is a recording identifier. Provider song IDs often
+    # represent releases, so using them here would miss duplicate versions.
+    isrc = str(item.get("isrc") or "").strip().casefold()
     if isrc:
         return f"isrc:{isrc}"
     title = str(item.get("title", "")).casefold()
+    title = re.sub(
+        r"\s*[-–—]\s*[^()]*\b(vocals?\s*only|instrumental|karaoke|radio edit)\b.*$",
+        " ", title,
+    )
     title = re.sub(
         r"\b(vocals?\s*only|instrumental|karaoke|remix|reprise|live|lofi|slowed|reverb|unplugged|version\s*\w*|radio edit)\b",
         " ", title,
@@ -880,6 +886,8 @@ class HybridRecommendationEngine:
         learned = self.learned_ranker.predict(results)
         if learned.size and np.any(learned):
             hybrid = 0.88 * hybrid + 0.12 * learned
+        if hybrid.size and hybrid.max() > hybrid.min():
+            hybrid = (hybrid - hybrid.min()) / (hybrid.max() - hybrid.min())
 
         # Sequence-aware reranking: avoid immediate repeats and prevent one
         # artist/album from occupying the whole Up Next queue.
@@ -889,7 +897,7 @@ class HybridRecommendationEngine:
         album_counts: dict[str, int] = {}
         remaining = ranked.copy()
         while remaining:
-            eligible: list[tuple[int, float]] = []
+            eligible: list[tuple[int, float, float, float]] = []
             for index, (base_score, item) in enumerate(remaining):
                 item_id = str(item.get("song_id") or item.get("title", ""))
                 artist_key = str(item.get("artists", "")).lower()
@@ -917,7 +925,6 @@ class HybridRecommendationEngine:
                     float(item.get("_audio_match", 0.0)) >= 0.62
                     or float(item.get("_intent_match", 0.0)) >= 0.5
                     or float(item.get("_album_match", 0.0)) >= 1.0
-                    or float(item.get("_cluster_match", 0.0)) >= 1.0
                     or (
                         float(item.get("_metadata_score", 0.0)) >= 0.55
                         and float(item.get("_mood_match", 0.0)) >= 0.60
@@ -935,11 +942,16 @@ class HybridRecommendationEngine:
                     continue
                 if bool(item.get("_intent_conflict", False)):
                     continue
+                candidate_intents = set(item.get("intent_labels", [])) - {"general"}
+                specialized_intents = {"devotional", "ghazal", "motivational", "acoustic_indie", "energetic"}
+                seed_specialized = seed_intents.intersection(specialized_intents)
+                candidate_specialized = candidate_intents.intersection(specialized_intents)
+                if candidate_specialized and not seed_specialized.intersection(candidate_specialized):
+                    continue
                 # A confident seed intent is a hard semantic contract. A
                 # candidate with no evidence for that intent is not allowed
                 # merely because it is popular or from a similar era. Same
                 # artist/album/cluster is the only safe exception.
-                candidate_intents = set(item.get("intent_labels", [])) - {"general"}
                 if (
                     has_seed
                     and seed_intents
@@ -953,34 +965,45 @@ class HybridRecommendationEngine:
                     continue
                 if has_seed and not strong_context:
                     continue
-                adjusted = float(base_score)
+                base_relevance = float(np.clip(base_score, 0.0, 1.0))
+                adjusted = base_relevance
+                redundancy = 0.0
                 # Maximal Marginal Relevance: preserve relevance while
                 # continuously penalising candidates too similar to songs
                 # already selected. No version/artist/album names are special-
                 # cased; the metadata feature space determines the penalty.
                 if selected:
                     redundancy = max(_candidate_similarity(item, chosen) for chosen in selected)
-                    adjusted = 0.82 * adjusted - 0.18 * redundancy
+                    adjusted = adjusted - 0.08 * redundancy
                 # Prevent the same singer from appearing repeatedly. The
                 # first appearance is free; subsequent appearances are
                 # increasingly expensive, while still allowing a second song
                 # when the candidate pool is small.
-                adjusted -= 0.42 * artist_counts.get(artist_key, 0)
+                adjusted -= 0.10 * artist_counts.get(artist_key, 0)
                 # Album/soundtrack continuity is useful for the first result,
                 # but repeated items from the same album must make room for
                 # equally relevant songs from the seed's era and intent.
-                adjusted -= 0.22 * album_counts.get(album_key, 0)
+                adjusted -= 0.06 * album_counts.get(album_key, 0)
                 if selected and artist_key == str(selected[-1].get("artists", "")).lower():
-                    adjusted -= 0.30
-                eligible.append((index, adjusted))
+                    adjusted -= 0.08
+                eligible.append((index, adjusted, base_relevance, redundancy))
             # If every remaining candidate was rejected by the freshness or
             # relevance gate, finish cleanly instead of leaking weak fallbacks.
             if not eligible:
                 break
-            best_index = max(eligible, key=lambda pair: pair[1])[0]
+            best = max(eligible, key=lambda pair: pair[1])
+            best_index = best[0]
             _, chosen = remaining.pop(best_index)
-            chosen["recommendation_score"] = round(float(max(0.0, max(eligible, key=lambda pair: pair[1])[1])), 6)
+            chosen["base_relevance_score"] = round(float(best[2]), 6)
+            chosen["redundancy_penalty"] = round(float(best[3]), 6)
+            chosen["final_rank_score"] = round(float(max(0.0, best[1])), 6)
+            # recommendation_score remains the relevance score used for
+            # impression labels; diversity should not turn it into zero.
+            chosen["recommendation_score"] = chosen["base_relevance_score"]
             chosen["recommendation_features"] = {
+                "base_relevance": chosen["base_relevance_score"],
+                "redundancy_penalty": chosen["redundancy_penalty"],
+                "final_rank_score": chosen["final_rank_score"],
                 "context": round(float(chosen.get("_context_score", 0.0)), 4),
                 "collaborative": round(float(chosen.get("_collaborative_score", 0.0)), 4),
                 "mood": round(float(chosen.get("_mood_match", 0.0)), 4),

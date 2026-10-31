@@ -2,7 +2,8 @@ import pandas as pd
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from recommender import SpotifyRecommendationEngine
+from recommender import SpotifyRecommendationEngine, _canonical_recording_key
+from ranking_model import _feature_row
 
 
 def sample_data():
@@ -52,3 +53,23 @@ def test_profile_recommendations_exclude_onboarding_tracks():
     result = engine.recommend_for_profile(profile, n=2, exclude_ids=["a"])
     assert "a" not in result["track_id"].tolist()
     assert len(result) == 2
+
+
+def test_canonical_recording_key_collapses_release_versions():
+    original = {"title": "Darkhaast", "artists": "Arijit Singh"}
+    alternate = {"title": "Darkhaast (From 'Shivaay')", "artists": "Arijit Singh"}
+    vocals = {"title": "Darkhaast - Arijit Singh Vocals Only", "artists": "Arijit Singh"}
+    assert _canonical_recording_key(original) == _canonical_recording_key(alternate)
+    assert _canonical_recording_key(original) == _canonical_recording_key(vocals)
+
+
+def test_logged_impression_schema_is_read_by_ranker():
+    row = _feature_row({
+        "score": 0.8,
+        "rank": 2,
+        "features": {"audio": 0.7, "metadata": 0.6, "collaborative": 0.4},
+    })
+    assert row[0] == 0.8
+    assert row[3] == 0.7
+    assert row[7] == 0.4
+    assert row[-1] == 2 / 70

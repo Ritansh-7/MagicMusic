@@ -151,7 +151,7 @@ INTENT_TERMS = {
     "motivational": {"motivation", "motivational", "zinda", "jeet", "victory", "fighter", "warrior", "rise", "goal", "inspire"},
     "energetic": {"fight", "anthem", "rock", "power", "action", "dance", "party", "bhangra", "bang", "fire", "dhamaka", "dhamaal", "high", "energy"},
     "sad": {"sad", "heartbreak", "alone", "broken", "dard", "udaas", "tanha", "judai"},
-    "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "shiva", "ram", "allah", "khuda"},
+    "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "aarti", "kirtan", "mantra", "om namah shivay", "krishna", "allah", "khuda"},
     "calm": {"acoustic", "unplugged", "lofi", "sleep", "calm", "peace", "sukoon", "soothing", "instrumental"},
     "acoustic_indie": {"acoustic", "unplugged", "indie", "folk", "singer songwriter", "singer-songwriter", "coke studio", "soul"},
 }
@@ -891,60 +891,11 @@ def build_jio_up_next(
     except Exception:
         ranked = []
 
-    if not ranked and enriched_collected:
-        # Last-resort relevance guard: preserve candidate order/score inputs,
-        # but prefer the same verified intent and a continuous era window.
-        # This is deliberately artist-agnostic; an artist change is valid when
-        # the song's mood and period remain close.
-        try:
-            seed_year = int(str(seed.get("year", ""))[:4])
-        except ValueError:
-            seed_year = 0
-        seed_intents = set(seed.get("intent_labels", [])) - {"general"}
-        fallback: list[tuple[float, dict]] = []
-        for item in enriched_collected:
-            title_key = normalize_title(item.get("title", ""))
-            if not title_key or title_key == normalize_title(seed.get("title", "")):
-                continue
-            try:
-                item_year = int(str(item.get("year", ""))[:4])
-            except ValueError:
-                item_year = 0
-            era_score = 0.5
-            if seed_year and item_year:
-                era_gap = abs(seed_year - item_year)
-                if era_gap > ERA_COMPATIBILITY_WINDOW_YEARS:
-                    continue
-                era_score = float(np.exp(-((era_gap / 10.0) ** 2)))
-            item_intents = set(item.get("intent_labels", [])) - {"general"}
-            if seed_intents and item_intents and not seed_intents.intersection(item_intents):
-                continue
-            if seed_intents and not item_intents:
-                same_artist = bool(
-                    set(str(seed.get("artists", "")).casefold().split(","))
-                    & set(str(item.get("artists", "")).casefold().split(","))
-                )
-                same_album = bool(
-                    str(seed.get("album", "")).casefold().strip()
-                    and str(seed.get("album", "")).casefold().strip()
-                    == str(item.get("album", "")).casefold().strip()
-                )
-                if not (same_artist or same_album):
-                    continue
-            seed_language = str(seed.get("language", "")).casefold().strip()
-            item_language = str(item.get("language", "")).casefold().strip()
-            if seed_language and item_language and seed_language != item_language:
-                continue
-            intent_score = (
-                len(seed_intents.intersection(item_intents)) / max(len(seed_intents), 1)
-                if seed_intents else 0.0
-            )
-            artist_score = float(bool(
-                set(str(seed.get("artists", "")).casefold().split(","))
-                & set(str(item.get("artists", "")).casefold().split(","))
-            ))
-            fallback.append((0.55 * intent_score + 0.30 * era_score + 0.15 * artist_score, item))
-        ranked = [item for _, item in sorted(fallback, key=lambda pair: pair[0], reverse=True)]
+    if not ranked:
+        # Never bypass the ranker with an era/artist-only fallback. That path
+        # produced queues with zero diagnostics and unrelated recommendations.
+        # The caller can show a shorter/empty radio instead.
+        return []
     unique: list[dict] = []
     used_titles: set[str] = set()
     for item in ranked:
@@ -1172,6 +1123,9 @@ def render_admin_dashboard() -> None:
                     "track": item.get("title", item.get("track_id", "")),
                     "rank": item.get("rank"),
                     "score": item.get("score"),
+                    "base_relevance": features.get("base_relevance", item.get("score", 0.0)),
+                    "final_rank_score": features.get("final_rank_score", item.get("score", 0.0)),
+                    "redundancy_penalty": features.get("redundancy_penalty", 0.0),
                     "audio": features.get("audio", 0.0),
                     "mood": features.get("mood", 0.0),
                     "intent": features.get("intent", 0.0),

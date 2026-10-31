@@ -22,9 +22,11 @@ RANK_FEATURES = (
 
 
 def _feature_row(item: dict) -> list[float]:
-    features = item.get("recommendation_features") or {}
+    features = item.get("recommendation_features") or item.get("features") or {}
+    base_score = item.get("recommendation_score", item.get("score", features.get("base_score", 0.0)))
+    rank_position = item.get("rank", item.get("recommendation_rank", 0.0))
     return [
-        float(item.get("recommendation_score", features.get("base_score", 0.0)) or 0.0),
+        float(base_score or 0.0),
         float(features.get("context", 0.0) or 0.0),
         float(features.get("mood", 0.0) or 0.0),
         float(features.get("audio", 0.0) or 0.0),
@@ -39,7 +41,7 @@ def _feature_row(item: dict) -> list[float]:
         float(features.get("long_term", 0.0) or 0.0),
         float(features.get("audio_confidence", 0.0) or 0.0),
         float(item.get("popularity", 0.0) or 0.0) / 100.0,
-        float(item.get("rank", item.get("recommendation_rank", 0.0)) or 0.0) / 70.0,
+        float(rank_position or 0.0) / 70.0,
     ]
 
 
@@ -47,7 +49,7 @@ class LearnedRanker:
     """LambdaMART when available, guarded by a small-data fallback.
 
     Labels are generated from later implicit feedback after an impression:
-    like=2, play=1, skip=-1. Unknown/no-response items are censored and are
+    like=2, play=1, skip=0. Unknown/no-response items are censored and are
     not treated as negatives.
     """
 
@@ -90,7 +92,7 @@ class LearnedRanker:
                 if not track_id:
                     continue
                 event_type = str(event.get("event_type") or "")
-                value = 2.0 if event_type in {"like", "jio_like"} else 1.0 if event_type in {"play_start", "jio_play"} else -1.0 if event_type in {"skip", "jio_skip"} else None
+                value = 2.0 if event_type in {"like", "jio_like"} else 1.0 if event_type in {"play_start", "jio_play"} else 0.0 if event_type in {"skip", "jio_skip"} else None
                 if value is None:
                     continue
                 outcomes[track_id] = max(outcomes.get(track_id, 0.0), value)
@@ -107,6 +109,17 @@ class LearnedRanker:
         self.backend = "hybrid_fallback"
         frame = events if isinstance(events, pd.DataFrame) else pd.DataFrame(events)
         rows = list(self._event_rows(frame))
+        # LambdaRank needs at least two observed candidates with different
+        # labels in a query group. Single-outcome impressions are useful for
+        # analytics but cannot teach a pairwise ordering model.
+        grouped: dict[int, list[tuple[list[float], float, str, int]]] = {}
+        for row in rows:
+            grouped.setdefault(row[3], []).append(row)
+        rows = [
+            row for group in grouped.values()
+            if len(group) >= 2 and len({entry[1] for entry in group}) >= 2
+            for row in group
+        ]
         self.examples = len(rows)
         positives = sum(label > 0 for _, label, _, _ in rows)
         if len(rows) < self.min_examples or positives < self.min_positive:
@@ -121,8 +134,8 @@ class LearnedRanker:
                 objective="lambdarank", n_estimators=80, learning_rate=0.05,
                 num_leaves=15, min_child_samples=8, verbosity=-1, random_state=42,
             )
-            # Each observed interaction is a compact one-item query.  The
-            # fallback still protects the app when LightGBM has no wheel.
+            # Only multi-outcome groups reach this point, so pairwise labels
+            # are meaningful. The fallback protects deploys without LightGBM.
             self.model.fit(x, y, group=groups)
             self.backend = "lightgbm_lambdamart"
         except (ImportError, ModuleNotFoundError, ValueError, RuntimeError):
