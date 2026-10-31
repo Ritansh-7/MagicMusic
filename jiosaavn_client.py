@@ -16,7 +16,7 @@ def _cached_search_page(base_url: str, query: str) -> tuple[dict[str, Any], ...]
         response = requests.get(
             f"{base_url}/result/",
             params={"query": query, "lyrics": "false"},
-            timeout=5,
+            timeout=3.5,
         )
         response.raise_for_status()
         payload = response.json()
@@ -140,13 +140,9 @@ class JioSaavnClient:
             query,
             f"{query} song",
             f"{query} music",
-            f"{query} hits",
             f"{query} hindi",
             f"{query} soundtrack",
-            f"{query} film songs",
-            f"{query} playlist",
-            f"{query} romantic songs",
-            f"{query} bollywood songs",
+            f"{query} songs",
         )
         with ThreadPoolExecutor(max_workers=min(8, len(candidates))) as executor:
             pages = executor.map(

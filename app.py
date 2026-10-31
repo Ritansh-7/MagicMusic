@@ -940,25 +940,25 @@ def build_jio_up_next(
                 except Exception:
                     provider_failures += 1
 
-    collect_queries(related_queries, page_limit=12, max_queries=20, source="seed_title_album_artist")
+    collect_queries(related_queries, page_limit=10, max_queries=12, source="seed_title_album_artist")
     if audio_neighbor_queries:
-        collect_queries(audio_neighbor_queries, page_limit=8, max_queries=10, source="local_audio_neighbor")
+        collect_queries(audio_neighbor_queries, page_limit=6, max_queries=6, source="local_audio_neighbor")
     # A full expanded artist page is used only when the related pages have not
     # produced enough candidates for the large Up Next shelf.
     if len(collected) < 60:
         collect_queries(
             [f"{artist} songs" for artist in artist_names[:3]],
-            page_limit=20,
-            max_queries=3,
+            page_limit=15,
+            max_queries=2,
             source="artist_discovery",
         )
     if len(collected) < 60:
-        collect_queries(fallback_queries, page_limit=15, max_queries=6, source="seed_metadata_similarity")
+        collect_queries(fallback_queries, page_limit=12, max_queries=3, source="seed_metadata_similarity")
     # The public upstream service can return only a few rows per query. Use
     # broader but still seed-related pages as a final capacity pass so a
     # selected recommendation gets its own large queue instead of inheriting
     # the old queue's remainder.
-    if len(collected) < 45:
+    if len(collected) < 35:
         broad_queries = []
         for artist in artist_names[:2]:
             broad_queries.extend([
@@ -974,10 +974,10 @@ def build_jio_up_next(
                 f"{intent} songs {decade}s"
                 for intent in sorted(verified_intents) if intent != "general"
             )
-        collect_queries(broad_queries, page_limit=20, max_queries=10, source="era_intent_discovery")
+        collect_queries(broad_queries, page_limit=12, max_queries=4, source="era_intent_discovery")
     # Keep a usable radio depth for sparse artist searches. These are still
     # seed-scoped queries, never global popularity pages.
-    if len(collected) < 90 and artist_names:
+    if len(collected) < 55 and artist_names:
         depth_queries = []
         for artist in artist_names[:3]:
             depth_queries.extend([
@@ -987,7 +987,7 @@ def build_jio_up_next(
                 f"{artist} acoustic songs",
                 f"{artist} live songs",
             ])
-        collect_queries(depth_queries, page_limit=20, max_queries=12, source="artist_depth_discovery")
+        collect_queries(depth_queries, page_limit=12, max_queries=4, source="artist_depth_discovery")
     enriched_collected = enrich_live_items(collected)
     try:
         ranked = hybrid.rank_jio_results(
