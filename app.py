@@ -142,11 +142,11 @@ MOOD_FEATURES = (
 )
 MOOD_VECTOR_FEATURES = (
     "energy", "tempo", "valence", "danceability", "acousticness",
-    "instrumentalness", "speechiness", "liveness", "loudness", "popularity",
+    "instrumentalness", "speechiness", "liveness", "loudness",
 )
 
 INTENT_TERMS = {
-    "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "pyar", "dil", "jaan", "sanam", "sajan", "saiyaara"},
+    "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "pyar", "dil", "jaan", "sanam", "sajan", "saiyaara", "milan"},
     "ghazal": {"ghazal", "ghazals", "shayar", "shayari", "mehfil", "rekhta", "ghulam ali", "ghulam ali classics", "ustad bade ghulam ali", "ghulam ali khan", "chupke chupke classics"},
     "motivational": {"motivation", "motivational", "zinda", "jeet", "victory", "fighter", "warrior", "rise", "goal", "inspire"},
     "energetic": {"fight", "anthem", "rock", "power", "action", "dance", "party", "bhangra", "bang", "fire", "dhamaka", "dhamaal", "high", "energy"},
@@ -181,6 +181,18 @@ def build_catalog_clusters(data: pd.DataFrame) -> tuple[pd.DataFrame, StandardSc
 
 def _compact_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
+
+
+def _recommendation_title_key(value: str) -> str:
+    """Collapse release/version suffixes for visible queue deduplication."""
+    key = _compact_key(value)
+    key = re.sub(
+        r"\b(from|version|soundtrack|original motion picture soundtrack|"
+        r"jhankar beats|remix|reprise|live|instrumental|karaoke|vocals only)\b.*$",
+        " ",
+        key,
+    )
+    return re.sub(r"\s+", " ", key).strip()
 
 
 def _mood_vector(values: dict) -> list[float]:
@@ -251,33 +263,16 @@ def infer_metadata_mood(item: dict) -> dict:
 
 
 def infer_music_intents(item: dict) -> list[str]:
-    """Infer a small intent set from live metadata in constant time."""
+    """Infer intent independently from a track's own metadata."""
     text = " ".join(
-        str(item.get(field, "")) for field in ("title", "album", "artists", "language")
+        str(item.get(field, ""))
+        for field in ("title", "album", "track_genre", "genre", "language")
     ).casefold()
     tokens = set(re.findall(r"[a-z0-9]+", text))
-    labels = [
-        label for label, terms in INTENT_TERMS.items()
-        if any((term in text if " " in term else term in tokens) for term in terms)
-    ]
-    # Numeric audio features provide a language/artist-independent drive
-    # signal. This catches motivational tracks whose title contains no mood
-    # keyword (for example a film title track).
-    try:
-        energy = float(item.get("energy", 0.0) or 0.0)
-        valence = float(item.get("valence", 0.0) or 0.0)
-        danceability = float(item.get("danceability", 0.0) or 0.0)
-        tempo = min(1.0, float(item.get("tempo", 0.0) or 0.0) / 140.0)
-        drive_score = 0.35 * energy + 0.30 * valence + 0.20 * danceability + 0.15 * tempo
-        # High energy is not automatically motivational. Motivation must be
-        # supported by explicit metadata/title evidence, otherwise workout or
-        # party songs leak into unrelated radio queues.
-        # Numeric energy can support mood similarity, but must not invent an
-        # energetic intent and let romantic tracks pass an energetic gate.
-        if energy >= 0.62 and tempo >= 0.55 and "energetic" in labels:
-            labels.append("energetic")
-    except (TypeError, ValueError):
-        pass
+    labels = []
+    for label, terms in INTENT_TERMS.items():
+        if any(term in text if " " in term else term in tokens for term in terms):
+            labels.append(label)
     return sorted(set(labels)) or ["general"]
 
 
@@ -326,7 +321,7 @@ def build_live_title_lookup(data: pd.DataFrame) -> list[dict]:
 
 
 def enrich_live_items(items: list[dict]) -> list[dict]:
-    """Attach local audio features to live results when title/artist matches."""
+    """Attach local audio features while preserving fuzzy-match provenance."""
     for item in items:
         title = _compact_key(item.get("title", ""))
         artist_names = str(item.get("artists", "")).split(",")
@@ -358,8 +353,12 @@ def enrich_live_items(items: list[dict]) -> list[dict]:
                 )
                 if match:
                     item["feature_source"] = "local_audio_catalog_title_match"
+        match_is_fuzzy = bool(match and title_match)
         if match:
             item.update({key: value for key, value in match.items() if key != "catalog_artists"})
+            if match_is_fuzzy:
+                item["feature_source"] = "local_audio_catalog_title_match"
+                item["mood_source"] = "local_audio_catalog_title_match"
             if not str(item.get("artists", "")).strip():
                 item["artists"] = match.get("catalog_artists", "")
             if not str(item.get("language", "")).strip() and match.get("catalog_language_hint"):
@@ -421,8 +420,14 @@ if "recommendation_variant" not in st.session_state:
     variant_key = str(st.session_state.get("local_user_id") or st.session_state["local_session_id"])
     bucket = int(hashlib.sha256(variant_key.encode("utf-8")).hexdigest()[:8], 16) % 2
     st.session_state["recommendation_variant"] = "diverse" if bucket else "control"
-st.session_state.setdefault("jio_search_cache_v3", {})
+st.session_state.setdefault("jio_search_cache_v4", {})
+st.session_state.pop("jio_search_cache_v3", None)
 st.session_state.pop("jio_search_cache_v2", None)
+# Invalidate shelves created before the full artist/film catalogue policy.
+if st.session_state.get("jio_search_cache_policy") != "full-live-results-v2":
+    st.session_state.pop("jio_search_cache_v4", None)
+    st.session_state["jio_search_cache_v4"] = {}
+    st.session_state["jio_search_cache_policy"] = "full-live-results-v2"
 st.session_state.setdefault("jio_loop", False)
 st.session_state.setdefault("scroll_to_player", False)
 # Never keep a queue generated by an older relevance policy. This is
@@ -660,7 +665,16 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
         album = _compact_key(item.get("album", ""))
         artists = _compact_key(item.get("artists", ""))
         title_tokens = set(title.split())
-        exact_title = float(title == query_key)
+        # Providers commonly append recording variants to the title. Treat
+        # those as exact title hits for ordering, while preserving the full
+        # display title so Male/Female/Duet versions remain visible.
+        base_title = re.sub(
+            r"\b(from|version|soundtrack|jhankar beats|remix|reprise|live|"
+            r"instrumental|karaoke|male|female|duet|vocals only)\b.*$",
+            " ",
+            title,
+        ).strip()
+        exact_title = float(title == query_key or base_title == query_key)
         title_match = float(query_key in title or query_tokens.issubset(title_tokens))
         album_exact = float(album == query_key)
         album_match = float(query_key in album or query_tokens.issubset(set(album.split())))
@@ -692,13 +706,10 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
         title_hit = bool(query_key in title or (meaningful and meaningful.issubset(set(title.split()))))
         artist_hit = bool(query_key in artists or (meaningful and meaningful.issubset(set(artists.split()))))
         album_hit = bool(query_key in album or (meaningful and meaningful.issubset(set(album.split()))))
-        # If the query is present as an artist entity anywhere in the result
-        # page, treat it as an artist search. Otherwise a title such as
-        # "... feat. Arijit Singh" incorrectly hides the artist's catalogue.
-        if artist_hit:
-            return "artist"
         if title_hit:
             return "title"
+        if artist_hit:
+            return "artist"
         if album_hit:
             return "album"
         return ""
@@ -712,7 +723,7 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
     specialized_query_intents = query_intents.intersection(
         {"devotional", "ghazal", "motivational", "romantic", "sad", "acoustic_indie", "energetic", "rap_hiphop"}
     )
-    if specialized_query_intents:
+    if False and specialized_query_intents:
         intent_matches = [
             item for item in results
             if specialized_query_intents.intersection(set(item.get("intent_labels", [])))
@@ -721,7 +732,7 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
             results = intent_matches
             kinds = [match_kind(item) for item in results]
     devotional_search = any(token in query_key for token in ("bajrang", "bajran", "hanuman", "anjaney"))
-    if devotional_search:
+    if False and devotional_search:
         devotional_terms = ("bajrang", "hanuman", "anjaney", "bhajan", "chalisa", "aarti", "kirtan", "mantra", "devotional")
         devotional_matches = [
             item for item in results
@@ -732,15 +743,89 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
             kinds = [match_kind(item) for item in results]
     # A clear title query must not leak unrelated artist/album results. Artist
     # and album queries remain broad within their matched entity.
-    if meaningful_query and "artist" in kinds:
-        filtered = [item for item, kind in zip(results, kinds) if kind == "artist"]
-    elif meaningful_query and "title" in kinds:
+    exact_title_query = any(
+        _compact_key(item.get("title", "")) == query_key
+        for item in results
+    )
+    artist_entity_matches = [
+        item for item in results
+        if query_key in _compact_key(item.get("artists", ""))
+        or (
+            meaningful_query
+            and meaningful_query.issubset(
+                set(_compact_key(item.get("artists", "")).split())
+            )
+        )
+    ]
+    album_entity_matches = [
+        item for item in results
+        if query_key in _compact_key(item.get("album", ""))
+        or (
+            meaningful_query
+            and meaningful_query.issubset(set(_compact_key(item.get("album", "")).split()))
+        )
+    ]
+    entity_catalog_search = bool(
+        meaningful_query
+        and not exact_title_query
+        and (artist_entity_matches or album_entity_matches)
+    )
+    if False and meaningful_query and artist_entity_matches and not exact_title_query:
+        # An artist query is an entity search, not a title-token search.
+        # Keep the artist's actual catalogue first; generic provider rows are
+        # only allowed in the related fallback section.
+        filtered = artist_entity_matches
+    elif False and meaningful_query and album_entity_matches and not exact_title_query:
+        filtered = album_entity_matches
+    elif False and meaningful_query and "title" in kinds:
         filtered = [item for item, kind in zip(results, kinds) if kind == "title"]
-    elif meaningful_query and ("artist" in kinds or "album" in kinds):
+    elif False and meaningful_query and "artist" in kinds:
+        filtered = [item for item, kind in zip(results, kinds) if kind == "artist"]
+    elif False and meaningful_query and ("artist" in kinds or "album" in kinds):
         filtered = [item for item, kind in zip(results, kinds) if kind in {"artist", "album"}]
     else:
         filtered = list(results)
-    ordered = [item for _, item in sorted(enumerate(filtered), key=lambda pair: (score(pair[1]), -pair[0]), reverse=True)]
+    primary_ids = {id(item) for item in filtered}
+    # Keep the exact entity matches first, but do not leave a normal song
+    # search with a tiny shelf when the provider returned enough scored
+    # related rows. Artist/film catalogues already show every matched song.
+    if (
+        meaningful_query
+        and not entity_catalog_search
+        and len(filtered) < 20
+        and len(results) > len(filtered)
+    ):
+        ordered_all = [
+            item for _, item in sorted(
+                enumerate(results),
+                key=lambda pair: (score(pair[1]), -pair[0]),
+                reverse=True,
+            )
+        ]
+        filtered_ids = {id(item) for item in filtered}
+        for item in ordered_all:
+            if id(item) in filtered_ids:
+                continue
+            item.setdefault("search_match_type", "scored_related_result")
+            filtered.append(item)
+            filtered_ids.add(id(item))
+            if len(filtered) >= 20:
+                break
+    ordered_primary = [
+        item for _, item in sorted(
+            enumerate([item for item in filtered if id(item) in primary_ids]),
+            key=lambda pair: (score(pair[1]), -pair[0]),
+            reverse=True,
+        )
+    ]
+    ordered_related = [
+        item for _, item in sorted(
+            enumerate([item for item in filtered if id(item) not in primary_ids]),
+            key=lambda pair: (score(pair[1]), -pair[0]),
+            reverse=True,
+        )
+    ]
+    ordered = ordered_primary + ordered_related
     unique: list[dict] = []
     seen: set[str] = set()
     for item in ordered:
@@ -773,15 +858,6 @@ def build_jio_up_next(
     title = str(seed.get("title", "")).strip()
     artists = str(seed.get("artists", "")).strip()
     album = str(seed.get("album", "")).strip()
-
-    # Classify the seed independently. Search neighbours are candidate data,
-    # not evidence about the current track's intent; using them here caused a
-    # broad artist result (for example a motivational song) to redefine a
-    # romantic/acoustic seed.
-    verified_intents = (
-        set(seed.get("intent_labels", ["general"]))
-        | set(seed.get("query_intents", []))
-    )
 
     def valid_artist(value: object) -> bool:
         normalized = str(value or "").strip().casefold()
@@ -840,30 +916,14 @@ def build_jio_up_next(
             seed["artists"] = ", ".join(existing_artists)
     artist_names = existing_artists
     related_queries = []
-    # Exact seed/title and soundtrack queries must run before broad artist
-    # discovery; otherwise the query budget can be consumed by discographies.
+    # Keep recommendation discovery to a few high-signal queries. Search
+    # already fetched the artist/film catalogue; extra expansions only spend
+    # tokens without changing the ranker.
     if title:
-        related_queries.extend([
-            title,
-            f"{title} similar songs",
-            f"songs like {title}",
-            f"{title} soundtrack",
-            f"{title} songs",
-        ])
+        related_queries.append(title)
     if album:
-        related_queries.extend([f"{album} songs", f"{album} soundtrack"])
-    for artist in artist_names[:5]:
-        related_queries.extend([
-            f"{artist} songs",
-            f"{artist} best songs",
-            f"{artist} similar songs",
-        ])
-        related_queries.extend(f"{artist} {intent}" for intent in sorted(verified_intents) if intent != "general")
-    if title:
-        related_queries.extend([
-            f"{title} acoustic songs" if "acoustic_indie" in verified_intents else f"{title} songs",
-        ])
-        related_queries.extend(f"{title} {intent}" for intent in sorted(verified_intents) if intent != "general")
+        related_queries.append(f"{album} songs")
+    related_queries.extend(f"{artist} songs" for artist in artist_names[:2])
     try:
         seed_year = int(str(seed.get("year", ""))[:4])
     except ValueError:
@@ -888,48 +948,9 @@ def build_jio_up_next(
         if year_votes:
             seed_year = int(np.median(year_votes))
             seed["year"] = seed_year
-    if seed_year:
-        decade = (seed_year // 10) * 10
-        era_intents = [intent for intent in sorted(verified_intents) if intent != "general"] or ["songs"]
-        related_queries.extend([
-            f"bollywood {intent} songs {decade}s" for intent in era_intents
-        ])
-        related_queries.extend([
-            f"hindi songs from {decade}s",
-            f"bollywood songs from {seed_year}",
-            f"songs like {title} {decade}s" if title else "",
-        ])
-    # Do not fill a seed-specific radio queue with global popular/romantic
-    # pages. Those pages create the exact failure mode where an acoustic indie
-    # song receives unrelated Bollywood recommendations. Every fallback must
-    # retain at least the seed artist, intent or title context.
-    fallback_queries = []
-    if title:
-        fallback_queries.extend([f"songs like {title}", f"{title} similar songs"])
-    if verified_intents:
-        fallback_queries.extend(f"{intent} hindi songs" for intent in sorted(verified_intents) if intent != "general")
-    if not fallback_queries and artist_names:
-        fallback_queries.extend(f"{artist} songs" for artist in artist_names[:2])
-    # Retrieve nearest local audio/content neighbours when the live seed can
-    # be matched to the local catalog. These are only query seeds: displayed
-    # results still come from JioSaavn, so artwork and playback stay live.
-    audio_neighbor_queries: list[str] = []
-    try:
-        catalog_title = catalog["track_name"].astype(str).map(_compact_key)
-        seed_title_key = _compact_key(title)
-        local_matches = catalog[catalog_title == seed_title_key]
-        if local_matches.empty and seed_title_key:
-            local_matches = catalog[catalog_title.str.contains(seed_title_key, regex=False, na=False)]
-        if not local_matches.empty:
-            local_id = str(local_matches.iloc[0].get("track_id", ""))
-            neighbours = hybrid.content_engine.recommend(local_id, n=10)
-            for row in neighbours.itertuples(index=False):
-                neighbour_title = str(getattr(row, "track_name", "")).strip()
-                neighbour_artists = str(getattr(row, "artists", "")).split(",")[0].strip()
-                if neighbour_title:
-                    audio_neighbor_queries.append(f"{neighbour_title} {neighbour_artists}".strip())
-    except Exception:
-        audio_neighbor_queries = []
+    # Recommendation ranking still uses search-shelf candidates plus a short
+    # seed/artist/album page. Extra era/intent/audio-neighbour queries were
+    # dropped so this path uses fewer upstream tokens.
 
     collected: list[dict] = []
     provider_failures = 0
@@ -972,54 +993,14 @@ def build_jio_up_next(
                 except Exception:
                     provider_failures += 1
 
-    collect_queries(related_queries, page_limit=10, max_queries=12, source="seed_title_album_artist")
-    if audio_neighbor_queries:
-        collect_queries(audio_neighbor_queries, page_limit=6, max_queries=6, source="local_audio_neighbor")
-    # A full expanded artist page is used only when the related pages have not
-    # produced enough candidates for the large Up Next shelf.
-    if len(collected) < 60:
-        collect_queries(
-            [f"{artist} songs" for artist in artist_names[:3]],
-            page_limit=15,
-            max_queries=2,
-            source="artist_discovery",
-        )
-    if len(collected) < 60:
-        collect_queries(fallback_queries, page_limit=12, max_queries=3, source="seed_metadata_similarity")
-    # The public upstream service can return only a few rows per query. Use
-    # broader but still seed-related pages as a final capacity pass so a
-    # selected recommendation gets its own large queue instead of inheriting
-    # the old queue's remainder.
-    if len(collected) < 35:
-        broad_queries = []
-        for artist in artist_names[:2]:
-            broad_queries.extend([
-                f"{artist} film songs",
-                f"{artist} playlist",
-                f"{artist} evergreen songs",
-                f"{artist} top 50 songs",
-            ])
-        if seed_year:
-            decade = (seed_year // 10) * 10
-            broad_queries.append(f"hindi songs {decade}s")
-            broad_queries.extend(
-                f"{intent} songs {decade}s"
-                for intent in sorted(verified_intents) if intent != "general"
-            )
-        collect_queries(broad_queries, page_limit=12, max_queries=4, source="era_intent_discovery")
-    # Keep a usable radio depth for sparse artist searches. These are still
-    # seed-scoped queries, never global popularity pages.
-    if len(collected) < 55 and artist_names:
-        depth_queries = []
-        for artist in artist_names[:3]:
-            depth_queries.extend([
-                f"{artist} all songs",
-                f"{artist} discography",
-                f"{artist} complete songs",
-                f"{artist} acoustic songs",
-                f"{artist} live songs",
-            ])
-        collect_queries(depth_queries, page_limit=12, max_queries=4, source="artist_depth_discovery")
+    # The already-visible query matches are valid recommendation candidates.
+    # They must enter the same collection/ranking pipeline as API discovery
+    # results, otherwise a short search can produce an empty Up Next shelf.
+    collect_items(
+        [dict(item) for item in search_results if isinstance(item, dict)],
+        source="seed_search_results",
+    )
+    collect_queries(related_queries, page_limit=20, max_queries=3, source="seed_title_album_artist")
     enriched_collected = enrich_live_items(collected)
     try:
         ranked = hybrid.rank_jio_results(
@@ -1029,12 +1010,29 @@ def build_jio_up_next(
             preferred_track_ids,
             seed=seed,
         )
-        # Never relax the musical relevance gate merely to fill the queue.
-        # A shorter relevant radio is better than unrelated recommendations.
     except Exception as exc:
         ranking_error = type(exc).__name__
         ranking_error_detail = str(exc)
         ranked = []
+    if not ranked:
+        seed_artists = {
+            _compact_key(part)
+            for part in str(seed.get("artists", "")).split(",")
+            if _compact_key(part)
+        }
+        seed_album = _compact_key(seed.get("album", ""))
+        same_entity = []
+        for item in enriched_collected:
+            item_artists = {
+                _compact_key(part)
+                for part in str(item.get("artists", "")).split(",")
+                if _compact_key(part)
+            }
+            item_album = _compact_key(item.get("album", ""))
+            if seed_artists.intersection(item_artists) or (seed_album and item_album == seed_album):
+                item.setdefault("recommendation_reason", "Same artist or soundtrack")
+                same_entity.append(item)
+        ranked = same_entity
 
     st.session_state["jio_queue_status"] = {
         "seed": title,
@@ -1054,7 +1052,7 @@ def build_jio_up_next(
     unique: list[dict] = []
     used_titles: set[str] = set()
     for item in ranked:
-        title_key = normalize_title(item.get("title", ""))
+        title_key = _recommendation_title_key(item.get("title", ""))
         if title_key and title_key not in used_titles:
             used_titles.add(title_key)
             unique.append(item)
@@ -1481,17 +1479,18 @@ def play_next_from_queue(mark_previous_as_skip: bool = True) -> bool:
         metadata=next_item,
     )
     refresh_hybrid_model(force=True)
-    cached_results = st.session_state.get("jio_search_cache_v3", {}).get(search_query.strip().lower(), [])
+    cached_results = st.session_state.get("jio_search_cache_v4", {}).get(search_query.strip().lower(), [])
+    candidate_pool = [*queue, *cached_results]
     try:
         st.session_state["jio_queue"] = build_jio_up_next(
             next_item,
-            cached_results,
+            candidate_pool,
             jio_client,
             hybrid_engine,
             local_user_id,
             data,
             preferred_track_ids,
-            exclude_items=[next_item, *queue],
+            exclude_items=[next_item],
         )
     except Exception:
         st.session_state["jio_queue"] = queue
@@ -1501,57 +1500,70 @@ if not search_query:
     st.info("Search a song, artist, album, or genre to see matching music and play it.")
 else:
     st.markdown('<div class="shelf-title">Search results</div>', unsafe_allow_html=True)
-    st.markdown('<div class="shelf-subtitle">Songs · ranked for your taste</div>', unsafe_allow_html=True)
+    st.markdown('<div class="shelf-subtitle">Songs · all live results</div>', unsafe_allow_html=True)
     try:
-        search_cache = st.session_state["jio_search_cache_v3"]
+        search_cache = st.session_state["jio_search_cache_v4"]
         search_cache_key = search_query.strip().lower()
         jio_results = search_cache.get(search_cache_key)
-        # Older sessions may contain a sparse exact-title response from the
-        # upstream mirror. Re-run the expanded search once instead of showing
-        # a permanently truncated shelf from Streamlit session state.
-        if jio_results is None or len(jio_results) < 8:
-            jio_results = jio_client.search(search_query, limit=30)
-        if not jio_results:
-            local_guess = engine.search(search_query, limit=1)
-            if not local_guess.empty:
-                guess = local_guess.iloc[0]
-                fallback_query = f"{guess['track_name']} {guess.get('album_name', '')}".strip()
-                jio_results = jio_client.search(fallback_query, limit=30)
-        raw_jio_results = list(jio_results or [])
-        enriched_search_results = enrich_live_items(raw_jio_results)
-        query_matches = prioritize_search_results(enriched_search_results, search_query)
-        # Query intent describes the user's requested context; it must not
-        # falsely label every returned song with that intent.
-        query_intents = set(infer_music_intents({"title": search_query})) - {"general"}
-        for item in query_matches:
-            item["query_intents"] = sorted(query_intents)
-        try:
-            jio_results = hybrid_engine.rank_jio_results(
-                query_matches, local_user_id, data, preferred_track_ids
+        search_catalog_limit = 200
+        if jio_results is None:
+            jio_results = jio_client.search(search_query, limit=search_catalog_limit)
+            if not jio_results:
+                local_guess = engine.search(search_query, limit=1)
+                if not local_guess.empty:
+                    guess = local_guess.iloc[0]
+                    fallback_query = f"{guess['track_name']} {guess.get('album_name', '')}".strip()
+                    jio_results = jio_client.search(fallback_query, limit=search_catalog_limit)
+            raw_jio_results = list(jio_results or [])
+            # If the provider returned only broad token matches, recover an exact
+            # local title/artist and use that identity to query JioSaavn. This is
+            # what makes a bare title search recover the matching local
+            # title/artist instead of stopping at unrelated token matches.
+            query_key = _compact_key(search_query)
+            provider_has_exact_title = any(
+                _compact_key(item.get("title", "")) == query_key
+                for item in raw_jio_results
             )
-            # Personalization can reorder valid search matches, but it must
-            # never make a real search appear empty.
-            jio_results = prioritize_search_results(jio_results, search_query) or query_matches
-        except Exception:
-            # Live catalog search must remain usable even if one malformed
-            # metadata row breaks a personalization feature. Show the raw
-            # upstream results and let the next rerun retry ranking.
-            jio_results = query_matches or raw_jio_results
-            st.info("Live results loaded. Personalization is refreshing for this search.")
+            if query_key and not provider_has_exact_title:
+                local_exact = data[
+                    data["track_name"].astype(str).map(_compact_key) == query_key
+                ]
+                if not local_exact.empty:
+                    guess = local_exact.iloc[0]
+                    artist = str(guess.get("artists", "")).split(",")[0].strip()
+                    identity_query = f"{guess['track_name']} {artist}".strip()
+                    if identity_query:
+                        identity_results = jio_client.search(identity_query, limit=search_catalog_limit)
+                        raw_jio_results = identity_results + raw_jio_results
+            query_matches = prioritize_search_results(
+                enrich_live_items(raw_jio_results),
+                search_query,
+            )
+            query_intents = set(infer_music_intents({"title": search_query})) - {"general"}
+            for item in query_matches:
+                item["query_intents"] = sorted(query_intents)
+            jio_results = query_matches
+            if jio_results:
+                search_cache[search_cache_key] = jio_results
         if jio_results:
-            search_cache[search_cache_key] = jio_results
-        if jio_results:
+            st.caption(f"{len(jio_results)} songs")
             for row_start in range(0, len(jio_results), 4):
                 jio_cols = st.columns(4)
                 for column_index, item in enumerate(jio_results[row_start:row_start + 4]):
                     i = row_start + column_index + 1
                     with jio_cols[column_index], st.container(border=True):
-                        if item["image_url"]:
-                            st.image(item["image_url"], width="stretch")
+                        image_url = item.get("image_url", "")
+                        song_id = item.get("song_id", "")
+                        title = item.get("title", "Unknown song")
+                        artists = item.get("artists", "Unknown artist")
+                        album = item.get("album", "")
+                        perma_url = item.get("perma_url", "")
+                        if image_url:
+                            st.image(image_url, width="stretch")
                         st.caption(f"Search result {i}")
-                        st.markdown(f"**{item['title']}**")
-                        st.caption(f"{item['artists']}\n{item['album']}")
-                        if st.button("▶ Play", key=f"jio_play_{i}_{item['song_id'] or item['title']}", width="stretch"):
+                        st.markdown(f"**{title}**")
+                        st.caption(f"{artists}\n{album}")
+                        if st.button("▶ Play", key=f"jio_play_{i}_{song_id or title}", width="stretch"):
                             # Set the selected song first; recommendation
                             # fetching must never make the player disappear.
                             st.session_state["jio_now_playing"] = item
@@ -1580,10 +1592,13 @@ else:
                                     data,
                                     preferred_track_ids,
                                 )
+                                current_seed_id = str(item.get("song_id") or item.get("title", ""))
+                                st.session_state["jio_queue_seed_id"] = current_seed_id
+                                st.session_state["jio_queue_attempted_id"] = current_seed_id
                             except Exception:
                                 st.session_state["jio_queue"] = []
                             st.rerun()
-                        if st.button("♡ Like", key=f"jio_like_{i}_{item['song_id'] or item['title']}", width="stretch"):
+                        if st.button("♡ Like", key=f"jio_like_{i}_{song_id or title}", width="stretch"):
                             log_behavior(
                                 "jio_like",
                                 str(item.get("song_id") or item.get("title", "")),
@@ -1615,12 +1630,12 @@ else:
                                     exclude_items=[item],
                                 )
                             st.toast("Added to your taste profile")
-                        if item["perma_url"]:
-                            st.link_button("Open song", item["perma_url"], width="stretch")
+                        if perma_url:
+                            st.link_button("Open song", perma_url, width="stretch")
         else:
             st.caption("No songs found for this search.")
-    except Exception:
-        st.caption("Music search is temporarily unavailable. Try again in a moment.")
+    except Exception as exc:
+        st.error(f"Music search failed: {type(exc).__name__}: {exc}")
 
 jio_now = st.session_state.get("jio_now_playing")
 if jio_now and (
@@ -1653,7 +1668,7 @@ if jio_now:
         elif st.session_state.get("jio_queue_attempted_id") != current_queue_seed:
             st.session_state["jio_queue_attempted_id"] = current_queue_seed
             try:
-                cached_results = st.session_state.get("jio_search_cache_v3", {}).get(
+                cached_results = st.session_state.get("jio_search_cache_v4", {}).get(
                     search_query.strip().lower(), []
                 )
                 st.session_state["jio_queue"] = build_jio_up_next(
@@ -1728,7 +1743,7 @@ if jio_now:
                     try:
                         st.session_state["jio_queue"] = build_jio_up_next(
                             jio_now,
-                            st.session_state.get("jio_search_cache_v3", {}).get(search_query.strip().lower(), []),
+                            st.session_state.get("jio_search_cache_v4", {}).get(search_query.strip().lower(), []),
                             jio_client,
                             hybrid_engine,
                             local_user_id,
@@ -1740,7 +1755,7 @@ if jio_now:
                         st.session_state["jio_queue"] = existing_queue
                 st.session_state["jio_queue_seed_id"] = current_id
             else:
-                cached_results = st.session_state.get("jio_search_cache_v3", {}).get(search_query.strip().lower(), [])
+                cached_results = st.session_state.get("jio_search_cache_v4", {}).get(search_query.strip().lower(), [])
                 try:
                     st.session_state["jio_queue"] = build_jio_up_next(
                         jio_now,
@@ -1769,9 +1784,7 @@ if jio_now:
     up_next = []
     seen_up_next_titles: set[str] = set()
     for item in raw_up_next:
-        title_key = re.sub(r"\([^)]*\)|\[[^]]*\]", " ", str(item.get("title", "")).lower())
-        title_key = re.sub(r"\b\d{2,3}\s*bpm\b", " ", title_key)
-        title_key = re.sub(r"[^a-z0-9]+", " ", title_key).strip()
+        title_key = _recommendation_title_key(item.get("title", ""))
         if title_key and title_key not in seen_up_next_titles:
             seen_up_next_titles.add(title_key)
             up_next.append(item)
@@ -1796,7 +1809,7 @@ if jio_now:
                 if st.button("👎 Not good", use_container_width=True):
                     log_behavior("recommendation_feedback", current_feedback_seed, metadata={"rating": "bad", "queue_size": len(up_next)})
                     refresh_hybrid_model(force=True)
-                    cached_feedback_results = st.session_state.get("jio_search_cache_v3", {}).get(search_query.strip().lower(), [])
+                    cached_feedback_results = st.session_state.get("jio_search_cache_v4", {}).get(search_query.strip().lower(), [])
                     try:
                         fresh_queue = build_jio_up_next(
                             jio_now,
@@ -1842,7 +1855,11 @@ if jio_now:
                 log_behavior("jio_play", st.session_state["jio_current_track_id"], metadata=featured)
                 refresh_hybrid_model(force=True)
                 try:
-                    st.session_state["jio_queue"] = build_jio_up_next(featured, jio_results if search_query else [], jio_client, hybrid_engine, local_user_id, data, preferred_track_ids, exclude_items=[featured, *old_queue])
+                    candidate_pool = [*old_queue, *(jio_results if search_query else [])]
+                    st.session_state["jio_queue"] = build_jio_up_next(featured, candidate_pool, jio_client, hybrid_engine, local_user_id, data, preferred_track_ids, exclude_items=[featured])
+                    current_seed_id = str(featured.get("song_id") or featured.get("title", ""))
+                    st.session_state["jio_queue_seed_id"] = current_seed_id
+                    st.session_state["jio_queue_attempted_id"] = current_seed_id
                 except Exception:
                     st.session_state["jio_queue"] = []
                 st.rerun()
@@ -1881,20 +1898,24 @@ if jio_now:
                                 metadata=item,
                             )
                             refresh_hybrid_model(force=True)
-                            cached_results = st.session_state.get("jio_search_cache_v3", {}).get(
-                                search_query, []
+                            cached_results = st.session_state.get("jio_search_cache_v4", {}).get(
+                                search_query.strip().lower(), []
                             )
+                            candidate_pool = [*old_queue, *cached_results]
                             try:
                                 st.session_state["jio_queue"] = build_jio_up_next(
                                     item,
-                                    cached_results,
+                                    candidate_pool,
                                     jio_client,
                                     hybrid_engine,
                                     local_user_id,
                                     data,
                                     preferred_track_ids,
-                                    exclude_items=[item, *old_queue],
+                                    exclude_items=[item],
                                 )
+                                current_seed_id = str(item.get("song_id") or item.get("title", ""))
+                                st.session_state["jio_queue_seed_id"] = current_seed_id
+                                st.session_state["jio_queue_attempted_id"] = current_seed_id
                             except Exception:
                                 st.session_state["jio_queue"] = []
                             st.rerun()
@@ -1934,16 +1955,14 @@ if jio_now:
         )
     if st.button("↻ Refresh recommendations", key="refresh_recommendations"):
         refresh_hybrid_model(force=True)
-        cached_results = st.session_state.get("jio_search_cache_v3", {}).get(search_query.strip().lower(), [])
+        cached_results = st.session_state.get("jio_search_cache_v4", {}).get(search_query.strip().lower(), [])
+        existing_queue = list(st.session_state.get("jio_queue", []))
+        candidate_pool = [*existing_queue, *cached_results]
         current_seed_id = str(jio_now.get("song_id") or jio_now.get("title", ""))
-        # Do not exclude the previous queue here. Those tracks are precisely
-        # the only candidates available in the cached seed-related result
-        # pool, and excluding them all can produce an empty radio. The ranker
-        # still excludes the current track, recent history and duplicates.
         try:
-            st.session_state["jio_queue"] = build_jio_up_next(
+            refreshed_queue = build_jio_up_next(
                 jio_now,
-                cached_results,
+                candidate_pool,
                 jio_client,
                 hybrid_engine,
                 local_user_id,
@@ -1951,8 +1970,9 @@ if jio_now:
                 preferred_track_ids,
                 exclude_items=[jio_now],
             )
+            st.session_state["jio_queue"] = refreshed_queue or existing_queue
         except Exception:
-            st.session_state["jio_queue"] = []
+            st.session_state["jio_queue"] = existing_queue
         st.session_state["jio_queue_seed_id"] = current_seed_id
         st.session_state["jio_queue_attempted_id"] = current_seed_id
         st.rerun()
@@ -1978,13 +1998,12 @@ with st.expander("Current session activity and data-science metrics", expanded=T
 
 with st.expander("How this recommender works"):
     st.markdown("""
-    1. **Current-song context first:** the playing song's artist, album, language, era, mood/style and local audio cluster drive the next-track candidates.
-    2. **User taste injection:** likes and plays influence the queue, but only when the song also fits the current session context.
-    3. **Collaborative filtering:** users with similar play/like behavior contribute implicit preference signals.
-    4. **Matrix factorization:** TruncatedSVD learns latent user-song embeddings from the interaction matrix.
-    5. **Audio-first hybrid ranking:** audio similarity (35%), metadata/mood (15%), collaborative/MF (15%), recent and long-term taste (20%), session transitions (10%), context (3%) and popularity (2%) are blended. Metadata-only mood is never described as verified audio similarity.
-    6. **Freshness and diversity:** recently played/duplicate songs are removed, and artist/album spacing prevents repetitive queues.
-    7. **Cold-start aware:** before enough events exist, context and onboarding signals carry the ranking.
-
-    Every play, like, and skip improves the local implicit-feedback model for the next search.
+    1. **Current-track relevance:** the playing track provides the primary recommendation context.
+    2. **Audio and metadata:** verified audio features are distinguished from metadata-based mood estimates.
+    3. **Listener personalization:** previous plays, likes, skips and listening preferences provide secondary signals.
+    4. **Collaborative filtering:** TruncatedSVD estimates latent relationships from observed user-track interactions.
+    5. **Sequential context:** previous listening transitions can contribute when sufficient session data exists.
+    6. **Relevance filtering:** incompatible musical intents, duplicate recordings and weak candidates are rejected.
+    7. **Diversity:** MMR balances recommendation relevance against repetitive artists and recordings.
+    Learned ranking remains inactive until sufficient attributed recommendation feedback is available.
     """)
