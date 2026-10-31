@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 ERA_COMPATIBILITY_WINDOW_YEARS = 30
-HYBRID_MODEL_VERSION = "hybrid-v12-ranking-runtime-guard"
+HYBRID_MODEL_VERSION = "hybrid-v13-explicit-intent-gate"
 
 
 def _metadata_feature_tokens(item: dict) -> dict[str, float]:

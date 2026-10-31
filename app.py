@@ -146,7 +146,7 @@ MOOD_VECTOR_FEATURES = (
 )
 
 INTENT_TERMS = {
-    "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "pyar", "dil", "jaan", "saiyaara"},
+    "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "pyar", "dil", "jaan", "sanam", "sajan", "saiyaara"},
     "ghazal": {"ghazal", "ghazals", "shayar", "shayari", "mehfil", "rekhta", "ghulam ali", "ghulam ali classics", "ustad bade ghulam ali", "ghulam ali khan", "chupke chupke classics"},
     "motivational": {"motivation", "motivational", "zinda", "jeet", "victory", "fighter", "warrior", "rise", "goal", "inspire"},
     "energetic": {"fight", "anthem", "rock", "power", "action", "dance", "party", "bhangra", "bang", "fire", "dhamaka", "dhamaal", "high", "energy"},
@@ -268,7 +268,9 @@ def infer_music_intents(item: dict) -> list[str]:
         # High energy is not automatically motivational. Motivation must be
         # supported by explicit metadata/title evidence, otherwise workout or
         # party songs leak into unrelated radio queues.
-        if energy >= 0.62 and tempo >= 0.55:
+        # Numeric energy can support mood similarity, but must not invent an
+        # energetic intent and let romantic tracks pass an energetic gate.
+        if energy >= 0.62 and tempo >= 0.55 and "energetic" in labels:
             labels.append("energetic")
     except (TypeError, ValueError):
         pass
