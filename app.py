@@ -265,8 +265,9 @@ def infer_music_intents(item: dict) -> list[str]:
         danceability = float(item.get("danceability", 0.0) or 0.0)
         tempo = min(1.0, float(item.get("tempo", 0.0) or 0.0) / 140.0)
         drive_score = 0.35 * energy + 0.30 * valence + 0.20 * danceability + 0.15 * tempo
-        if drive_score >= 0.62:
-            labels.append("motivational")
+        # High energy is not automatically motivational. Motivation must be
+        # supported by explicit metadata/title evidence, otherwise workout or
+        # party songs leak into unrelated radio queues.
         if energy >= 0.62 and tempo >= 0.55:
             labels.append("energetic")
     except (TypeError, ValueError):
@@ -1704,7 +1705,9 @@ if jio_now:
     up_next = []
     seen_up_next_titles: set[str] = set()
     for item in raw_up_next:
-        title_key = re.sub(r"[^a-z0-9]+", " ", str(item.get("title", "")).lower()).strip()
+        title_key = re.sub(r"\([^)]*\)|\[[^]]*\]", " ", str(item.get("title", "")).lower())
+        title_key = re.sub(r"\b\d{2,3}\s*bpm\b", " ", title_key)
+        title_key = re.sub(r"[^a-z0-9]+", " ", title_key).strip()
         if title_key and title_key not in seen_up_next_titles:
             seen_up_next_titles.add(title_key)
             up_next.append(item)

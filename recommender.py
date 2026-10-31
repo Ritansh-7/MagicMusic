@@ -955,7 +955,6 @@ class HybridRecommendationEngine:
                 direct_link = (
                     direct_artist_evidence
                     or float(item.get("_album_match", 0.0)) >= 1.0
-                    or float(item.get("_cluster_match", 0.0)) > 0
                 )
                 sparse_metadata_bridge = (
                     float(item.get("_metadata_similarity", 0.0)) >= 0.22
