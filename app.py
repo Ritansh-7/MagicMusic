@@ -480,6 +480,62 @@ def play_dashboard_live_item(item: dict) -> None:
     st.rerun()
 
 
+@st.cache_data(ttl=3600, max_entries=4, show_spinner=False)
+def fetch_english_dashboard_tracks(base_url: str) -> pd.DataFrame:
+    """Build a cached English-only live shelf; never mix it with Hindi rows."""
+    queries = (
+        "english pop songs", "english rock classics", "english chill songs",
+        "english love songs", "english sad songs", "english dance hits",
+        "english indie songs", "english acoustic songs", "english 2000s hits",
+        "english 2010s hits", "english 90s hits", "english party songs",
+        "english feel good songs", "english heartbreak songs", "english soft songs",
+        "english alternative songs", "english rnb songs", "english jazz songs",
+        "english country songs", "english classics", "english trending songs",
+        "english female singers", "english male singers", "english movie songs",
+        "english radio hits", "english summer songs", "english night songs",
+        "english workout songs", "english calm songs", "english retro songs",
+        "english top hits", "english new music", "english slow songs",
+        "english romantic hits", "english viral songs", "english piano songs",
+        "english road trip songs", "english morning songs", "english golden hits",
+        "english timeless songs", "english soundtrack songs", "english acoustic pop",
+        "english rock ballads", "english edm hits", "english singer songwriter",
+        "english disco hits", "english folk songs", "english soul music",
+        "english blues songs", "english alternative rock",
+    )
+    blocked_terms = re.compile(
+        r"hindi|bollywood|filmi|indian|bhangra|punjabi|desi|sufi|tamil|telugu|"
+        r"bengali|gujarati|marathi|bhojpuri|assamese|odia|kannada|malayalam|"
+        r"urdu|nepali|rajasthani|sanskrit|qawwali|ghazal|bhajan",
+        re.IGNORECASE,
+    )
+    client = JioSaavnClient(base_url)
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        pages = executor.map(lambda query: client.search_direct(query, limit=10), queries)
+        rows: list[dict] = []
+        seen: set[str] = set()
+        for page in pages:
+            for item in page:
+                if str(item.get("language", "")).casefold() != "english":
+                    continue
+                identity = f"{item.get('title', '')}|{item.get('artists', '')}".casefold()
+                searchable = " ".join(
+                    str(item.get(field, ""))
+                    for field in ("title", "artists", "album")
+                )
+                if not identity or identity in seen or blocked_terms.search(searchable):
+                    continue
+                seen.add(identity)
+                rows.append(item)
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+    frame["track_id"] = frame["song_id"].astype(str)
+    frame["track_name"] = frame["title"].astype(str)
+    frame["album_name"] = frame["album"].astype(str)
+    return frame.head(1000).reset_index(drop=True)
+
+
 @st.cache_resource
 def build_hybrid_engine(_content_engine, model_version: str):
     """Keep one fitted model service per app process instead of rebuilding it on every rerun."""
@@ -1660,7 +1716,9 @@ def _dashboard_language_frames(profile: object, excluded_ids: list[str]) -> dict
             selected = pd.concat([selected, fallback], ignore_index=True)
         return selected.drop_duplicates(subset=["track_name", "artists"]).head(1000).reset_index(drop=True)
 
-    return {"Hindi": shelf(hindi_mask), "English / global": shelf(english_mask)}
+    english_live = fetch_english_dashboard_tracks(jio_client.base_url)
+    english_shelf = english_live if len(english_live) >= 100 else shelf(english_mask)
+    return {"Hindi": shelf(hindi_mask), "English / global": english_shelf}
 
 
 def _recommendation_feedback(track_id: str, section: str, rating: str) -> None:
@@ -1701,6 +1759,7 @@ def render_dashboard_shelf(language: str, tracks: pd.DataFrame) -> None:
             str(row.get("artists", "")),
         )
         for _, row in visible.iterrows()
+        if not str(row.get("image_url", ""))
     )
     posters = fetch_dashboard_posters(poster_records, jio_client.base_url)
     for row_start in range(0, len(visible), 4):
@@ -1710,14 +1769,14 @@ def render_dashboard_shelf(language: str, tracks: pd.DataFrame) -> None:
                 title = str(row.get("track_name", "Unknown song"))
                 artist = str(row.get("artists", "Unknown artist"))
                 album = str(row.get("album_name", ""))
-                artwork = posters.get(str(row.get("track_id", "")), {}).get("image_url", "")
+                artwork = str(row.get("image_url", "")) or posters.get(str(row.get("track_id", "")), {}).get("image_url", "")
                 if artwork:
                     st.image(artwork, width="stretch", alt=f"Artwork for {title}")
                 st.caption(f"{start + row_start + column_index + 1:02d}")
                 st.markdown(f"**{title}**")
                 st.caption(f"{artist}{f' · {album}' if album else ''}")
                 feedback_key = str(row.get("track_id", title))
-                live_item = posters.get(str(row.get("track_id", "")), {})
+                live_item = row.to_dict() if row.get("song_id") else posters.get(str(row.get("track_id", "")), {})
                 play_col, like_col = st.columns(2)
                 if play_col.button("▶ Play", key=f"dashboard_play_{language}_{feedback_key}", width="stretch"):
                     if live_item.get("stream_url") or live_item.get("perma_url"):
