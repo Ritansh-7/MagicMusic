@@ -952,6 +952,19 @@ def build_jio_up_next(
                 for intent in sorted(verified_intents) if intent != "general"
             )
         collect_queries(broad_queries, page_limit=20, max_queries=10, source="era_intent_discovery")
+    # Keep a usable radio depth for sparse artist searches. These are still
+    # seed-scoped queries, never global popularity pages.
+    if len(collected) < 90 and artist_names:
+        depth_queries = []
+        for artist in artist_names[:3]:
+            depth_queries.extend([
+                f"{artist} all songs",
+                f"{artist} discography",
+                f"{artist} complete songs",
+                f"{artist} acoustic songs",
+                f"{artist} live songs",
+            ])
+        collect_queries(depth_queries, page_limit=20, max_queries=12, source="artist_depth_discovery")
     enriched_collected = enrich_live_items(collected)
     try:
         ranked = hybrid.rank_jio_results(
