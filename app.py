@@ -685,10 +685,13 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
         title_hit = bool(query_key in title or (meaningful and meaningful.issubset(set(title.split()))))
         artist_hit = bool(query_key in artists or (meaningful and meaningful.issubset(set(artists.split()))))
         album_hit = bool(query_key in album or (meaningful and meaningful.issubset(set(album.split()))))
-        if title_hit:
-            return "title"
+        # If the query is present as an artist entity anywhere in the result
+        # page, treat it as an artist search. Otherwise a title such as
+        # "... feat. Arijit Singh" incorrectly hides the artist's catalogue.
         if artist_hit:
             return "artist"
+        if title_hit:
+            return "title"
         if album_hit:
             return "album"
         return ""
@@ -697,7 +700,9 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
     meaningful_query = query_tokens - generic_terms
     # A clear title query must not leak unrelated artist/album results. Artist
     # and album queries remain broad within their matched entity.
-    if meaningful_query and "title" in kinds:
+    if meaningful_query and "artist" in kinds:
+        filtered = [item for item, kind in zip(results, kinds) if kind == "artist"]
+    elif meaningful_query and "title" in kinds:
         filtered = [item for item, kind in zip(results, kinds) if kind == "title"]
     elif meaningful_query and ("artist" in kinds or "album" in kinds):
         filtered = [item for item, kind in zip(results, kinds) if kind in {"artist", "album"}]
