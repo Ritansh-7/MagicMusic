@@ -150,6 +150,7 @@ INTENT_TERMS = {
     "ghazal": {"ghazal", "ghazals", "shayar", "shayari", "mehfil", "rekhta", "ghulam ali", "ghulam ali classics", "ustad bade ghulam ali", "ghulam ali khan", "chupke chupke classics"},
     "motivational": {"motivation", "motivational", "zinda", "jeet", "victory", "fighter", "warrior", "rise", "goal", "inspire"},
     "energetic": {"fight", "anthem", "rock", "power", "action", "dance", "party", "bhangra", "bang", "fire", "dhamaka", "dhamaal", "high", "energy"},
+    "rap_hiphop": {"rap", "rapper", "hip hop", "hiphop", "gully", "desi hip hop", "freestyle", "mixtape"},
     "sad": {"sad", "heartbreak", "alone", "broken", "dard", "udaas", "tanha", "judai"},
     "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "bajrang", "bajrangbali", "bajranbali", "anjaney", "aarti", "kirtan", "mantra", "om namah shivay", "krishna", "allah", "khuda"},
     "calm": {"acoustic", "unplugged", "lofi", "sleep", "calm", "peace", "sukoon", "soothing", "instrumental"},
@@ -219,6 +220,7 @@ def infer_metadata_mood(item: dict) -> dict:
         "instrumental": {"theme", "score", "background", "instrumental", "bgm", "soundtrack"},
         "acoustic_indie": {"acoustic", "unplugged", "indie", "folk", "singer songwriter", "singer-songwriter", "coke studio", "lofi", "slowed", "reverb"},
         "ghazal": {"ghazal", "ghazals", "shayar", "shayari", "mehfil", "rekhta", "ghulam ali", "ghulam ali classics", "ustad bade ghulam ali", "ghulam ali khan", "chupke chupke classics"},
+        "rap_hiphop": {"rap", "rapper", "hip hop", "hiphop", "gully", "freestyle", "mixtape"},
     }
     tokens = set(re.findall(r"[a-z0-9]+", text))
     matched = {
@@ -237,6 +239,8 @@ def infer_metadata_mood(item: dict) -> dict:
         vector.update(energy=0.35, tempo=82.0, acousticness=0.78, instrumentalness=0.25, loudness=-14.0)
     if "ghazal" in matched:
         vector.update(energy=0.28, tempo=72.0, valence=0.38, danceability=0.25, acousticness=0.76, instrumentalness=0.12, loudness=-15.0)
+    if "rap_hiphop" in matched:
+        vector.update(energy=0.78, tempo=112.0, valence=0.58, danceability=0.72, acousticness=0.18, speechiness=0.28, loudness=-7.0)
     labels = sorted(matched) or ["neutral"]
     return {
         "mood_vector": _mood_vector(vector),
@@ -706,7 +710,7 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
         if any((term in query_key if " " in term else term in query_tokens) for term in terms)
     }
     specialized_query_intents = query_intents.intersection(
-        {"devotional", "ghazal", "motivational", "romantic", "sad", "acoustic_indie", "energetic"}
+        {"devotional", "ghazal", "motivational", "romantic", "sad", "acoustic_indie", "energetic", "rap_hiphop"}
     )
     if specialized_query_intents:
         intent_matches = [
@@ -1513,6 +1517,9 @@ else:
         raw_jio_results = list(jio_results or [])
         enriched_search_results = enrich_live_items(raw_jio_results)
         query_matches = prioritize_search_results(enriched_search_results, search_query)
+        query_intents = set(infer_music_intents({"title": search_query})) - {"general"}
+        for item in query_matches:
+            item["intent_labels"] = sorted(set(item.get("intent_labels", [])) | query_intents)
         try:
             jio_results = hybrid_engine.rank_jio_results(
                 query_matches, local_user_id, data, preferred_track_ids

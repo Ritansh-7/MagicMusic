@@ -639,6 +639,7 @@ class HybridRecommendationEngine:
             "sad": {"sad", "heartbreak", "alone", "broken", "dard", "udaas"},
             "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "shiva", "ram"},
             "acoustic_indie": {"lofi", "acoustic", "unplugged", "instrumental", "slowed", "reverb", "indie", "folk", "coke studio", "singer songwriter"},
+            "rap_hiphop": {"rap", "rapper", "hip hop", "hiphop", "gully", "freestyle", "mixtape"},
         }
         seed_tokens = set(re.findall(r"[a-z0-9]+", seed_text))
         seed_styles = {
@@ -1023,7 +1024,7 @@ class HybridRecommendationEngine:
                 if bool(item.get("_intent_conflict", False)) and not direct_link:
                     continue
                 candidate_intents = set(item.get("intent_labels", [])) - {"general"}
-                specialized_intents = {"devotional", "ghazal", "motivational", "acoustic_indie", "energetic"}
+                specialized_intents = {"devotional", "ghazal", "motivational", "acoustic_indie", "energetic", "rap_hiphop"}
                 seed_specialized = seed_intents.intersection(specialized_intents)
                 candidate_specialized = candidate_intents.intersection(specialized_intents)
                 if candidate_specialized and not seed_specialized.intersection(candidate_specialized) and not direct_link:
