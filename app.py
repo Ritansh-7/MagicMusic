@@ -151,7 +151,7 @@ INTENT_TERMS = {
     "motivational": {"motivation", "motivational", "zinda", "jeet", "victory", "fighter", "warrior", "rise", "goal", "inspire"},
     "energetic": {"fight", "anthem", "rock", "power", "action", "dance", "party", "bhangra", "bang", "fire", "dhamaka", "dhamaal", "high", "energy"},
     "sad": {"sad", "heartbreak", "alone", "broken", "dard", "udaas", "tanha", "judai"},
-    "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "aarti", "kirtan", "mantra", "om namah shivay", "krishna", "allah", "khuda"},
+    "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "bajrang", "bajrangbali", "bajranbali", "anjaney", "aarti", "kirtan", "mantra", "om namah shivay", "krishna", "allah", "khuda"},
     "calm": {"acoustic", "unplugged", "lofi", "sleep", "calm", "peace", "sukoon", "soothing", "instrumental"},
     "acoustic_indie": {"acoustic", "unplugged", "indie", "folk", "singer songwriter", "singer-songwriter", "coke studio", "soul"},
 }
@@ -701,6 +701,16 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
 
     kinds = [match_kind(item) for item in results]
     meaningful_query = query_tokens - generic_terms
+    devotional_search = any(token in query_key for token in ("bajrang", "bajran", "hanuman", "anjaney"))
+    if devotional_search:
+        devotional_terms = ("bajrang", "hanuman", "anjaney", "bhajan", "chalisa", "aarti", "kirtan", "mantra", "devotional")
+        devotional_matches = [
+            item for item in results
+            if any(term in _compact_key(" ".join(str(item.get(field, "")) for field in ("title", "album", "artists"))) for term in devotional_terms)
+        ]
+        if devotional_matches:
+            results = devotional_matches
+            kinds = [match_kind(item) for item in results]
     # A clear title query must not leak unrelated artist/album results. Artist
     # and album queries remain broad within their matched entity.
     if meaningful_query and "artist" in kinds:

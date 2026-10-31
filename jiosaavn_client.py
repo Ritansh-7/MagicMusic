@@ -131,6 +131,8 @@ class JioSaavnClient:
         query = (query or "").strip()
         if not query:
             return []
+        normalized_query = re.sub(r"[^a-z0-9]+", " ", query.casefold()).strip()
+        devotional_query = any(token in normalized_query for token in ("bajrang", "bajran", "bajrangbali", "hanuman", "anjaney"))
         collected: list[dict[str, Any]] = []
         seen: set[str] = set()
         # Search several high-signal expansions in parallel. The old sequential
@@ -144,6 +146,15 @@ class JioSaavnClient:
             f"{query} soundtrack",
             f"{query} songs",
         )
+        if devotional_query:
+            candidates = (
+                query,
+                f"{query} bhajan",
+                "Bajrangbali bhajan",
+                "Hanuman bhajan",
+                "Jai Bajrangbali",
+                "Hindi Hanuman devotional songs",
+            )
         with ThreadPoolExecutor(max_workers=min(8, len(candidates))) as executor:
             pages = executor.map(
                 lambda candidate: self.search_direct(candidate, limit=min(limit, 12)),
