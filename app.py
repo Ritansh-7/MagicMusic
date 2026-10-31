@@ -1596,19 +1596,16 @@ if st.session_state.get("local_is_admin", False):
 st.markdown(f"## Good evening, listener")
 st.caption("Your recommendations are ready. Search only when you want something specific.")
 
-genre_options = sorted(data["track_genre"].dropna().astype(str).unique().tolist())
-popular = data.sort_values("popularity", ascending=False).head(100)
-track_labels = {
-    f"{row.track_name} — {row.artists}": str(row.track_id)
-    for row in popular.itertuples()
-}
-with st.expander("Tune your taste (optional)"):
-    onboarding_genres = st.multiselect(
-        "Genres you like", genre_options, default=genre_options[:2], key="onboarding_genres"
-    )
-    onboarding_tracks = st.multiselect(
-        "Artists or tracks you already enjoy", list(track_labels), key="onboarding_tracks"
-    )
+search_query = st.text_input(
+    "Search songs, artists, albums, or genres",
+    placeholder="What do you want to listen to?",
+    key="global_search",
+)
+
+# Personalization is learned from plays, likes, imported history, and the
+# live recommendation feedback pipeline; no extra taste form is needed here.
+onboarding_genres: list[str] = []
+onboarding_tracks: list[str] = []
 
 live_track_ids = local_ids_for_spotify_taste(spotify_taste or {}, data)
 imported_track_ids = local_ids_for_imported_history(imported_history, data)
@@ -1616,7 +1613,6 @@ preferred_track_ids = (
     user_store.liked_track_ids(local_user_id)
     + live_track_ids
     + imported_track_ids
-    + [track_labels[label] for label in onboarding_tracks]
 )
 
 
@@ -1768,13 +1764,6 @@ with st.container(border=True):
         render_dashboard_shelf("Hindi", dashboard_shelves["Hindi"])
     with english_tab:
         render_dashboard_shelf("English / global", dashboard_shelves["English / global"])
-
-
-search_query = st.text_input(
-    "Search songs, artists, albums, or genres",
-    placeholder="What do you want to listen to?",
-    key="global_search",
-)
 
 
 def play_next_from_queue(mark_previous_as_skip: bool = True) -> bool:
