@@ -836,6 +836,26 @@ def build_jio_up_next(
         seed_year = int(str(seed.get("year", ""))[:4])
     except ValueError:
         seed_year = 0
+    # Recover a missing live release year from same-artist/album search rows.
+    # This is data-driven and avoids singer-specific era rules.
+    if not seed_year:
+        seed_artist_keys = {_compact_key(value) for value in artists.split(",") if _compact_key(value)}
+        year_votes: list[int] = []
+        for candidate in search_results:
+            candidate_artists = {_compact_key(value) for value in str(candidate.get("artists", "")).split(",") if _compact_key(value)}
+            candidate_album = _compact_key(candidate.get("album", ""))
+            if seed_artist_keys.intersection(candidate_artists) or (
+                album and candidate_album == _compact_key(album)
+            ):
+                try:
+                    candidate_year = int(str(candidate.get("year", ""))[:4])
+                    if 1900 <= candidate_year <= 2100:
+                        year_votes.append(candidate_year)
+                except (TypeError, ValueError):
+                    pass
+        if year_votes:
+            seed_year = int(np.median(year_votes))
+            seed["year"] = seed_year
     if seed_year:
         decade = (seed_year // 10) * 10
         era_intents = [intent for intent in sorted(verified_intents) if intent != "general"] or ["songs"]
