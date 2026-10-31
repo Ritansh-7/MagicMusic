@@ -879,6 +879,7 @@ def build_jio_up_next(
     collected: list[dict] = []
     provider_failures = 0
     ranking_error = ""
+    ranking_error_detail = ""
     seen: set[str] = set()
     normalize_title = lambda value: re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
     # Search results are valid radio candidates (especially same-album songs).
@@ -964,6 +965,7 @@ def build_jio_up_next(
         # A shorter relevant radio is better than unrelated recommendations.
     except Exception as exc:
         ranking_error = type(exc).__name__
+        ranking_error_detail = str(exc)
         ranked = []
 
     st.session_state["jio_queue_status"] = {
@@ -972,6 +974,7 @@ def build_jio_up_next(
         "relevant_candidates": len(ranked),
         "provider_query_failures": provider_failures,
         "ranking_error": ranking_error,
+        "ranking_error_detail": ranking_error_detail,
         "candidate_sources": sorted({str(item.get("candidate_source", "unknown")) for item in collected}),
     }
 
@@ -1785,6 +1788,7 @@ if jio_now:
                     "Relevant candidates accepted": status.get("relevant_candidates", 0),
                     "Provider failures": status.get("provider_query_failures", 0),
                     "Ranking error": status.get("ranking_error") or "none",
+                    "Error detail": status.get("ranking_error_detail") or "none",
                     "Candidate sources": status.get("candidate_sources", []),
                 })
     if st.session_state.pop("scroll_to_player", False):
