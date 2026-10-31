@@ -450,6 +450,36 @@ def fetch_dashboard_posters(
         return dict(executor.map(resolve, items))
 
 
+def play_dashboard_live_item(item: dict) -> None:
+    """Start a dashboard pick and hand it to the normal live radio pipeline."""
+    track_id = str(item.get("song_id") or item.get("title", ""))
+    st.session_state["jio_now_playing"] = item
+    st.session_state["scroll_to_player"] = True
+    st.session_state["jio_queue"] = []
+    st.session_state["jio_current_track_id"] = track_id
+    st.session_state["jio_started_at"] = time.time()
+    st.session_state["jio_last_accounted_at"] = st.session_state["jio_started_at"]
+    log_behavior("jio_play", track_id, metadata=item)
+    refresh_hybrid_model(force=True)
+    try:
+        queue = build_jio_up_next(
+            item,
+            [item],
+            jio_client,
+            hybrid_engine,
+            local_user_id,
+            data,
+            preferred_track_ids,
+            exclude_items=[item],
+        )
+        st.session_state["jio_queue"] = queue
+        st.session_state["jio_queue_seed_id"] = track_id
+        st.session_state["jio_queue_attempted_id"] = track_id
+    except Exception:
+        st.session_state["jio_queue"] = []
+    st.rerun()
+
+
 @st.cache_resource
 def build_hybrid_engine(_content_engine, model_version: str):
     """Keep one fitted model service per app process instead of rebuilding it on every rerun."""
@@ -1677,8 +1707,20 @@ def render_dashboard_shelf(language: str, tracks: pd.DataFrame) -> None:
                 st.caption(f"{start + row_start + column_index + 1:02d}")
                 st.markdown(f"**{title}**")
                 st.caption(f"{artist}{f' · {album}' if album else ''}")
-                yes_col, no_col = st.columns(2)
                 feedback_key = str(row.get("track_id", title))
+                live_item = posters.get(str(row.get("track_id", "")), {})
+                play_col, like_col = st.columns(2)
+                if play_col.button("▶ Play", key=f"dashboard_play_{language}_{feedback_key}", width="stretch"):
+                    if live_item.get("stream_url") or live_item.get("perma_url"):
+                        play_dashboard_live_item(live_item)
+                    else:
+                        st.warning("Live preview unavailable for this pick.")
+                if like_col.button("♡ Like", key=f"dashboard_like_{language}_{feedback_key}", width="stretch"):
+                    like_id = str(live_item.get("song_id") or row.get("track_id", title))
+                    log_behavior("jio_like", like_id, metadata=live_item or {"title": title, "artists": artist})
+                    refresh_hybrid_model(force=True)
+                    st.toast("Added to your taste profile")
+                yes_col, no_col = st.columns(2)
                 if yes_col.button("Yes", key=f"dash_yes_{language}_{feedback_key}", width="stretch"):
                     _recommendation_feedback(feedback_key, language, "good")
                 if no_col.button("No", key=f"dash_no_{language}_{feedback_key}", width="stretch"):
