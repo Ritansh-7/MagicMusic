@@ -876,11 +876,12 @@ def build_jio_up_next(
     ranking_error = ""
     seen: set[str] = set()
     normalize_title = lambda value: re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
-    search_ids = {
-        str(item.get("song_id") or item.get("title", "")) for item in search_results
-    }
-    search_titles = {normalize_title(item.get("title", "")) for item in search_results}
-    for item in exclude_items or []:
+    # Search results are valid radio candidates (especially same-album songs).
+    # Exclude only the current seed and explicit old-queue items; excluding the
+    # entire search shelf was the reason small searches produced empty queues.
+    search_ids: set[str] = set()
+    search_titles: set[str] = set()
+    for item in [seed, *(exclude_items or [])]:
         search_ids.add(str(item.get("song_id") or item.get("title", "")))
         search_titles.add(normalize_title(item.get("title", "")))
     def collect_items(items: list[dict], source: str = "metadata_discovery") -> None:

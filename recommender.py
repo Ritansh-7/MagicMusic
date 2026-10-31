@@ -948,6 +948,11 @@ class HybridRecommendationEngine:
                     for value in str(item.get("artists", "")).split(",") if value.strip()
                 }
                 direct_artist_evidence = bool(seed_artist_keys.intersection(item_artist_keys))
+                direct_link = (
+                    direct_artist_evidence
+                    or float(item.get("_album_match", 0.0)) >= 1.0
+                    or float(item.get("_cluster_match", 0.0)) > 0
+                )
                 sparse_metadata_bridge = (
                     float(item.get("_metadata_similarity", 0.0)) >= 0.22
                     and (
@@ -963,15 +968,15 @@ class HybridRecommendationEngine:
                 # because both titles contain an energy keyword. Cross-
                 # language discovery remains possible through same-artist or
                 # same-album evidence, but not as an accidental fallback.
-                if has_seed and bool(item.get("_language_conflict", False)):
+                if has_seed and bool(item.get("_language_conflict", False)) and not direct_link:
                     continue
-                if bool(item.get("_intent_conflict", False)):
+                if bool(item.get("_intent_conflict", False)) and not direct_link:
                     continue
                 candidate_intents = set(item.get("intent_labels", [])) - {"general"}
                 specialized_intents = {"devotional", "ghazal", "motivational", "acoustic_indie", "energetic"}
                 seed_specialized = seed_intents.intersection(specialized_intents)
                 candidate_specialized = candidate_intents.intersection(specialized_intents)
-                if candidate_specialized and not seed_specialized.intersection(candidate_specialized):
+                if candidate_specialized and not seed_specialized.intersection(candidate_specialized) and not direct_link:
                     continue
                 # A confident seed intent is a hard semantic contract. A
                 # candidate with no evidence for that intent is not allowed
