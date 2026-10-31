@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 ERA_COMPATIBILITY_WINDOW_YEARS = 30
-HYBRID_MODEL_VERSION = "hybrid-v14-context-first-ranking"
+HYBRID_MODEL_VERSION = "hybrid-v15-mood-era-context-ranking"
 
 
 def _metadata_feature_tokens(item: dict) -> dict[str, float]:
@@ -841,6 +841,9 @@ class HybridRecommendationEngine:
         # history is injected only as a controlled secondary signal.
         context_values = np.asarray([float(item.get("_context_score", 0.0)) for item in results])
         artist_anchor_values = np.asarray([float(item.get("_seed_artist_match", 0.0)) for item in results])
+        era_values = np.asarray([float(item.get("_era_match", 0.0)) for item in results])
+        mood_values = np.asarray([float(item.get("_mood_match", 0.0)) for item in results])
+        intent_values = np.asarray([float(item.get("_intent_match", 0.0)) for item in results])
         profile_values = np.asarray([float(item.get("_profile_score", 0.0)) for item in results])
         audio_values = np.asarray([float(item.get("_audio_match", 0.0)) for item in results])
         metadata_values = np.asarray([float(item.get("_metadata_score", 0.0)) for item in results])
@@ -849,29 +852,35 @@ class HybridRecommendationEngine:
         long_values = np.asarray([item.get("_long_term", 0.0) for item in results])
         if has_seed:
             hybrid = (
-                0.28 * audio_values
+                0.25 * audio_values
                 + 0.15 * metadata_values
-                + 0.08 * collaborative
-                + 0.08 * (0.60 * short_values + 0.40 * medium_values)
-                + 0.05 * long_values
-                + 0.08 * transition_values
-                + 0.23 * context_values
-                + 0.03 * artist_anchor_values
-                + 0.02 * popularity
+                + 0.07 * collaborative
+                + 0.07 * (0.60 * short_values + 0.40 * medium_values)
+                + 0.04 * long_values
+                + 0.07 * transition_values
+                + 0.18 * context_values
+                + 0.06 * artist_anchor_values
+                + 0.06 * era_values
+                + 0.04 * mood_values
+                + 0.03 * intent_values
+                + 0.01 * popularity
             )
             # Confidence-aware normalization: missing audio is not a zero
             # observation. Redistribute weight across reliable signals while
             # applying a small confidence penalty when evidence is sparse.
             available_weight = (
-                0.28 * (audio_values > 0).astype(float)
+                0.25 * (audio_values > 0).astype(float)
                 + 0.15 * (metadata_values > 0).astype(float)
-                + 0.08 * (collaborative > 0).astype(float)
-                + 0.08 * ((short_values + medium_values) > 0).astype(float)
-                + 0.05 * (long_values > 0).astype(float)
-                + 0.08 * (transition_values > 0).astype(float)
-                + 0.23 * (context_values > 0).astype(float)
-                + 0.03 * (artist_anchor_values > 0).astype(float)
-                + 0.02 * (popularity > 0).astype(float)
+                + 0.07 * (collaborative > 0).astype(float)
+                + 0.07 * ((short_values + medium_values) > 0).astype(float)
+                + 0.04 * (long_values > 0).astype(float)
+                + 0.07 * (transition_values > 0).astype(float)
+                + 0.18 * (context_values > 0).astype(float)
+                + 0.06 * (artist_anchor_values > 0).astype(float)
+                + 0.06 * (era_values > 0).astype(float)
+                + 0.04 * (mood_values > 0).astype(float)
+                + 0.03 * (intent_values > 0).astype(float)
+                + 0.01 * (popularity > 0).astype(float)
             )
             numerator = hybrid.copy()
             hybrid = numerator / np.maximum(available_weight, 0.03)
@@ -1042,6 +1051,7 @@ class HybridRecommendationEngine:
                 "final_rank_score": chosen["final_rank_score"],
                 "context": round(float(chosen.get("_context_score", 0.0)), 4),
                 "current_artist": round(float(chosen.get("_seed_artist_match", 0.0)), 4),
+                "current_era": round(float(chosen.get("_era_match", 0.0)), 4),
                 "collaborative": round(float(chosen.get("_collaborative_score", 0.0)), 4),
                 "mood": round(float(chosen.get("_mood_match", 0.0)), 4),
                 "audio": round(float(chosen.get("_audio_match", 0.0)), 4),
