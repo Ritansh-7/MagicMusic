@@ -778,7 +778,10 @@ def build_jio_up_next(
     # not evidence about the current track's intent; using them here caused a
     # broad artist result (for example a motivational song) to redefine a
     # romantic/acoustic seed.
-    verified_intents = set(seed.get("intent_labels", ["general"]))
+    verified_intents = (
+        set(seed.get("intent_labels", ["general"]))
+        | set(seed.get("query_intents", []))
+    )
 
     def valid_artist(value: object) -> bool:
         normalized = str(value or "").strip().casefold()
@@ -1517,9 +1520,11 @@ else:
         raw_jio_results = list(jio_results or [])
         enriched_search_results = enrich_live_items(raw_jio_results)
         query_matches = prioritize_search_results(enriched_search_results, search_query)
+        # Query intent describes the user's requested context; it must not
+        # falsely label every returned song with that intent.
         query_intents = set(infer_music_intents({"title": search_query})) - {"general"}
         for item in query_matches:
-            item["intent_labels"] = sorted(set(item.get("intent_labels", [])) | query_intents)
+            item["query_intents"] = sorted(query_intents)
         try:
             jio_results = hybrid_engine.rank_jio_results(
                 query_matches, local_user_id, data, preferred_track_ids
