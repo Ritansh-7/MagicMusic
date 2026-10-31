@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 ERA_COMPATIBILITY_WINDOW_YEARS = 30
-HYBRID_MODEL_VERSION = "hybrid-v15-mood-era-context-ranking"
+HYBRID_MODEL_VERSION = "hybrid-v16-contextual-bandit"
 
 
 def _metadata_feature_tokens(item: dict) -> dict[str, float]:
@@ -435,11 +435,36 @@ class HybridRecommendationEngine:
         self.short_artist_preferences: dict[str, dict[str, float]] = {}
         self.medium_artist_preferences: dict[str, dict[str, float]] = {}
         self.long_artist_preferences: dict[str, dict[str, float]] = {}
+        self.bandit_counts: dict[str, float] = {}
+        self.bandit_rewards: dict[str, float] = {}
         self.learned_ranker = LearnedRanker()
 
     def fit(self, events: list[dict] | pd.DataFrame) -> "HybridRecommendationEngine":
         frame = pd.DataFrame(events)
         self.learned_ranker.fit(frame)
+        self.bandit_counts = {}
+        self.bandit_rewards = {}
+        if not frame.empty and {"track_id", "event_type"}.issubset(frame.columns):
+            # Contextual-bandit feedback: observed actions only. Impressions
+            # provide exposure counts; play/like/skip provide rewards.
+            for row in frame.to_dict("records"):
+                track_id = str(row.get("track_id") or "")
+                event = str(row.get("event_type") or "")
+                if not track_id:
+                    continue
+                if event == "recommendation_impression":
+                    try:
+                        payload = json.loads(row.get("metadata_json") or "{}")
+                        for item in payload.get("items", []):
+                            exposed_id = str(item.get("track_id") or "")
+                            if exposed_id:
+                                self.bandit_counts[exposed_id] = self.bandit_counts.get(exposed_id, 0.0) + 1.0
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        pass
+                reward = {"jio_play": 1.0, "play_start": 1.0, "jio_like": 2.0, "like": 2.0, "jio_skip": -1.0, "skip": -1.0}.get(event)
+                if reward is not None:
+                    self.bandit_counts[track_id] = self.bandit_counts.get(track_id, 0.0) + 1.0
+                    self.bandit_rewards[track_id] = self.bandit_rewards.get(track_id, 0.0) + reward
         if frame.empty or not {"user_id", "track_id", "event_type"}.issubset(frame.columns):
             return self
         frame = frame.dropna(subset=["user_id", "track_id"]).copy()
@@ -835,6 +860,14 @@ class HybridRecommendationEngine:
         popularity = np.asarray([
             self.item_popularity.get(item_id, 0.0) for item_id in item_ids
         ], dtype=float)
+        total_bandit = max(1.0, sum(self.bandit_counts.values()))
+        bandit_values = np.asarray([
+            (self.bandit_rewards.get(item_id, 0.0) / max(1.0, self.bandit_counts.get(item_id, 0.0)))
+            + 0.08 * np.sqrt(np.log1p(total_bandit) / (1.0 + self.bandit_counts.get(item_id, 0.0)))
+            for item_id in item_ids
+        ], dtype=float)
+        if bandit_values.size and bandit_values.max() > bandit_values.min():
+            bandit_values = (bandit_values - bandit_values.min()) / (bandit_values.max() - bandit_values.min())
         # Content dominates cold-start. Once enough events exist, the
         # transition and collaborative signals influence the next-track order.
         # Context-first ranking: the current track defines the mood, while
@@ -863,6 +896,7 @@ class HybridRecommendationEngine:
                 + 0.06 * era_values
                 + 0.04 * mood_values
                 + 0.03 * intent_values
+                + 0.04 * bandit_values
                 + 0.01 * popularity
             )
             # Confidence-aware normalization: missing audio is not a zero
@@ -880,6 +914,7 @@ class HybridRecommendationEngine:
                 + 0.06 * (era_values > 0).astype(float)
                 + 0.04 * (mood_values > 0).astype(float)
                 + 0.03 * (intent_values > 0).astype(float)
+                + 0.04 * (bandit_values > 0).astype(float)
                 + 0.01 * (popularity > 0).astype(float)
             )
             numerator = hybrid.copy()
@@ -1060,6 +1095,7 @@ class HybridRecommendationEngine:
                 "era": round(float(chosen.get("_era_match", 0.0)), 4),
                 "language": round(float(chosen.get("_language_match", 0.0)), 4),
                 "transition": round(float(transition_map.get(str(chosen.get("song_id") or chosen.get("title", "")), 0.0)), 4),
+                "bandit": round(float(bandit_values[item_ids.index(str(chosen.get("song_id") or chosen.get("title", "")))]), 4),
                 "short_term": round(float(chosen.get("_short_term", 0.0)), 4),
                 "medium_term": round(float(chosen.get("_medium_term", 0.0)), 4),
                 "long_term": round(float(chosen.get("_long_term", 0.0)), 4),
