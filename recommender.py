@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 ERA_COMPATIBILITY_WINDOW_YEARS = 30
-HYBRID_MODEL_VERSION = "hybrid-v10-strict-diagnostics"
+HYBRID_MODEL_VERSION = "hybrid-v11-query-first-audio-neighbors"
 
 
 def _metadata_feature_tokens(item: dict) -> dict[str, float]:
