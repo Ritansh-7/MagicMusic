@@ -1347,7 +1347,10 @@ else:
         search_cache = st.session_state["jio_search_cache_v2"]
         search_cache_key = search_query.strip().lower()
         jio_results = search_cache.get(search_cache_key)
-        if jio_results is None:
+        # Older sessions may contain a sparse exact-title response from the
+        # upstream mirror. Re-run the expanded search once instead of showing
+        # a permanently truncated shelf from Streamlit session state.
+        if jio_results is None or len(jio_results) < 8:
             jio_results = jio_client.search(search_query, limit=30)
         if not jio_results:
             local_guess = engine.search(search_query, limit=1)

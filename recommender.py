@@ -934,6 +934,31 @@ class HybridRecommendationEngine:
                         and float(item.get("_mood_match", 0.0)) >= 0.62
                     )
                 )
+                # Live providers often omit year, language and audio features.
+                # In that case a direct shared-artist signal is still valid
+                # evidence, but only for the current seed's artist—not as a
+                # generic popularity fallback. A shared metadata token plus a
+                # compatible era/language bridge is the second safe fallback.
+                seed_artist_keys = {
+                    re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+                    for value in seed_artists if value.strip()
+                }
+                item_artist_keys = {
+                    re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+                    for value in str(item.get("artists", "")).split(",") if value.strip()
+                }
+                direct_artist_evidence = bool(seed_artist_keys.intersection(item_artist_keys))
+                sparse_metadata_bridge = (
+                    float(item.get("_metadata_similarity", 0.0)) >= 0.22
+                    and (
+                        float(item.get("_language_match", 0.0)) >= 1.0
+                        or float(item.get("_era_match", 0.0)) >= 0.45
+                        or float(item.get("_style_match", 0.0)) >= 1.0
+                    )
+                )
+                low_confidence_seed = float((seed or {}).get("mood_confidence", 0.0) or 0.0) < 0.5
+                if low_confidence_seed and (direct_artist_evidence or sparse_metadata_bridge):
+                    strong_context = True
                 # Do not recommend a known different-language track merely
                 # because both titles contain an energy keyword. Cross-
                 # language discovery remains possible through same-artist or

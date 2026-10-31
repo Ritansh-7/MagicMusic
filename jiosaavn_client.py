@@ -153,6 +153,7 @@ class JioSaavnClient:
                 lambda candidate: self.search_direct(candidate, limit=min(limit, 12)),
                 candidates,
             )
+        first_wave: list[dict[str, Any]] = []
         for raw_items in pages:
             if not raw_items:
                 continue
@@ -164,8 +165,39 @@ class JioSaavnClient:
                     continue
                 seen.add(key)
                 collected.append(item)
+                first_wave.append(item)
                 if len(collected) >= limit:
                     return collected[:limit]
+
+        # Some public Saavn mirrors return only the exact title matches for a
+        # title query. Expand using the artists/albums found in that first
+        # wave, so a search for a classic song still gets a useful shelf and
+        # not just two alternate releases of the same recording.
+        discovery_queries: list[str] = []
+        for item in first_wave[:8]:
+            artists = [part.strip() for part in str(item.get("artists", "")).split(",") if part.strip()]
+            discovery_queries.extend(f"{artist} songs" for artist in artists[:3])
+            album = str(item.get("album", "")).strip()
+            if album:
+                discovery_queries.append(f"{album} songs")
+        discovery_queries = list(dict.fromkeys(discovery_queries))[:10]
+        if discovery_queries and len(collected) < limit:
+            with ThreadPoolExecutor(max_workers=min(6, len(discovery_queries))) as executor:
+                discovery_pages = executor.map(
+                    lambda candidate: self.search_direct(candidate, limit=min(20, limit)),
+                    discovery_queries,
+                )
+            for raw_items in discovery_pages:
+                for item in raw_items or []:
+                    key = str(item.get("song_id") or "") or (
+                        f"{item.get('title', '')}|{item.get('artists', '')}".lower()
+                    )
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    collected.append(item)
+                    if len(collected) >= limit:
+                        return collected[:limit]
         return collected[:limit]
 
     def search_direct(self, query: str, limit: int = 12) -> list[dict[str, Any]]:
