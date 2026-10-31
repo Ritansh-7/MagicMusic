@@ -365,7 +365,7 @@ def enrich_live_items(items: list[dict]) -> list[dict]:
 
 
 @st.cache_resource
-def build_hybrid_engine(_content_engine):
+def build_hybrid_engine(_content_engine, model_version: str):
     """Keep one fitted model service per app process instead of rebuilding it on every rerun."""
     return HybridRecommendationEngine(_content_engine)
 
@@ -408,7 +408,7 @@ except Exception:
             "fix DATABASE_URL and reboot to persist users and activity."
         )
 jio_client = JioSaavnClient()
-hybrid_engine = build_hybrid_engine(engine)
+hybrid_engine = build_hybrid_engine(engine, HYBRID_MODEL_VERSION)
 st.session_state.setdefault("local_session_id", uuid.uuid4().hex)
 if "recommendation_variant" not in st.session_state:
     variant_key = str(st.session_state.get("local_user_id") or st.session_state["local_session_id"])
