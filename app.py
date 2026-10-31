@@ -1030,6 +1030,10 @@ def build_jio_up_next(
     for position, item in enumerate(queue, start=1):
         item["recommendation_rank"] = position
         item.setdefault("recommendation_source", item.get("candidate_source", "current_track_radio"))
+    if queue:
+        st.session_state["recommendation_feedback_pending_seed"] = str(
+            seed.get("song_id") or seed.get("title", "")
+        )
 
     # One compact impression event per generated queue gives us exposure data
     # without inserting one database row per visible recommendation.
@@ -1734,6 +1738,47 @@ if jio_now:
             seen_up_next_titles.add(title_key)
             up_next.append(item)
     st.session_state["jio_queue"] = up_next
+    current_feedback_seed = str(jio_now.get("song_id") or jio_now.get("title", ""))
+    pending_feedback = st.session_state.get("recommendation_feedback_pending_seed")
+    answered_feedback = st.session_state.get("recommendation_feedback_answered_seed")
+
+    if up_next and pending_feedback == current_feedback_seed and answered_feedback != current_feedback_seed:
+        @st.dialog("Quick recommendation feedback")
+        def recommendation_feedback_dialog():
+            st.write("Are these recommendations matching what you want to hear?")
+            good_col, bad_col = st.columns(2)
+            with good_col:
+                if st.button("👍 Good", use_container_width=True):
+                    log_behavior("recommendation_feedback", current_feedback_seed, metadata={"rating": "good", "queue_size": len(up_next)})
+                    st.session_state["recommendation_feedback_answered_seed"] = current_feedback_seed
+                    st.session_state.pop("recommendation_feedback_pending_seed", None)
+                    st.toast("Great — I’ll keep this direction")
+                    st.rerun()
+            with bad_col:
+                if st.button("👎 Not good", use_container_width=True):
+                    log_behavior("recommendation_feedback", current_feedback_seed, metadata={"rating": "bad", "queue_size": len(up_next)})
+                    refresh_hybrid_model(force=True)
+                    cached_feedback_results = st.session_state.get("jio_search_cache_v3", {}).get(search_query.strip().lower(), [])
+                    try:
+                        fresh_queue = build_jio_up_next(
+                            jio_now,
+                            cached_feedback_results,
+                            jio_client,
+                            hybrid_engine,
+                            local_user_id,
+                            data,
+                            preferred_track_ids,
+                            exclude_items=[jio_now, *up_next],
+                        )
+                    except Exception:
+                        fresh_queue = []
+                    st.session_state["jio_queue"] = fresh_queue
+                    st.session_state["recommendation_feedback_answered_seed"] = current_feedback_seed
+                    st.session_state.pop("recommendation_feedback_pending_seed", None)
+                    st.toast("Refreshing with a different recommendation direction")
+                    st.rerun()
+
+        recommendation_feedback_dialog()
     if up_next:
         st.markdown(f"<div class='shelf-subtitle'>Up next for you · {len(up_next)} personalized tracks</div>", unsafe_allow_html=True)
         featured = up_next[0]
