@@ -1113,9 +1113,15 @@ def build_jio_up_next(
             f"{seed_language} pop songs",
             f"{seed_language} chill songs",
             f"feel good {seed_language} songs",
+            f"{seed_language} rock songs",
+            f"{seed_language} ballads",
+            f"{seed_language} classics",
+            f"{seed_language} 2000s songs",
+            f"{seed_language} 2010s songs",
+            f"{seed_language} 2020s songs",
         ])
     else:
-        related_queries.append("pop songs")
+        related_queries.extend(["pop songs", "rock songs", "chill songs", "classic songs"])
     try:
         seed_year = int(str(seed.get("year", ""))[:4])
     except ValueError:
@@ -1192,7 +1198,7 @@ def build_jio_up_next(
         [dict(item) for item in search_results if isinstance(item, dict)],
         source="seed_search_results",
     )
-    collect_queries(related_queries, page_limit=20, max_queries=6, source="seed_title_album_artist")
+    collect_queries(related_queries, page_limit=20, max_queries=12, source="seed_title_album_artist")
     # Artist radio needs the provider's expanded catalogue endpoint. The
     # narrow direct query often returns only one or two Coldplay recordings;
     # this extra artist-only fetch stays inside the recommendation pipeline,
@@ -1220,7 +1226,7 @@ def build_jio_up_next(
         ranked = []
     # A strict pass is preferred, but sparse live metadata should not leave
     # the player with an empty queue when a language/era/style bridge exists.
-    if len(ranked) < 3 and enriched_collected:
+    if len(ranked) < 15 and enriched_collected:
         try:
             relaxed_ranked = hybrid.rank_jio_results(
                 enriched_collected,

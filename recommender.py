@@ -1105,7 +1105,7 @@ class HybridRecommendationEngine:
                     # or audio metadata for a perfectly valid live seed. The
                     # bounded language/style discovery pool is still safer than
                     # leaving the listener with an empty queue.
-                    if relaxed_context and str(item.get("candidate_source", "")).startswith("seed_title_album_artist"):
+                    if relaxed_context and str(item.get("candidate_source", "")).startswith(("seed_title_album_artist", "seed_artist_catalogue")):
                         relaxed_bridge = True
                     if not relaxed_bridge:
                         continue
