@@ -11,6 +11,7 @@ from recommender import (
     _infer_candidate_intents,
     _interleave_recommendation_contexts,
     infer_audio_intents,
+    infer_metadata_mood_labels,
     infer_same_soundtrack_audio_intents,
     _soundtrack_peer_artists,
     is_compilation_album,
@@ -173,6 +174,53 @@ def test_playful_intent_uses_descriptive_metadata_and_lively_audio_features():
 
     assert _infer_candidate_intents(described) == {"playful"}
     assert infer_audio_intents(mellow) == set()
+
+
+def test_metadata_mood_does_not_infer_emotion_from_artist_name():
+    assert infer_metadata_mood_labels({
+        "title": "A song",
+        "artists": "Love",
+        "album": "A collection",
+    }) == set()
+    assert infer_metadata_mood_labels({
+        "title": "Ishq",
+        "artists": "A neutral artist",
+    }) == {"romantic"}
+
+
+def test_recommendation_reasons_do_not_claim_metadata_mood_is_verified_audio():
+    catalog = sample_data()
+    hybrid = HybridRecommendationEngine(SpotifyRecommendationEngine(catalog))
+    mood = [0.8, 0.65, 0.7, 0.75, 0.2, 0.1, 0.08, 0.2, 0.8]
+    seed = {
+        "title": "Seed ballad",
+        "artists": "Anchor Artist",
+        "year": 1975,
+        "mood_vector": mood,
+        "mood_label": "romantic",
+        "mood_confidence": 0.58,
+        "mood_source": "metadata_fallback",
+        "intent_labels": ["romantic"],
+    }
+    candidate = {
+        "song_id": "metadata-mood-match",
+        "title": "Another ballad",
+        "artists": "Anchor Artist",
+        "year": 1976,
+        "mood_vector": mood,
+        "mood_label": "romantic",
+        "mood_confidence": 0.58,
+        "mood_source": "metadata_fallback",
+        "intent_labels": ["romantic"],
+    }
+
+    ranked = hybrid.rank_jio_results(
+        [candidate], "metadata-mood-user", catalog, [], seed=seed,
+    )
+
+    assert ranked[0]["recommendation_reason"] == (
+        "Same artist; metadata suggests a similar vibe"
+    )
 
 
 def test_sparse_seed_uses_same_soundtrack_audio_as_a_low_confidence_intent_hint():
@@ -906,7 +954,7 @@ def test_radio_rotates_singers_while_preserving_seed_mood_and_era():
     top_eight_artists = [item["artists"] for item in ranked[:8]]
 
     assert len(set(top_eight_artists)) >= 5
-    assert top_eight_artists.count("Mukesh") <= 3
+    assert top_eight_artists.count("Mukesh") <= 2
     assert all(abs(int(item["year"]) - 1975) <= 15 for item in ranked[:8])
     assert all(item["recommendation_features"]["mood"] > 0.99 for item in ranked[:8])
 

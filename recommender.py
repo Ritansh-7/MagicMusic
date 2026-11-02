@@ -5,10 +5,11 @@ import re
 import numpy as np
 import pandas as pd
 
-HYBRID_MODEL_VERSION = "hybrid-v27-live-seed-era-rotation"
+HYBRID_MODEL_VERSION = "hybrid-v28-mood-artist-diversity"
 
 EXCLUDED_RECOMMENDATION_TITLES = {"jo bhi kasmein"}
 MAX_RECOMMENDATION_YEAR_DISTANCE = 15
+MAX_ARTIST_REPEATS_IN_QUEUE = 2
 
 
 def recommendation_source_work(item: dict) -> str:
@@ -417,6 +418,58 @@ def _infer_candidate_intents(item: dict) -> set[str]:
         if any(term in text if " " in term else term in tokens for term in terms)
     }
     return labels | infer_audio_intents(item)
+
+
+def infer_metadata_mood_labels(item: dict) -> set[str]:
+    """Infer low-confidence mood labels without using artist names as evidence."""
+    text = " ".join(
+        str(item.get(field, ""))
+        for field in (
+            "title", "album", "language", "mood", "description", "tags",
+            "track_genre", "genre",
+        )
+    ).casefold()
+    tokens = set(re.findall(r"[a-z0-9]+", text))
+    groups = {
+        "playful": {
+            "playful", "comic", "comedy", "humorous", "funny", "lighthearted",
+            "light hearted", "mischief", "masti", "nautanki", "chatur",
+            "nok jhok", "banter", "witty", "theatrical", "expressive",
+            "call and response", "call response", "jugalbandi",
+        },
+        "energetic": {
+            "fight", "anthem", "rock", "zinda", "sultan", "power", "action",
+            "dance", "party", "bhangra", "bang", "fire", "dhamaka", "warrior",
+            "bhaag", "milkha", "singham", "chaiyya", "ramta", "appadipodu",
+            "mappillai",
+        },
+        "romantic": {
+            "love", "romantic", "ishq", "mohabbat", "pyaar", "dil", "jaan",
+            "saiyaara",
+        },
+        "sad": {"sad", "heartbreak", "alone", "broken", "dard", "udaas"},
+        "instrumental": {
+            "theme", "score", "background", "instrumental", "bgm", "soundtrack",
+        },
+        "acoustic_indie": {
+            "acoustic", "unplugged", "indie", "folk", "singer songwriter",
+            "singer-songwriter", "coke studio", "lofi", "slowed", "reverb",
+        },
+        "ghazal": {
+            "ghazal", "ghazals", "shayar", "shayari", "mehfil", "rekhta",
+            "ghulam ali", "ghulam ali classics", "ustad bade ghulam ali",
+            "ghulam ali khan", "chupke chupke classics",
+        },
+        "rap_hiphop": {
+            "rap", "rapper", "hip hop", "hiphop", "gully", "freestyle",
+            "mixtape",
+        },
+    }
+    return {
+        label
+        for label, words in groups.items()
+        if any(word in text if " " in word else word in tokens for word in words)
+    }
 import re
 from scipy.sparse import hstack, csr_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -1218,14 +1271,14 @@ class HybridRecommendationEngine:
             )
             # Current-track context is deliberately stronger than history.
             context_score = (
-                0.25 * seed_artist_match
+                0.15 * seed_artist_match
                 + 0.12 * album_match
                 + 0.08 * era_match
                 + 0.08 * language_match
                 + 0.12 * cluster_match
-                + 0.20 * mood_match
+                + 0.25 * mood_match
                 + 0.10 * metadata_similarity
-                + 0.05 * intent_match
+                + 0.10 * intent_match
             )
             seed_content = (
                 0.40 * seed_artist_match
@@ -1256,10 +1309,8 @@ class HybridRecommendationEngine:
             item["_era_delta"] = era_delta
             item["_same_era"] = same_era
             audio_verified = audio_match >= 0.62
-            if album_match and (mood_match >= 0.62 or intent_match >= 0.5):
-                item["recommendation_reason"] = "Same soundtrack with verified mood"
-            elif seed_artist_match and mood_match >= 0.62:
-                item["recommendation_reason"] = "Same artist and current mood"
+            if album_match and audio_verified and mood_match >= 0.62:
+                item["recommendation_reason"] = "Same soundtrack and similar audio profile"
             elif album_match:
                 item["recommendation_reason"] = "Same film or soundtrack"
             elif audio_verified and mood_match >= 0.78 and same_era:
@@ -1268,12 +1319,16 @@ class HybridRecommendationEngine:
                 item["recommendation_reason"] = "Similar mood with a different era"
             elif audio_verified and mood_match >= 0.78:
                 item["recommendation_reason"] = "Very similar mood and sound"
+            elif seed_artist_match and audio_verified and mood_match >= 0.62:
+                item["recommendation_reason"] = "Same artist and similar audio profile"
+            elif seed_artist_match and mood_match >= 0.62:
+                item["recommendation_reason"] = "Same artist; metadata suggests a similar vibe"
             elif mood_match >= 0.62:
-                item["recommendation_reason"] = "Matching metadata mood; audio not verified"
+                item["recommendation_reason"] = "Metadata suggests a similar vibe; audio not verified"
             elif metadata_similarity >= 0.45:
                 item["recommendation_reason"] = "Similar title, album and artist context"
             elif intent_match >= 0.5:
-                item["recommendation_reason"] = "Verified matching listening intent"
+                item["recommendation_reason"] = "Metadata suggests a matching listening vibe"
             elif style_match and language_match:
                 item["recommendation_reason"] = "Similar energy and language"
             elif style_match:
@@ -1564,6 +1619,18 @@ class HybridRecommendationEngine:
             # relevance gate, finish cleanly instead of leaking weak fallbacks.
             if not eligible:
                 break
+            less_repeated_artists = [
+                candidate
+                for candidate in eligible
+                if all(
+                    artist_counts.get(artist, 0) < MAX_ARTIST_REPEATS_IN_QUEUE
+                    for artist in _artist_credit_keys(
+                        remaining[candidate[0]][1].get("artists", "")
+                    )
+                )
+            ]
+            if less_repeated_artists:
+                eligible = less_repeated_artists
             distinct_soundtracks = [
                 candidate
                 for candidate in eligible

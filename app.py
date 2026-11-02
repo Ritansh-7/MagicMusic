@@ -21,6 +21,7 @@ from recommender import (
     _era_artist_discovery_queries,
     _soundtrack_peer_artists,
     infer_audio_intents,
+    infer_metadata_mood_labels,
     infer_same_soundtrack_audio_intents,
     is_compilation_album,
     recommendation_source_work as _recommendation_source_work,
@@ -357,34 +358,12 @@ def infer_metadata_mood(item: dict) -> dict:
     ranker a low-cost, low-confidence vector until an audio-feature match is
     available from the local catalog.
     """
-    text = " ".join(
-        str(item.get(field, ""))
-        for field in (
-            "title", "album", "artists", "language", "mood", "description",
-            "tags", "intent_labels", "track_genre", "genre",
-        )
-    ).lower()
     vector = {
         "energy": 0.50, "tempo": 100.0, "valence": 0.50, "danceability": 0.50,
         "acousticness": 0.40, "instrumentalness": 0.15, "speechiness": 0.10,
         "liveness": 0.20, "loudness": -12.0, "popularity": 35.0,
     }
-    labels = []
-    groups = {
-        "playful": {"playful", "comic", "comedy", "humorous", "funny", "lighthearted", "light hearted", "mischief", "masti", "nautanki", "chatur", "nok jhok", "banter", "witty", "theatrical", "expressive", "call and response", "call response", "jugalbandi"},
-        "energetic": {"fight", "anthem", "rock", "zinda", "sultan", "power", "action", "dance", "party", "bhangra", "bang", "fire", "dhamaka", "warrior", "bhaag", "milkha", "singham", "chaiyya", "ramta", "appadipodu", "mappillai"},
-        "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "dil", "jaan", "saiyaara"},
-        "sad": {"sad", "heartbreak", "alone", "broken", "dard", "udaas"},
-        "instrumental": {"theme", "score", "background", "instrumental", "bgm", "soundtrack"},
-        "acoustic_indie": {"acoustic", "unplugged", "indie", "folk", "singer songwriter", "singer-songwriter", "coke studio", "lofi", "slowed", "reverb"},
-        "ghazal": {"ghazal", "ghazals", "shayar", "shayari", "mehfil", "rekhta", "ghulam ali", "ghulam ali classics", "ustad bade ghulam ali", "ghulam ali khan", "chupke chupke classics"},
-        "rap_hiphop": {"rap", "rapper", "hip hop", "hiphop", "gully", "freestyle", "mixtape"},
-    }
-    tokens = set(re.findall(r"[a-z0-9]+", text))
-    matched = {
-        label for label, words in groups.items()
-        if any((word in text if " " in word else word in tokens) for word in words)
-    }
+    matched = infer_metadata_mood_labels(item)
     if "playful" in matched:
         vector.update(energy=0.68, tempo=125.0, valence=0.82, danceability=0.68, acousticness=0.25, loudness=-7.5)
     elif "energetic" in matched:
@@ -405,7 +384,7 @@ def infer_metadata_mood(item: dict) -> dict:
     return {
         "mood_vector": _mood_vector(vector),
         "mood_label": ", ".join(labels),
-        "mood_confidence": 0.72 if matched else 0.22,
+        "mood_confidence": 0.58 if matched else 0.22,
         "mood_source": "metadata_fallback",
     }
 

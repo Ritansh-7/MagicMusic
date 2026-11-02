@@ -58,7 +58,7 @@ instrumentalness, speechiness, liveness and loudness
 
 When no local match exists, the system does not invent audio features. It uses metadata fallback signals: artist, album, language, year, title and session context.
 
-For fast live ranking, unmatched JioSaavn songs also receive a low-confidence metadata mood vector inferred from title, album and artist terms (for example energetic, romantic, sad, instrumental or acoustic). This avoids downloading and analysing dozens of previews during every queue build. A metadata estimate is never reported as verified audio evidence.
+For fast live ranking, unmatched JioSaavn songs receive a low-confidence metadata mood estimate from title, album, language, genre and descriptive tags (for example energetic, romantic, sad, instrumental or acoustic). Artist names are not used to infer a song's mood, and the estimate is never described as verified audio. The live search adapter does not currently retrieve lyrics, so the app does not claim lyric-based sentiment analysis. Local audio-feature matches remain the only source of verified audio similarity.
 
 ### Mood/style clustering
 
@@ -135,14 +135,14 @@ metadata_score =
   + 0.15 × metadata_token_similarity
 
 seed_context =
-    0.25 × seed_artist_match
+    0.15 × seed_artist_match
   + 0.12 × album_match
   + 0.08 × era_match
   + 0.08 × language_match
   + 0.12 × mood_cluster_match
-  + 0.20 × mood_similarity
+  + 0.25 × mood_similarity
   + 0.10 × metadata_token_similarity
-  + 0.05 × intent_match
+  + 0.10 × intent_match
 ```
 
 For candidates with known release years, era similarity is a Gaussian-shaped score:
@@ -200,6 +200,7 @@ generic popular/trending pages are never used as a seed-specific fallback.
 
 - Search answers the user’s query.
 - Playing a search result creates a fresh queue from that song.
+- When other relevant artists are available, the queue limits any one artist to two recommendations before allowing repeats; if the candidate pool is too narrow, it can still fill from the seed artist.
 - Selecting an Up Next song makes it the new seed and regenerates recommendations.
 - Manual Next marks the current song as skipped; Next and automatic end-of-track playback both advance to the queued song.
 - The browser audio component reports the ended event so playback can advance without a manual Next click; Loop disables that behavior.
