@@ -282,23 +282,20 @@ def test_listener_mood_and_era_profiles_follow_recent_listening():
     assert ranked[0]["recommendation_features"]["listener_era"] > 0.7
 
 
-def test_recommendations_prioritize_seed_decade_with_limited_era_variety():
+def test_recommendations_stay_in_seed_decade_and_drop_unknown_years():
     candidates = [
         *({"song_id": f"seventies-{index}", "year": 1970 + index % 10} for index in range(14)),
         *({"song_id": f"sixties-{index}", "year": 1960 + index} for index in range(2)),
         *({"song_id": f"eighties-{index}", "year": 1980 + index} for index in range(2)),
         {"song_id": "nineties", "year": 1995},
+        {"song_id": "unknown-year", "year": ""},
     ]
 
     ordered = _interleave_recommendation_contexts(candidates, 1975)
     decades = [int(item["year"]) // 10 * 10 for item in ordered]
 
-    assert decades[:7] == [1970] * 7
-    assert decades[7:9] == [1960, 1960]
-    assert decades[9] == 1990
-    assert decades.count(1970) == 14
-    assert decades.count(1960) + decades.count(1980) == 4
-    assert decades.count(1990) == 1
+    assert len(ordered) == 14
+    assert set(decades) == {1970}
 
 
 def test_context_priority_within_same_decade_is_taste_then_artist_then_film():
@@ -311,6 +308,77 @@ def test_context_priority_within_same_decade_is_taste_then_artist_then_film():
     ordered = _interleave_recommendation_contexts(candidates, 1975)
 
     assert [item["song_id"] for item in ordered] == ["taste", "artist", "film"]
+
+
+def test_ranker_excludes_blocked_title_and_other_decades_for_each_seed():
+    catalog = sample_data()
+    hybrid = HybridRecommendationEngine(SpotifyRecommendationEngine(catalog))
+    candidates = [
+        {
+            "song_id": "same-decade-early",
+            "title": "Same Decade Early",
+            "artists": "Anchor Artist",
+            "album": "Another Album",
+            "year": 1971,
+        },
+        {
+            "song_id": "same-decade-late",
+            "title": "Same Decade Late",
+            "artists": "Anchor Artist",
+            "album": "Another Album",
+            "year": 1979,
+        },
+        {
+            "song_id": "blocked-song",
+            "title": "Jo Bhi Kasmein (From Raaz)",
+            "artists": "Anchor Artist",
+            "album": "Raaz",
+            "year": 1972,
+        },
+        {
+            "song_id": "blocked-title-variant",
+            "title": "Jo Bhi Kasmein - Raaz Soundtrack",
+            "artists": "Anchor Artist",
+            "album": "Raaz",
+            "year": 1976,
+        },
+        {
+            "song_id": "next-decade",
+            "title": "Next Decade",
+            "artists": "Anchor Artist",
+            "album": "Another Album",
+            "year": 1980,
+        },
+        {
+            "song_id": "unknown-year",
+            "title": "Unknown Year",
+            "artists": "Anchor Artist",
+            "album": "Another Album",
+        },
+    ]
+
+    seed = {
+        "title": "Seed Song",
+        "artists": "Anchor Artist",
+        "album": "Seed Album",
+        "year": 1975,
+    }
+    seventies = hybrid.rank_jio_results(
+        candidates, "era-user", catalog, [], seed=seed,
+    )
+    eighties = hybrid.rank_jio_results(
+        candidates,
+        "era-user",
+        catalog,
+        [],
+        seed={**seed, "year": 1985},
+    )
+
+    assert {item["song_id"] for item in seventies} == {
+        "same-decade-early",
+        "same-decade-late",
+    }
+    assert {item["song_id"] for item in eighties} == {"next-decade"}
 
 
 def test_logged_impression_schema_is_read_by_ranker():

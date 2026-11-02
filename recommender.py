@@ -5,27 +5,22 @@ import re
 import numpy as np
 import pandas as pd
 
-ERA_COMPATIBILITY_WINDOW_YEARS = 30
-HYBRID_MODEL_VERSION = "hybrid-v22-era-priority-mix"
+HYBRID_MODEL_VERSION = "hybrid-v23-strict-decade"
+
+EXCLUDED_RECOMMENDATION_TITLES = {"jo bhi kasmein"}
+
+
+def _release_year(value: object) -> int:
+    try:
+        year = int(str(value or "").strip()[:4])
+    except (TypeError, ValueError):
+        return 0
+    return year if 1900 <= year <= 2100 else 0
 
 
 def _interleave_recommendation_contexts(items: list[dict], seed_year: int) -> list[dict]:
-    """Prioritize the seed decade, then taste, artist, and soundtrack context."""
+    """Keep recommendations in the seed decade, then rank by taste and context."""
     seed_decade = seed_year // 10 * 10 if seed_year else 0
-    buckets: dict[int, list[tuple[int, dict]]] = {0: [], 1: [], 2: []}
-
-    def candidate_decade(item: dict) -> int:
-        try:
-            year = int(str(item.get("year", ""))[:4])
-        except (TypeError, ValueError):
-            return 0
-        return year // 10 * 10 if 1900 <= year <= 2100 else 0
-
-    for index, item in enumerate(items):
-        decade = candidate_decade(item)
-        distance = abs(decade - seed_decade) if seed_decade and decade else 30
-        bucket = 0 if distance == 0 else 1 if distance <= 10 else 2
-        buckets[bucket].append((index, item))
 
     def context_order(entry: tuple[int, dict]) -> tuple[float, float, float, int]:
         index, item = entry
@@ -41,36 +36,16 @@ def _interleave_recommendation_contexts(items: list[dict], seed_year: int) -> li
         soundtrack = float(item.get("_album_match", 0.0) or 0.0)
         return (-taste, -artist, -soundtrack, index)
 
-    for bucket in buckets.values():
-        bucket.sort(key=context_order)
-
-    # Keep the original ranking as the final fallback when no release decade
-    # can be recovered for the seed or a candidate.
     if not seed_decade:
-        return [item for _, item in sorted(
-            (entry for bucket in buckets.values() for entry in bucket),
-            key=lambda entry: entry[0],
-        )]
-
-    # Roughly 70% from the seed decade, 20% from the adjacent decade, and
-    # at most 10% from other eligible decades. Empty buckets are skipped.
-    schedule = (0, 0, 0, 0, 0, 0, 0, 1, 1, 2)
-    ordered: list[dict] = []
-    while any(buckets.values()):
-        for preferred_bucket in schedule:
-            available = [
-                bucket for bucket, entries in buckets.items() if entries
-            ]
-            if not available:
-                break
-            bucket = (
-                preferred_bucket
-                if buckets[preferred_bucket]
-                else min(available, key=lambda value: abs(value - preferred_bucket))
-            )
-            _, item = buckets[bucket].pop(0)
-            ordered.append(item)
-    return ordered
+        return items
+    same_decade = [
+        (index, item)
+        for index, item in enumerate(items)
+        if _release_year(item.get("year")) // 10 * 10 == seed_decade
+    ]
+    return [
+        item for _, item in sorted(same_decade, key=context_order)
+    ]
 
 
 def _metadata_feature_tokens(item: dict) -> dict[str, float]:
@@ -149,6 +124,14 @@ def recommendation_title_key(value: str) -> str:
         title,
     )
     return re.sub(r"[^a-z0-9]+", " ", title).strip()
+
+
+def _is_excluded_recommendation_title(value: str) -> bool:
+    title = recommendation_title_key(value)
+    return any(
+        title == excluded or title.startswith(f"{excluded} ")
+        for excluded in EXCLUDED_RECOMMENDATION_TITLES
+    )
 
 
 def recommendation_history_keys(item: dict) -> set[str]:
@@ -785,12 +768,23 @@ class HybridRecommendationEngine:
                 seen_result_keys.add(result_key)
                 deduped.append(item)
         results = deduped
+        seed_year = _release_year((seed or {}).get("year"))
         if seed:
             seed_identity = recommendation_history_keys(seed)
             results = [
                 item for item in results
                 if not seed_identity.intersection(recommendation_history_keys(item))
             ]
+            results = [
+                item for item in results
+                if not _is_excluded_recommendation_title(item.get("title", ""))
+            ]
+            if seed_year:
+                seed_decade = seed_year // 10
+                results = [
+                    item for item in results
+                    if _release_year(item.get("year")) // 10 == seed_decade
+                ]
         if not results:
             return []
         preferred = catalog[catalog["track_id"].astype(str).isin({str(x) for x in preferred_track_ids})]
@@ -891,10 +885,6 @@ class HybridRecommendationEngine:
             if value.strip()
         ]
         seed_album = str((seed or {}).get("album", "")).strip().lower()
-        try:
-            seed_year = int(str((seed or {}).get("year", ""))[:4])
-        except ValueError:
-            seed_year = 0
         for item in results:
             artist = str(item.get("artists", "")).lower()
             title = str(item.get("title", "")).lower()
@@ -908,10 +898,7 @@ class HybridRecommendationEngine:
                 default=0.0,
             )
             album_match = 1.0 if seed_album and seed_album == str(item.get("album", "")).strip().lower() else 0.0
-            try:
-                item_year = int(str(item.get("year", ""))[:4])
-            except ValueError:
-                item_year = 0
+            item_year = _release_year(item.get("year"))
             era_delta = abs(seed_year - item_year) if seed_year and item_year else 0
             era_match = (
                 float(np.exp(-((seed_year - item_year) / 18.0) ** 2))
@@ -1166,15 +1153,6 @@ class HybridRecommendationEngine:
                 # recommendation-queue rule only.
                 if not has_seed:
                     recently_played = False
-                # When both release years are known, prevent a large era jump
-                # before score-based ranking. Missing years stay eligible and
-                # are handled by the other metadata/mood signals.
-                if (
-                    has_seed
-                    and seed_year
-                    and int(item.get("_era_delta", 0) or 0) > ERA_COMPATIBILITY_WINDOW_YEARS
-                ):
-                    continue
                 # Strict musical relevance gate. Artist, era or popularity
                 # alone can never pass; a candidate needs verified audio,
                 # matching intent, same album/cluster, or strong metadata

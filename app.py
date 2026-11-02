@@ -1235,16 +1235,12 @@ def build_jio_up_next(
             f"{seed_language} rock songs",
             f"{seed_language} ballads",
             f"{seed_language} classics",
-            f"{seed_language} 2000s songs",
-            f"{seed_language} 2010s songs",
-            f"{seed_language} 2020s songs",
         ])
     else:
         related_queries.extend(["pop songs", "rock songs", "chill songs", "classic songs"])
     # A sparse provider result must still produce a radio. This is especially
     # common for older international tracks whose artist catalogue is tiny.
     if len(search_results) < 5:
-        related_queries.extend(["80s pop songs", "classic pop songs", "dance pop songs"])
         # Discover fallback queries from the local audio model, not from a
         # hand-written genre list. This keeps sparse live searches honest.
         genre_catalog = catalog
