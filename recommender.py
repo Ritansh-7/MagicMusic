@@ -5,7 +5,7 @@ import re
 import numpy as np
 import pandas as pd
 
-HYBRID_MODEL_VERSION = "hybrid-v23-strict-decade"
+HYBRID_MODEL_VERSION = "hybrid-v24-era-mood-priority"
 
 EXCLUDED_RECOMMENDATION_TITLES = {"jo bhi kasmein"}
 
@@ -19,22 +19,29 @@ def _release_year(value: object) -> int:
 
 
 def _interleave_recommendation_contexts(items: list[dict], seed_year: int) -> list[dict]:
-    """Keep recommendations in the seed decade, then rank by taste and context."""
+    """Keep the seed decade and balance year closeness with mood relevance."""
     seed_decade = seed_year // 10 * 10 if seed_year else 0
 
-    def context_order(entry: tuple[int, dict]) -> tuple[float, float, float, int]:
+    def context_order(
+        entry: tuple[int, dict],
+    ) -> tuple[float, float, float, float, int]:
         index, item = entry
         taste = max(
             float(item.get("_listener_mood_match", 0.0) or 0.0),
             float(item.get("_audio_match", 0.0) or 0.0),
+            float(item.get("_mood_match", 0.0) or 0.0),
             float(item.get("_intent_match", 0.0) or 0.0),
             float(item.get("_short_term", 0.0) or 0.0),
             float(item.get("_medium_term", 0.0) or 0.0),
             float(item.get("_long_term", 0.0) or 0.0),
         )
+        era_mood = (
+            0.55 * float(item.get("_era_match", 0.0) or 0.0)
+            + 0.45 * taste
+        )
         artist = float(item.get("_seed_artist_match", 0.0) or 0.0)
         soundtrack = float(item.get("_album_match", 0.0) or 0.0)
-        return (-taste, -artist, -soundtrack, index)
+        return (-era_mood, -taste, -artist, -soundtrack, index)
 
     if not seed_decade:
         return items
@@ -897,9 +904,13 @@ class HybridRecommendationEngine:
                 (1.0 if value in artist else 0.0 for value in seed_artists),
                 default=0.0,
             )
-            album_match = 1.0 if seed_album and seed_album == str(item.get("album", "")).strip().lower() else 0.0
             item_year = _release_year(item.get("year"))
             era_delta = abs(seed_year - item_year) if seed_year and item_year else 0
+            album_match = float(
+                bool(seed_album)
+                and seed_album == str(item.get("album", "")).strip().lower()
+                and (not seed_year or not item_year or era_delta <= 3)
+            )
             era_match = (
                 float(np.exp(-((seed_year - item_year) / 18.0) ** 2))
                 if seed_year and item_year else 0.0
@@ -1097,14 +1108,14 @@ class HybridRecommendationEngine:
             hybrid = (
                 0.28 * audio_values
                 + 0.14 * metadata_values
-                + 0.07 * collaborative
+                + 0.05 * collaborative
                 + 0.04 * (0.60 * short_values + 0.40 * medium_values)
                 + 0.03 * np.asarray([item.get("_listener_mood_match", 0.0) for item in results])
                 + 0.03 * np.asarray([item.get("_listener_era_match", 0.0) for item in results])
                 + 0.07 * transition_values
                 + 0.16 * context_values
                 + 0.06 * artist_anchor_values
-                + 0.06 * era_values
+                + 0.08 * era_values
                 + 0.04 * mood_fallback_values
                 + 0.03 * intent_values
                 + 0.03 * bandit_values
@@ -1303,7 +1314,9 @@ class HybridRecommendationEngine:
                 "final_rank_score": chosen["final_rank_score"],
                 "context": round(float(chosen.get("_context_score", 0.0)), 4),
                 "current_artist": round(float(chosen.get("_seed_artist_match", 0.0)), 4),
+                "soundtrack": round(float(chosen.get("_album_match", 0.0)), 4),
                 "current_era": round(float(chosen.get("_era_match", 0.0)), 4),
+                "cluster": round(float(chosen.get("_cluster_match", 0.0)), 4),
                 "collaborative": round(float(chosen.get("_collaborative_score", 0.0)), 4),
                 "mood": round(float(chosen.get("_mood_match", 0.0)), 4),
                 "audio": round(float(chosen.get("_audio_match", 0.0)), 4),
@@ -1327,8 +1340,7 @@ class HybridRecommendationEngine:
             artist_counts[artist_key] = artist_counts.get(artist_key, 0) + 1
             album_counts[album_key] = album_counts.get(album_key, 0) + 1
 
-        # Give each recommendation context a predictable place in the mix:
-        # same era, listener taste, seed artist, then soundtrack.
+        # Keep year closeness and mood ahead of artist/soundtrack context.
         selected = _interleave_recommendation_contexts(selected, seed_year)
         for item in selected:
             item.pop("_context_score", None)

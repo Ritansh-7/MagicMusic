@@ -310,6 +310,77 @@ def test_context_priority_within_same_decade_is_taste_then_artist_then_film():
     assert [item["song_id"] for item in ordered] == ["taste", "artist", "film"]
 
 
+def test_context_priority_balances_era_and_mood_before_artist_or_soundtrack():
+    candidates = [
+        {
+            "song_id": "near-era-mood-match",
+            "year": 2014,
+            "_era_match": 0.95,
+            "_mood_match": 0.85,
+        },
+        {
+            "song_id": "artist-soundtrack-only",
+            "year": 2010,
+            "_era_match": 0.97,
+            "_mood_match": 0.10,
+            "_seed_artist_match": 1.0,
+            "_album_match": 1.0,
+        },
+        {
+            "song_id": "farther-era-mood-match",
+            "year": 2019,
+            "_era_match": 0.70,
+            "_mood_match": 0.75,
+        },
+    ]
+
+    ordered = _interleave_recommendation_contexts(candidates, 2013)
+
+    assert [item["song_id"] for item in ordered] == [
+        "near-era-mood-match",
+        "farther-era-mood-match",
+        "artist-soundtrack-only",
+    ]
+
+
+def test_same_album_name_with_distant_year_is_not_treated_as_soundtrack():
+    catalog = sample_data()
+    hybrid = HybridRecommendationEngine(SpotifyRecommendationEngine(catalog))
+    mood = [0.8, 0.65, 0.7, 0.75, 0.2, 0.1, 0.08, 0.2, 0.8]
+    ranked = hybrid.rank_jio_results(
+        [{
+            "song_id": "same-name-different-year",
+            "title": "Lootera",
+            "artists": "R Nait, Afsana Khan",
+            "album": "Lootera",
+            "year": 2019,
+            "language": "Hindi",
+            "mood_vector": mood,
+            "mood_confidence": 0.95,
+            "mood_source": "local_audio_catalog",
+            "intent_labels": ["romantic"],
+        }],
+        "era-user",
+        catalog,
+        [],
+        seed={
+            "title": "Sawaar Loon",
+            "artists": "Monali Thakur",
+            "album": "Lootera",
+            "year": 2013,
+            "language": "Hindi",
+            "mood_vector": mood,
+            "mood_confidence": 0.95,
+            "mood_source": "local_audio_catalog",
+            "intent_labels": ["romantic"],
+        },
+    )
+
+    assert len(ranked) == 1
+    assert ranked[0]["recommendation_features"]["soundtrack"] == 0.0
+    assert ranked[0]["recommendation_features"]["era"] > 0.0
+
+
 def test_ranker_excludes_blocked_title_and_other_decades_for_each_seed():
     catalog = sample_data()
     hybrid = HybridRecommendationEngine(SpotifyRecommendationEngine(catalog))
