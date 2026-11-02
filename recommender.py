@@ -1729,9 +1729,14 @@ class HybridRecommendationEngine:
                     # language, era, style, or metadata bridge instead of
                     # accepting arbitrary popularity.
                     relaxed_bridge = (
-                        float(item.get("_audio_match", 0.0)) >= 0.50
-                        or float(item.get("_mood_match", 0.0)) >= 0.58
-                        or float(item.get("_intent_match", 0.0)) >= 0.5
+                        float(item.get("_audio_match", 0.0)) >= 0.45
+                        or float(item.get("_mood_match", 0.0)) >= 0.45
+                        or float(item.get("_intent_match", 0.0)) >= 0.40
+                        or (
+                            float(item.get("_language_match", 0.0)) >= 1.0
+                            and float(item.get("_era_match", 0.0)) >= 0.40
+                            and not bool(item.get("_intent_conflict", False))
+                        )
                         or same_soundtrack
                     )
                     if not relaxed_bridge:

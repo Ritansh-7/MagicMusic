@@ -1473,6 +1473,60 @@ def build_jio_up_next(
                 ranked = relaxed_ranked
         except Exception:
             pass
+
+    # Ensure queue always contains 10+ (up to 30) songs:
+    # If the seed singer only has 1-2 matching tracks, discover more songs by
+    # OTHER artists from the EXACT same era and matching mood.
+    if len(ranked) < 15:
+        era_term = f"{(seed_year // 10) * 10}s" if seed_year else ""
+        lang_term = seed_language or "hindi"
+        seed_mood_labels = [l for l in seed.get("intent_labels", []) if l not in {"general", "neutral"}]
+        mood_str = seed_mood_labels[0] if seed_mood_labels else (
+            "romantic" if "romantic" in str(seed.get("mood_label", ""))
+            else "sad" if "sad" in str(seed.get("mood_label", ""))
+            else "energetic" if "energetic" in str(seed.get("mood_label", ""))
+            else "dance" if lang_term == "english"
+            else "hits"
+        )
+        expansion_queries = []
+        if era_term:
+            expansion_queries.extend([
+                f"{era_term} {lang_term} {mood_str} songs",
+                f"{era_term} {lang_term} {mood_str} hits",
+                f"{era_term} {lang_term} superhits",
+                f"best of {era_term} {lang_term}",
+                f"{era_term} {lang_term} top songs",
+                f"{era_term} {lang_term} trending songs",
+            ])
+            if lang_term == "english":
+                expansion_queries.extend([
+                    f"{era_term} dance hits",
+                    f"{era_term} pop hits",
+                    f"{era_term} club hits",
+                    f"{era_term} party hits",
+                ])
+        else:
+            expansion_queries.extend([
+                f"{lang_term} {mood_str} hits",
+                f"{lang_term} {mood_str} songs",
+                f"top {lang_term} {mood_str} songs",
+                f"{lang_term} superhits",
+            ])
+        collect_queries(expansion_queries, page_limit=30, max_queries=10, source="same_era_mood_artist_expansion")
+        enriched_collected = enrich_live_items(collected)
+        try:
+            expanded_ranked = hybrid.rank_jio_results(
+                enriched_collected,
+                user_id,
+                catalog,
+                preferred_track_ids,
+                seed=seed,
+                relaxed_context=True,
+            )
+            if len(expanded_ranked) > len(ranked):
+                ranked = expanded_ranked
+        except Exception:
+            pass
     st.session_state["jio_queue_status"] = {
         "seed": title,
         "candidates_retrieved": len(collected),
