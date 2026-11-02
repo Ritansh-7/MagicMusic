@@ -11,6 +11,7 @@ It is not Spotify's proprietary system. It is an explainable, deployable recomme
 - Shows live artwork, artist/album metadata and available audio previews.
 - Provides search, an in-page audio player, Like, Next, Loop and Refresh controls; playback advances automatically when a track ends.
 - Builds a separate personalized Up Next queue of up to 30 unique songs.
+- Balances recommendations approximately 50:50 between the seed song's lead singer and other artists when enough relevant candidates exist.
 - Searches for same-decade, language- and mood-matched songs from other performers, not just the current film or artist.
 - Learns from plays, likes, skips and listening progress.
 - Reduces repeated titles and consecutive artist/album repetition.

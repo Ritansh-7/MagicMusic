@@ -1094,9 +1094,72 @@ def test_radio_rotates_singers_while_preserving_seed_mood_and_era():
     top_eight_artists = [item["artists"] for item in ranked[:8]]
 
     assert len(set(top_eight_artists)) >= 5
-    assert top_eight_artists.count("Mukesh") <= 2
+    assert top_eight_artists.count("Mukesh") <= 4
     assert all(abs(int(item["year"]) - 1975) <= 15 for item in ranked[:8])
     assert all(item["recommendation_features"]["mood"] > 0.99 for item in ranked[:8])
+
+
+def test_full_recommendation_queue_balances_seed_singer_and_other_artists():
+    catalog = sample_data()
+    hybrid = HybridRecommendationEngine(SpotifyRecommendationEngine(catalog))
+    mood = [0.8, 0.65, 0.7, 0.75, 0.2, 0.1, 0.08, 0.2, 0.8]
+    seed = {
+        "title": "Mere Pyar Ki Umar Ho Itnee Sanam",
+        "artists": "Lata Mangeshkar, Manmohan Singh",
+        "album": "Waaris",
+        "year": 1987,
+        "language": "Hindi",
+        "mood_vector": mood,
+        "mood_label": "romantic",
+        "mood_confidence": 0.95,
+        "mood_source": "local_audio_catalog",
+        "intent_labels": ["romantic"],
+    }
+    candidates = [
+        {
+            "song_id": f"lata-{index}",
+            "title": f"Lata romantic song {index}",
+            "artists": f"Lata Mangeshkar, Collaborator {index}",
+            "album": f"Lata film {index}",
+            "year": 1985 + index % 5,
+            "language": "Hindi",
+            "mood_vector": mood,
+            "mood_label": "romantic",
+            "mood_confidence": 0.95,
+            "mood_source": "local_audio_catalog",
+            "intent_labels": ["romantic"],
+        }
+        for index in range(20)
+    ] + [
+        {
+            "song_id": f"other-{index}",
+            "title": f"Other singer romantic song {index}",
+            "artists": f"Other Singer {index}",
+            "album": f"Other film {index}",
+            "year": 1985 + index % 5,
+            "language": "Hindi",
+            "mood_vector": mood,
+            "mood_label": "romantic",
+            "mood_confidence": 0.95,
+            "mood_source": "local_audio_catalog",
+            "intent_labels": ["romantic"],
+        }
+        for index in range(20)
+    ]
+
+    ranked = hybrid.rank_jio_results(
+        candidates, "balanced-singer-user", catalog, [], seed=seed,
+    )
+    first_thirty = ranked[:30]
+    lata_count = sum(
+        "lata mangeshkar" in item["artists"].casefold()
+        for item in first_thirty
+    )
+
+    assert len(first_thirty) == 30
+    assert lata_count == 15
+    assert all(item["recommendation_features"]["mood"] > 0.99 for item in first_thirty)
+    assert all(abs(int(item["year"]) - 1987) <= 15 for item in first_thirty)
 
 
 def test_logged_impression_schema_is_read_by_ranker():

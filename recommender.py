@@ -5,7 +5,7 @@ import re
 import numpy as np
 import pandas as pd
 
-HYBRID_MODEL_VERSION = "hybrid-v30-compilation-era-radio"
+HYBRID_MODEL_VERSION = "hybrid-v31-seed-artist-balance"
 
 EXCLUDED_RECOMMENDATION_TITLES = {"jo bhi kasmein"}
 MAX_RECOMMENDATION_YEAR_DISTANCE = 15
@@ -266,6 +266,31 @@ def _prioritize_distinct_soundtracks(items: list[dict]) -> list[dict]:
             if work_key:
                 seen_work_keys.add(work_key)
     return unique + repeats
+
+
+def _balance_seed_artist_mix(items: list[dict], seed: dict | None) -> list[dict]:
+    """Interleave seed lead-artist tracks with relevant tracks by other artists."""
+    seed_artists = str((seed or {}).get("artists", "")).split(",")
+    lead_artist_keys = _artist_credit_keys(seed_artists[:1])
+    if not lead_artist_keys:
+        return items
+
+    lead_artist_items: list[dict] = []
+    other_artist_items: list[dict] = []
+    for item in items:
+        artists = _artist_credit_keys(item.get("artists", ""))
+        if lead_artist_keys.intersection(artists):
+            lead_artist_items.append(item)
+        else:
+            other_artist_items.append(item)
+
+    balanced: list[dict] = []
+    while lead_artist_items or other_artist_items:
+        if other_artist_items:
+            balanced.append(other_artist_items.pop(0))
+        if lead_artist_items:
+            balanced.append(lead_artist_items.pop(0))
+    return balanced
 
 
 def _metadata_feature_tokens(item: dict) -> dict[str, float]:
@@ -1496,6 +1521,13 @@ class HybridRecommendationEngine:
         selected: list[dict] = []
         artist_counts: dict[str, int] = {}
         album_counts: dict[str, int] = {}
+        seed_primary_artist_keys = _artist_credit_keys(
+            str((seed or {}).get("artists", "")).split(",")[:1]
+        )
+        seed_artist_repeat_limit = max(
+            MAX_ARTIST_REPEATS_IN_QUEUE,
+            int(np.ceil(min(len(results), 30) / 2)),
+        )
         remaining = ranked.copy()
         while remaining:
             eligible: list[tuple[int, float, float, float]] = []
@@ -1680,7 +1712,11 @@ class HybridRecommendationEngine:
                 candidate
                 for candidate in eligible
                 if all(
-                    artist_counts.get(artist, 0) < MAX_ARTIST_REPEATS_IN_QUEUE
+                    artist_counts.get(artist, 0) < (
+                        seed_artist_repeat_limit
+                        if artist in seed_primary_artist_keys
+                        else MAX_ARTIST_REPEATS_IN_QUEUE
+                    )
                     for artist in _artist_credit_keys(
                         remaining[candidate[0]][1].get("artists", "")
                     )
@@ -1746,6 +1782,7 @@ class HybridRecommendationEngine:
             include_unknown_year=True,
         )
         selected = _prioritize_distinct_soundtracks(selected)
+        selected = _balance_seed_artist_mix(selected, seed)
         for item in selected:
             item.pop("_context_score", None)
             item.pop("_profile_score", None)
