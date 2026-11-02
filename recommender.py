@@ -53,19 +53,48 @@ def _canonical_recording_key(item: dict) -> str:
     isrc = str(item.get("isrc") or "").strip().casefold()
     if isrc:
         return f"isrc:{isrc}"
-    title = str(item.get("title", "")).casefold()
-    title = re.sub(
-        r"\s*[-–—]\s*[^()]*\b(vocals?\s*only|instrumental|karaoke|radio edit)\b.*$",
-        " ", title,
-    )
-    title = re.sub(
-        r"\b(vocals?\s*only|instrumental|karaoke|remix|reprise|live|lofi|slowed|reverb|unplugged|version\s*\w*|radio edit)\b",
-        " ", title,
-    )
-    title = re.sub(r"\([^)]*\)|\[[^]]*\]", " ", title)
-    title = re.sub(r"[^a-z0-9]+", " ", title).strip()
+    title = recommendation_title_key(item.get("title", ""))
     artists = re.sub(r"[^a-z0-9]+", " ", str(item.get("artists", "")).casefold()).strip()
     return f"{title}|{artists}" if title else artists
+
+
+def recommendation_title_key(value: str) -> str:
+    """Normalize release annotations so alternate versions do not repeat in a queue."""
+    title = str(value).casefold()
+    def strip_release_annotation(match: re.Match[str]) -> str:
+        annotation = match.group(0)
+        if re.search(
+            r"\b(from|slowed|sped|nightcore|remix|reprise|live|instrumental|"
+            r"karaoke|radio edit|vocals?\s+only|version|remaster|feat\.?)\b",
+            annotation,
+        ):
+            return " "
+        return annotation
+
+    title = re.sub(r"\([^)]*\)|\[[^]]*\]", strip_release_annotation, title)
+    title = re.sub(
+        r"\s*[-–—]\s*[^()]*\b(vocals?\s+only|instrumental|karaoke|radio edit)\b.*$",
+        " ",
+        title,
+    )
+    title = re.sub(
+        r"(?:\s+[-–—]\s*|\s+)(slowed(?:\s+down)?|sped(?:\s+up)?|nightcore|"
+        r"remix|reprise|live|instrumental|karaoke|radio edit|"
+        r"vocals?\s+only|version)\b.*$",
+        " ",
+        title,
+    )
+    return re.sub(r"[^a-z0-9]+", " ", title).strip()
+
+
+def recommendation_history_keys(item: dict) -> set[str]:
+    """Build stable session exclusions, tolerating alternate artist credits."""
+    recording_key = _canonical_recording_key(item)
+    keys = {recording_key} if recording_key else set()
+    title_key = recommendation_title_key(item.get("title", ""))
+    if len(title_key.split()) >= 3:
+        keys.add(f"title:{title_key}")
+    return keys
 
 
 INTENT_KEYWORDS = {
@@ -1101,12 +1130,6 @@ class HybridRecommendationEngine:
                         or float(item.get("_style_match", 0.0)) >= 1.0
                         or float(item.get("_metadata_similarity", 0.0)) >= 0.15
                     )
-                    # The provider sometimes returns no singer, year, language,
-                    # or audio metadata for a perfectly valid live seed. The
-                    # bounded language/style discovery pool is still safer than
-                    # leaving the listener with an empty queue.
-                    if relaxed_context and str(item.get("candidate_source", "")).startswith(("seed_title_album_artist", "seed_artist_catalogue")):
-                        relaxed_bridge = True
                     if not relaxed_bridge:
                         continue
                 base_relevance = float(np.clip(base_score, 0.0, 1.0))

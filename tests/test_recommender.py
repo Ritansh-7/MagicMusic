@@ -2,7 +2,12 @@ import pandas as pd
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from recommender import SpotifyRecommendationEngine, _canonical_recording_key
+from recommender import (
+    SpotifyRecommendationEngine,
+    _canonical_recording_key,
+    recommendation_history_keys,
+    recommendation_title_key,
+)
 from ranking_model import _feature_row
 
 
@@ -59,8 +64,40 @@ def test_canonical_recording_key_collapses_release_versions():
     original = {"title": "Darkhaast", "artists": "Arijit Singh"}
     alternate = {"title": "Darkhaast (From 'Shivaay')", "artists": "Arijit Singh"}
     vocals = {"title": "Darkhaast - Arijit Singh Vocals Only", "artists": "Arijit Singh"}
+    slowed = {"title": "Snowman (Slowed Down)", "artists": "Sia"}
+    sped_up = {"title": "Snowman (Sped Up Version)", "artists": "Sia"}
     assert _canonical_recording_key(original) == _canonical_recording_key(alternate)
     assert _canonical_recording_key(original) == _canonical_recording_key(vocals)
+    assert _canonical_recording_key(slowed) == _canonical_recording_key(sped_up)
+    rihanna_stay = _canonical_recording_key({"title": "Stay", "artists": "Rihanna"})
+    justin_stay = _canonical_recording_key({"title": "Stay", "artists": "Justin Bieber"})
+    assert rihanna_stay != justin_stay
+
+
+def test_recommendation_title_key_collapses_slowed_and_sped_up_releases():
+    assert recommendation_title_key("Snowman (Slowed Down) (Slowed Down)") == "snowman"
+    assert recommendation_title_key("Snowman (Sped Up Version)") == "snowman"
+    assert recommendation_title_key("Song (Part 1)") != recommendation_title_key("Song (Part 2)")
+    assert recommendation_title_key("Live and Let Die") == "live and let die"
+
+
+def test_recommendation_history_matches_long_title_across_artist_credit_variants():
+    original = recommendation_history_keys({
+        "title": "Until I Found You",
+        "artists": "Stephen Sanchez",
+    })
+    alternate = recommendation_history_keys({
+        "title": "Until I Found You (Em Beihold Version)",
+        "artists": "Stephen Sanchez, Em Beihold",
+    })
+    assert original.intersection(alternate)
+    assert not recommendation_history_keys({
+        "title": "Stay",
+        "artists": "Rihanna",
+    }).intersection(recommendation_history_keys({
+        "title": "Stay",
+        "artists": "Justin Bieber",
+    }))
 
 
 def test_logged_impression_schema_is_read_by_ranker():

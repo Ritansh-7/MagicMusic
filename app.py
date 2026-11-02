@@ -14,7 +14,13 @@ import streamlit as st
 from sklearn.cluster import MiniBatchKMeans
 from sklearn.preprocessing import StandardScaler
 from jiosaavn_client import JioSaavnClient
-from recommender import HYBRID_MODEL_VERSION, HybridRecommendationEngine, SpotifyRecommendationEngine
+from recommender import (
+    HYBRID_MODEL_VERSION,
+    HybridRecommendationEngine,
+    SpotifyRecommendationEngine,
+    recommendation_history_keys as _recommendation_history_keys,
+    recommendation_title_key as _recommendation_title_key,
+)
 from spotify_api import SpotifyOAuth, new_oauth_state, verify_oauth_state
 from user_store import UserStore
 
@@ -72,41 +78,129 @@ export default function(component) {
 
 st.html("""
 <style>
- .stApp { background: linear-gradient(145deg, #0d1117 0%, #101820 55%, #171326 100%); }
- .block-container { max-width: 1240px; padding-top: .8rem; padding-bottom: 2.5rem; }
+:root {
+  color-scheme: dark;
+  --tm-ink: #f5f7ff;
+  --tm-muted: #a5b0c5;
+  --tm-line: rgba(174, 193, 230, .13);
+  --tm-surface: rgba(20, 25, 40, .78);
+  --tm-cyan: #7de8ff;
+  --tm-violet: #b89aff;
+  --tm-pink: #ff76c8;
+}
+.stApp {
+  color: var(--tm-ink);
+  background:
+    radial-gradient(ellipse at 82% 4%, rgba(119, 68, 196, .2), transparent 34rem),
+    radial-gradient(ellipse at 8% 23%, rgba(35, 155, 180, .14), transparent 34rem),
+    linear-gradient(150deg, #090b12 0%, #101321 52%, #11101b 100%);
+}
+.block-container { max-width: 1320px; padding: 1.15rem 2rem 3rem; }
 header[data-testid="stHeader"], [data-testid="stToolbar"] { background: transparent !important; }
 header[data-testid="stHeader"] { height: 2.5rem; }
 [data-testid="stDecoration"] { display: none; }
-[data-testid="stSidebar"] { background: linear-gradient(180deg, #12152a 0%, #0b1115 52%, #160d20 100%); border-right: 1px solid #3d4269; }
- [data-testid="stMetric"] { background: rgba(22, 31, 42, .82); border: 1px solid #29384a; padding: 12px; border-radius: 14px; }
-[data-testid="stMetricValue"] { color: #d9ffe9; }
- .stButton > button, .stLinkButton > a { border-radius: 999px; border: 1px solid #34475d; background: #172333; transition: border-color .15s ease, transform .15s ease; }
- .stButton > button:hover, .stLinkButton > a:hover { border-color: #70e1ff; color: #ffffff; transform: translateY(-1px); }
- [data-testid="stVerticalBlockBorderWrapper"] { border-color: #29384a; border-radius: 16px; background: rgba(17, 25, 36, .74); }
-[data-testid="stImage"] img { border-radius: 14px; }
-.stTextInput input, .stMultiSelect div[data-baseweb="select"] { border-radius: 12px; }
-[data-testid="stTextInputRootElement"] { border: 1px solid #3e6a66; border-radius: 14px; background: rgba(11,20,24,.75); }
-[data-testid="stTextInputRootElement"]:focus-within { border-color: #ff4fd8; box-shadow: 0 0 0 3px rgba(255,79,216,.14); }
-.shelf-title { color: #f4f7f5; font-size: 1.35rem; font-weight: 800; margin: 1.35rem 0 .4rem; letter-spacing: -.02em; }
-.shelf-subtitle { color: #a8c7d0; margin-bottom: .8rem; }
- .hero-panel { padding: 1.2rem 1.35rem; border-radius: 20px; border: 1px solid #2d4259; background: rgba(20, 30, 43, .72); }
- .hero-title { font-size: clamp(2rem, 4vw, 3.5rem); line-height: .95; font-weight: 850; letter-spacing: -.06em; background: linear-gradient(100deg, #ffffff 0%, #8cecff 48%, #d3a8ff 90%); -webkit-background-clip: text; background-clip: text; color: transparent; }
-.hero-copy { color: #b6d3d1; font-size: 1.05rem; max-width: 760px; margin-top: .65rem; }
-.hero-chip { display: inline-block; margin: .95rem .45rem 0 0; padding: .32rem .72rem; border-radius: 999px; color: #eafff3; background: rgba(30,215,96,.12); border: 1px solid rgba(183,255,74,.32); font-size: .82rem; }
-.hero-chip:nth-child(2) { background: rgba(255,79,216,.12); border-color: rgba(255,79,216,.35); }
-.hero-chip:nth-child(3) { background: rgba(84,229,255,.1); border-color: rgba(84,229,255,.32); }
-.recommendation-banner { padding: 1rem 1.15rem; border-radius: 20px; border: 1px solid #5b4779; background: linear-gradient(110deg, rgba(44,29,68,.9), rgba(16,42,39,.82)); margin: .5rem 0 1rem; }
-.recommendation-kicker { color: #ff8cec; font-size: .76rem; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
-.recommendation-title { color: #f4f7f5; font-size: 1.35rem; font-weight: 850; margin-top: .2rem; }
-.recommendation-meta { color: #b6d3d1; font-size: .9rem; }
-.recommendation-reason { color: #d8c8ff; font-size: .84rem; }
- .feedback-card { padding: .8rem; border: 1px solid #34475d; border-radius: 16px; background: rgba(22, 31, 42, .86); }
- .feedback-title { color: #8cecff; font-size: .76rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
-@media (max-width: 760px) { .block-container { padding: 1rem .7rem 3rem; } }
+[data-testid="stSidebar"] {
+  background: linear-gradient(180deg, rgba(19, 22, 38, .98), rgba(11, 14, 23, .98));
+  border-right: 1px solid var(--tm-line);
+}
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p { color: var(--tm-muted); }
+[data-testid="stMetric"] {
+  background: linear-gradient(145deg, rgba(28, 35, 54, .9), rgba(17, 21, 34, .9));
+  border: 1px solid var(--tm-line); padding: 14px; border-radius: 18px;
+}
+[data-testid="stMetricLabel"] { color: var(--tm-muted); }
+[data-testid="stMetricValue"] { color: #e9faff; }
+.stButton > button, .stLinkButton > a {
+  min-height: 2.65rem; border-radius: 999px; border: 1px solid var(--tm-line);
+  background: linear-gradient(135deg, rgba(47, 57, 82, .9), rgba(27, 31, 48, .92));
+  color: var(--tm-ink); font-weight: 650;
+  transition: border-color .16s ease, transform .16s ease, box-shadow .16s ease;
+}
+.stButton > button:hover, .stLinkButton > a:hover {
+  border-color: rgba(125, 232, 255, .65); color: white; transform: translateY(-2px);
+  box-shadow: 0 9px 24px rgba(0, 0, 0, .24);
+}
+[data-testid="stVerticalBlockBorderWrapper"] {
+  border-color: var(--tm-line); border-radius: 20px;
+  background: linear-gradient(145deg, rgba(25, 30, 46, .84), rgba(15, 19, 31, .88));
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .12);
+  transition: border-color .18s ease, transform .18s ease, background .18s ease;
+}
+[data-testid="stVerticalBlockBorderWrapper"]:hover {
+  border-color: rgba(184, 154, 255, .38);
+  transform: translateY(-2px);
+}
+[data-testid="stImage"] img {
+  border-radius: 15px; object-fit: cover; box-shadow: 0 12px 26px rgba(0, 0, 0, .2);
+}
+.stTextInput input, .stMultiSelect div[data-baseweb="select"] { border-radius: 14px; }
+[data-testid="stTextInputRootElement"] {
+  min-height: 3.1rem; border: 1px solid rgba(125, 232, 255, .22);
+  border-radius: 16px; background: rgba(12, 16, 27, .88);
+}
+[data-testid="stTextInputRootElement"]:focus-within {
+  border-color: var(--tm-cyan); box-shadow: 0 0 0 3px rgba(125, 232, 255, .12);
+}
+[data-testid="stForm"] {
+  padding: .7rem; border: 1px solid var(--tm-line); border-radius: 22px;
+  background: rgba(17, 21, 34, .72); box-shadow: 0 15px 40px rgba(0, 0, 0, .16);
+}
+[data-baseweb="tab-list"] { gap: .45rem; border-bottom: 1px solid var(--tm-line); }
+[data-baseweb="tab"] { border-radius: 12px 12px 0 0; color: var(--tm-muted); }
+[data-baseweb="tab"][aria-selected="true"] { color: var(--tm-cyan); }
+[data-testid="stExpander"] {
+  border: 1px solid var(--tm-line); border-radius: 18px; background: rgba(16, 20, 32, .62);
+}
+audio { width: 100%; min-height: 46px; accent-color: var(--tm-cyan); }
+.shelf-title { color: var(--tm-ink); font-size: 1.55rem; font-weight: 820; margin: 1.55rem 0 .3rem; letter-spacing: -.035em; }
+.shelf-subtitle { color: var(--tm-muted); margin-bottom: .9rem; font-size: .92rem; }
+.welcome-title { color: var(--tm-ink); font-size: clamp(1.65rem, 3vw, 2.25rem); font-weight: 850; letter-spacing: -.045em; margin: 1.35rem 0 .18rem; }
+.welcome-copy { color: var(--tm-muted); margin-bottom: 1rem; }
+.hero-panel {
+  position: relative; overflow: hidden; padding: clamp(1.4rem, 4vw, 2.5rem);
+  border-radius: 28px; border: 1px solid rgba(184, 154, 255, .2);
+  background:
+    radial-gradient(ellipse at 90% 15%, rgba(255, 118, 200, .22), transparent 24rem),
+    radial-gradient(ellipse at 62% 100%, rgba(76, 222, 255, .16), transparent 28rem),
+    linear-gradient(118deg, rgba(27, 31, 52, .98), rgba(19, 25, 42, .9) 54%, rgba(29, 22, 43, .94));
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .25);
+}
+.hero-title {
+  font-size: clamp(2.2rem, 5vw, 4.2rem); line-height: .98; font-weight: 900;
+  letter-spacing: -.065em; background: linear-gradient(100deg, #fff 5%, #a4f1ff 49%, #e0b2ff 88%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.hero-copy { color: #c0c9db; font-size: clamp(.98rem, 1.4vw, 1.12rem); max-width: 720px; margin-top: .8rem; }
+.hero-chip {
+  display: inline-flex; margin: 1.15rem .5rem 0 0; padding: .4rem .8rem;
+  border-radius: 999px; color: #e8fbff; background: rgba(125, 232, 255, .08);
+  border: 1px solid rgba(125, 232, 255, .2); font-size: .8rem; font-weight: 650;
+}
+.hero-chip:nth-child(4) { background: rgba(255, 118, 200, .08); border-color: rgba(255, 118, 200, .2); }
+.hero-chip:nth-child(5) { background: rgba(184, 154, 255, .09); border-color: rgba(184, 154, 255, .22); }
+.recommendation-banner {
+  padding: 1.25rem; border-radius: 22px; border: 1px solid rgba(184, 154, 255, .28);
+  background: linear-gradient(112deg, rgba(40, 31, 63, .95), rgba(19, 43, 51, .9));
+  margin: .55rem 0 1rem; box-shadow: 0 16px 38px rgba(0, 0, 0, .2);
+}
+.recommendation-kicker { color: var(--tm-pink); font-size: .74rem; font-weight: 800; letter-spacing: .13em; text-transform: uppercase; }
+.recommendation-title { color: var(--tm-ink); font-size: 1.45rem; font-weight: 850; margin-top: .25rem; letter-spacing: -.025em; }
+.recommendation-meta { color: #c0c9db; font-size: .9rem; }
+.recommendation-reason { color: #d5c7ff; font-size: .84rem; margin-top: .2rem; }
+.feedback-card { padding: .85rem; border: 1px solid var(--tm-line); border-radius: 18px; background: rgba(22, 27, 42, .88); }
+.feedback-title { color: var(--tm-cyan); font-size: .74rem; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
+@media (max-width: 760px) {
+  .block-container { padding: .8rem .7rem 2.3rem; }
+  .hero-panel { border-radius: 21px; }
+  .shelf-title { font-size: 1.32rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
+}
 </style>
 """)
 
-st.markdown('''<div class="hero-panel"><div class="hero-title">🎧 TuneMatch</div><div class="hero-copy">Your live, mood-aware music universe—personalized by every play, like and skip.</div><span class="hero-chip">✦ Fresh for you</span><span class="hero-chip">◉ Mood-aware</span><span class="hero-chip">⚡ Live discovery</span></div>''', unsafe_allow_html=True)
+st.markdown('''<div class="hero-panel"><div class="hero-title">TuneMatch</div><div class="hero-copy">Your next favorite is one play away. Discover a mix that moves with you.</div><span class="hero-chip">✦ Made for your mood</span><span class="hero-chip">◉ Your sound, evolving</span><span class="hero-chip">⚡ Live discovery</span></div>''', unsafe_allow_html=True)
 
 DATA_PATH = Path(__file__).parent / "spotify_tracks_data.csv"
 EVENT_DB_PATH = Path(__file__).parent / "tune_match_events.sqlite3"
@@ -224,18 +318,6 @@ def build_catalog_clusters(data: pd.DataFrame) -> tuple[pd.DataFrame, StandardSc
 
 def _compact_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
-
-
-def _recommendation_title_key(value: str) -> str:
-    """Collapse release/version suffixes for visible queue deduplication."""
-    key = _compact_key(value)
-    key = re.sub(
-        r"\b(from|version|soundtrack|original motion picture soundtrack|"
-        r"jhankar beats|remix|reprise|live|instrumental|karaoke|vocals only)\b.*$",
-        " ",
-        key,
-    )
-    return re.sub(r"\s+", " ", key).strip()
 
 
 def _visible_recording_key(item: dict) -> str:
@@ -608,6 +690,12 @@ if st.session_state.get("jio_queue_model_version") != HYBRID_MODEL_VERSION:
 if "jio_queue_index" in st.session_state:
     st.session_state.pop("jio_queue", None)
     st.session_state.pop("jio_queue_index", None)
+recommendation_history = st.session_state.setdefault("jio_recommendation_history", set())
+if not isinstance(recommendation_history, set):
+    recommendation_history = set(recommendation_history)
+    st.session_state["jio_recommendation_history"] = recommendation_history
+for queued_item in st.session_state.get("jio_queue", []):
+    recommendation_history.update(_recommendation_history_keys(queued_item))
 
 
 def refresh_hybrid_model(force: bool = False) -> None:
@@ -1028,7 +1116,7 @@ def build_jio_up_next(
     user_id: str,
     catalog: pd.DataFrame,
     preferred_track_ids: list[str],
-    limit: int = 70,
+    limit: int = 30,
     exclude_items: list[dict] | None = None,
 ) -> list[dict]:
     """Build a separate recommendation queue; never reuse search results."""
@@ -1122,6 +1210,22 @@ def build_jio_up_next(
         ])
     else:
         related_queries.extend(["pop songs", "rock songs", "chill songs", "classic songs"])
+    # A sparse provider result must still produce a radio. This is especially
+    # common for older international tracks whose artist catalogue is tiny.
+    if len(search_results) < 5:
+        related_queries.extend(["80s pop songs", "classic pop songs", "dance pop songs"])
+        # Discover fallback queries from the local audio model, not from a
+        # hand-written genre list. This keeps sparse live searches honest.
+        genre_catalog = catalog
+        seed_cluster = seed.get("cluster_id")
+        if seed_cluster is not None and "cluster_id" in catalog.columns:
+            same_cluster = catalog[catalog["cluster_id"] == seed_cluster]
+            if not same_cluster.empty:
+                genre_catalog = same_cluster
+        genres = genre_catalog.get("track_genre", pd.Series(dtype=str)).dropna().astype(str)
+        if genres.size:
+            for genre in genres.value_counts().head(3).index:
+                related_queries.append(f"{genre.split(',')[0].strip()} songs")
     try:
         seed_year = int(str(seed.get("year", ""))[:4])
     except ValueError:
@@ -1146,6 +1250,32 @@ def build_jio_up_next(
         if year_votes:
             seed_year = int(np.median(year_votes))
             seed["year"] = seed_year
+    refresh_round = int(st.session_state.get("recommendation_refresh_round", 0) or 0)
+    decade_query = f"{(seed_year // 10) * 10}s" if seed_year else ""
+    language_query = seed_language or "pop"
+    title_variants = [
+        [
+            f"songs like {title}",
+            f"{artist_names[0]} similar artists songs" if artist_names else "",
+        ],
+        [
+            f"similar to {title}",
+            f"{decade_query} {language_query} hits" if decade_query else f"{language_query} indie pop songs",
+        ],
+        [
+            f"{title} similar songs",
+            f"{language_query} acoustic pop songs",
+        ],
+        [
+            f"radio for {title}",
+            f"{artist_names[0]} essentials" if artist_names else f"{language_query} feel good songs",
+        ],
+    ]
+    prioritized_queries = (
+        related_queries[:3]
+        + title_variants[refresh_round % len(title_variants)]
+        + related_queries[3:]
+    )
     # Recommendation ranking still uses search-shelf candidates plus a short
     # seed/artist/album page. Extra era/intent/audio-neighbour queries were
     # dropped so this path uses fewer upstream tokens.
@@ -1155,23 +1285,39 @@ def build_jio_up_next(
     ranking_error = ""
     ranking_error_detail = ""
     seen: set[str] = set()
-    normalize_title = lambda value: re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
     # Search results are valid radio candidates (especially same-album songs).
     # Exclude only the current seed and explicit old-queue items; excluding the
     # entire search shelf was the reason small searches produced empty queues.
     search_ids: set[str] = set()
-    search_titles: set[str] = set()
+    seen_recommendation_keys = st.session_state.setdefault(
+        "jio_recommendation_history", set()
+    )
+    if not isinstance(seen_recommendation_keys, set):
+        seen_recommendation_keys = set(seen_recommendation_keys)
+        st.session_state["jio_recommendation_history"] = seen_recommendation_keys
+    for previous_item in [seed, *(exclude_items or [])]:
+        seen_recommendation_keys.update(_recommendation_history_keys(previous_item))
+    search_titles = {_recommendation_title_key(seed.get("title", ""))}
     for item in [seed, *(exclude_items or [])]:
         search_ids.add(str(item.get("song_id") or item.get("title", "")))
-        search_titles.add(normalize_title(item.get("title", "")))
     def collect_items(items: list[dict], source: str = "metadata_discovery") -> None:
         for item in items:
             key = str(item.get("song_id") or item.get("title", ""))
-            title_key = normalize_title(item.get("title", ""))
-            if not key or not title_key or key in seen or key in search_ids or title_key in search_titles:
+            title_key = _recommendation_title_key(item.get("title", ""))
+            identity_keys = _recommendation_history_keys(item)
+            if (
+                not key
+                or not title_key
+                or not identity_keys
+                or key in seen
+                or identity_keys.intersection(seen_recommendation_keys)
+                or identity_keys.intersection(seen)
+                or key in search_ids
+                or title_key in search_titles
+            ):
                 continue
             seen.add(key)
-            seen.add(title_key)
+            seen.update(identity_keys)
             item.setdefault("candidate_source", source)
             collected.append(item)
 
@@ -1198,7 +1344,7 @@ def build_jio_up_next(
         [dict(item) for item in search_results if isinstance(item, dict)],
         source="seed_search_results",
     )
-    collect_queries(related_queries, page_limit=20, max_queries=12, source="seed_title_album_artist")
+    collect_queries(prioritized_queries, page_limit=30, max_queries=20, source="seed_title_album_artist")
     # Artist radio needs the provider's expanded catalogue endpoint. The
     # narrow direct query often returns only one or two Coldplay recordings;
     # this extra artist-only fetch stays inside the recommendation pipeline,
@@ -1240,26 +1386,6 @@ def build_jio_up_next(
                 ranked = relaxed_ranked
         except Exception:
             pass
-    if not ranked:
-        seed_artists = {
-            _compact_key(part)
-            for part in str(seed.get("artists", "")).split(",")
-            if _compact_key(part)
-        }
-        seed_album = _compact_key(seed.get("album", ""))
-        same_entity = []
-        for item in enriched_collected:
-            item_artists = {
-                _compact_key(part)
-                for part in str(item.get("artists", "")).split(",")
-                if _compact_key(part)
-            }
-            item_album = _compact_key(item.get("album", ""))
-            if seed_artists.intersection(item_artists) or (seed_album and item_album == seed_album):
-                item.setdefault("recommendation_reason", "Same artist or soundtrack")
-                same_entity.append(item)
-        ranked = same_entity
-
     st.session_state["jio_queue_status"] = {
         "seed": title,
         "candidates_retrieved": len(collected),
@@ -1276,13 +1402,18 @@ def build_jio_up_next(
         # The caller can show a shorter/empty radio instead.
         return []
     unique: list[dict] = []
-    used_titles: set[str] = set()
+    used_recordings: set[str] = set()
     for item in ranked:
-        title_key = _recommendation_title_key(item.get("title", ""))
-        if title_key and title_key not in used_titles:
-            used_titles.add(title_key)
+        identity_keys = _recommendation_history_keys(item)
+        if identity_keys and not identity_keys.intersection(used_recordings):
+            used_recordings.update(identity_keys)
             unique.append(item)
     queue = unique[:limit]
+    seen_recommendation_keys.update(
+        identity_key
+        for item in queue
+        for identity_key in _recommendation_history_keys(item)
+    )
     for position, item in enumerate(queue, start=1):
         item["recommendation_rank"] = position
         item.setdefault("recommendation_source", item.get("candidate_source", "current_track_radio"))
@@ -1655,8 +1786,11 @@ if st.session_state.get("local_is_admin", False):
         render_admin_dashboard()
         st.stop()
 
-st.markdown(f"## Good evening, listener")
-st.caption("Your recommendations are ready. Search only when you want something specific.")
+st.markdown(
+    "<div class='welcome-title'>Good evening, listener</div>"
+    "<div class='welcome-copy'>Press play, follow a feeling, and let your next favorite find you.</div>",
+    unsafe_allow_html=True,
+)
 
 st.session_state.setdefault("active_search_query", "")
 with st.form("global_search_form", border=False):
@@ -1736,11 +1870,24 @@ def _recommendation_feedback(track_id: str, section: str, rating: str) -> None:
     st.toast("Got it — your dashboard will learn from this")
 
 
+def _set_dashboard_browse_page(widget_key: str, page: int) -> None:
+    st.session_state[widget_key] = page
+
+
 def render_dashboard_shelf(language: str, tracks: pd.DataFrame) -> None:
     page_key = f"dashboard_page_{language}"
+    browse_key = f"dashboard_browse_{language}"
     page_size = 12
     page_count = max(1, int(np.ceil(len(tracks) / page_size)))
-    page = min(int(st.session_state.get(page_key, 0)), page_count - 1)
+    if browse_key not in st.session_state:
+        initial_page = int(st.session_state.get(page_key, 0)) + 1
+        st.session_state[browse_key] = min(max(initial_page, 1), page_count)
+    else:
+        st.session_state[browse_key] = min(
+            max(int(st.session_state[browse_key]), 1),
+            page_count,
+        )
+    page = int(st.session_state[browse_key]) - 1
     st.session_state[page_key] = page
     start = page * page_size
     visible = tracks.iloc[start:start + page_size]
@@ -1749,15 +1896,12 @@ def render_dashboard_shelf(language: str, tracks: pd.DataFrame) -> None:
         f"<div class='shelf-subtitle'>100+ personalized picks · showing {start + 1}–{start + len(visible)} of {len(tracks)}</div>",
         unsafe_allow_html=True,
     )
-    browse_page = st.selectbox(
+    st.selectbox(
         "Jump to page",
         list(range(1, page_count + 1)),
         index=page,
-        key=f"dashboard_browse_{language}",
+        key=browse_key,
     )
-    if browse_page - 1 != page:
-        st.session_state[page_key] = browse_page - 1
-        st.rerun()
     poster_records = tuple(
         (
             str(row.get("track_id", "")),
@@ -1801,17 +1945,25 @@ def render_dashboard_shelf(language: str, tracks: pd.DataFrame) -> None:
                     _recommendation_feedback(feedback_key, language, "bad")
     prev_col, page_col, next_col = st.columns([1, 2, 1])
     with prev_col:
-        if st.button("← Previous", key=f"dash_prev_{language}", disabled=page <= 0, width="stretch"):
-            st.session_state[page_key] = page - 1
-            st.session_state[f"dashboard_browse_{language}"] = page
-            st.rerun()
+        st.button(
+            "← Previous",
+            key=f"dash_prev_{language}",
+            disabled=page <= 0,
+            width="stretch",
+            on_click=_set_dashboard_browse_page,
+            args=(browse_key, page),
+        )
     with page_col:
         st.caption(f"Page {page + 1} of {page_count}", text_alignment="center")
     with next_col:
-        if st.button("Next →", key=f"dash_next_{language}", disabled=page >= page_count - 1, width="stretch"):
-            st.session_state[page_key] = page + 1
-            st.session_state[f"dashboard_browse_{language}"] = page + 2
-            st.rerun()
+        st.button(
+            "Next →",
+            key=f"dash_next_{language}",
+            disabled=page >= page_count - 1,
+            width="stretch",
+            on_click=_set_dashboard_browse_page,
+            args=(browse_key, page + 2),
+        )
 
 
 dashboard_profile = engine.build_user_profile(
@@ -2180,11 +2332,11 @@ if jio_now:
         st.toggle("Loop", key="jio_loop")
     raw_up_next = st.session_state.get("jio_queue", [])
     up_next = []
-    seen_up_next_titles: set[str] = set()
+    seen_up_next_recordings: set[str] = set()
     for item in raw_up_next:
-        title_key = _recommendation_title_key(item.get("title", ""))
-        if title_key and title_key not in seen_up_next_titles:
-            seen_up_next_titles.add(title_key)
+        identity_keys = _recommendation_history_keys(item)
+        if identity_keys and not identity_keys.intersection(seen_up_next_recordings):
+            seen_up_next_recordings.update(identity_keys)
             up_next.append(item)
     st.session_state["jio_queue"] = up_next
     if up_next:
@@ -2234,7 +2386,7 @@ if jio_now:
                 refresh_hybrid_model(force=True)
                 try:
                     candidate_pool = [*old_queue, *(jio_results if search_query else [])]
-                    st.session_state["jio_queue"] = build_jio_up_next(featured, candidate_pool, jio_client, hybrid_engine, local_user_id, data, preferred_track_ids, exclude_items=[featured])
+                    st.session_state["jio_queue"] = build_jio_up_next(featured, candidate_pool, jio_client, hybrid_engine, local_user_id, data, preferred_track_ids, exclude_items=old_queue)
                     current_seed_id = str(featured.get("song_id") or featured.get("title", ""))
                     st.session_state["jio_queue_seed_id"] = current_seed_id
                     st.session_state["jio_queue_attempted_id"] = current_seed_id
@@ -2300,7 +2452,7 @@ if jio_now:
                                     local_user_id,
                                     data,
                                     preferred_track_ids,
-                                    exclude_items=[item],
+                                    exclude_items=old_queue,
                                 )
                                 current_seed_id = str(item.get("song_id") or item.get("title", ""))
                                 st.session_state["jio_queue_seed_id"] = current_seed_id
@@ -2315,8 +2467,13 @@ if jio_now:
                         if rec_no.button("No", key=f"upnext_no_{index}_{rec_feedback_id}", width="stretch"):
                             _recommendation_feedback(rec_feedback_id, "up_next", "bad")
     else:
-        st.caption("No more personalized recommendations in this queue.")
         status = st.session_state.get("jio_queue_status", {})
+        if status.get("refresh_error"):
+            st.error(f"Recommendation refresh failed: {status['refresh_error']}")
+        st.info(
+            "You’ve reached the fresh picks for this song in this session. "
+            "Play a different song to get a new, relevant mix — we won’t pad it with repeats."
+        )
         if status:
             with st.expander("Recommendation diagnostics"):
                 st.write({
@@ -2350,6 +2507,9 @@ if jio_now:
         )
     if st.button("↻ Refresh recommendations", key="refresh_recommendations"):
         refresh_hybrid_model(force=True)
+        st.session_state["recommendation_refresh_round"] = (
+            int(st.session_state.get("recommendation_refresh_round", 0) or 0) + 1
+        )
         cached_results = st.session_state.get("jio_search_cache_v4", {}).get(search_query.strip().lower(), [])
         existing_queue = list(st.session_state.get("jio_queue", []))
         candidate_pool = [*existing_queue, *cached_results]
@@ -2370,8 +2530,12 @@ if jio_now:
             # Never put the old queue back after a refresh: that makes the
             # button look broken and repeatedly surfaces the same first song.
             st.session_state["jio_queue"] = refreshed_queue
-        except Exception:
+            st.session_state.get("jio_queue_status", {}).pop("refresh_error", None)
+        except Exception as exc:
             st.session_state["jio_queue"] = []
+            st.session_state.setdefault("jio_queue_status", {})["refresh_error"] = (
+                f"{type(exc).__name__}: {exc}"
+            )
         st.session_state["jio_queue_seed_id"] = current_seed_id
         st.session_state["jio_queue_attempted_id"] = current_seed_id
         st.rerun()
