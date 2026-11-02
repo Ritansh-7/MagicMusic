@@ -21,6 +21,7 @@ from recommender import (
     recommendation_history_keys as _recommendation_history_keys,
     recommendation_title_key as _recommendation_title_key,
 )
+from search_ranking import prioritize_title_matches, title_query_match_score
 from spotify_api import SpotifyOAuth, new_oauth_state, verify_oauth_state
 from user_store import UserStore
 
@@ -659,10 +660,10 @@ st.session_state.setdefault("jio_search_cache_v4", {})
 st.session_state.pop("jio_search_cache_v3", None)
 st.session_state.pop("jio_search_cache_v2", None)
 # Invalidate shelves created before the full artist/film catalogue policy.
-if st.session_state.get("jio_search_cache_policy") != "filtered-recordings-v5":
+if st.session_state.get("jio_search_cache_policy") != "filtered-recordings-v6-title-priority":
     st.session_state.pop("jio_search_cache_v4", None)
     st.session_state["jio_search_cache_v4"] = {}
-    st.session_state["jio_search_cache_policy"] = "filtered-recordings-v5"
+    st.session_state["jio_search_cache_policy"] = "filtered-recordings-v6-title-priority"
 st.session_state.setdefault("jio_loop", False)
 st.session_state.setdefault("scroll_to_player", False)
 st.session_state.setdefault("jio_queue_refill_attempted_id", "")
@@ -924,6 +925,9 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
     }
     language_terms = {"hindi", "tamil", "telugu", "punjabi", "bengali", "marathi", "malayalam", "kannada"}
     query_languages = query_tokens.intersection(language_terms)
+    meaningful_query_text = " ".join(
+        token for token in query_key.split() if token not in generic_terms
+    ) or query_key
 
     def score(item: dict) -> tuple[float, int]:
         title = _compact_key(item.get("title", ""))
@@ -940,15 +944,23 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
             " ",
             title,
         ).strip()
-        exact_title = float(title == query_key or base_title == query_key)
-        title_match = float(query_key in title or query_tokens.issubset(title_tokens))
+        title_score = title_query_match_score(title, meaningful_query_text)
+        exact_title = float(
+            title == query_key
+            or base_title == query_key
+            or title_score >= 0.92
+        )
+        title_match = float(title_score >= 0.82)
         album_exact = float(album == query_key)
         album_match = float(query_key in album or query_tokens.issubset(set(album.split())))
         entity_title_match = float(
             query_key in title and any(marker in title for marker in ("from", "title track", "soundtrack"))
         )
         artist_match = float(query_key in artists)
-        cast_match = float(query_key in starring or (meaningful_query and meaningful_query.issubset(set(starring.split()))))
+        cast_match = float(
+            query_key in starring
+            or (meaningful_query and meaningful_query.issubset(set(starring.split())))
+        )
         language = str(item.get("language", "")).lower()
         variant_penalty = 0.0
         if not query_languages and any(term in title_tokens for term in language_terms):
@@ -972,7 +984,7 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
         artists = _compact_key(item.get("artists", ""))
         starring = _compact_key(item.get("starring", ""))
         meaningful = query_tokens - generic_terms
-        title_hit = bool(query_key in title or (meaningful and meaningful.issubset(set(title.split()))))
+        title_hit = title_query_match_score(title, meaningful_query_text) >= 0.82
         artist_hit = bool(query_key in artists or (meaningful and meaningful.issubset(set(artists.split()))))
         album_hit = bool(query_key in album or (meaningful and meaningful.issubset(set(album.split()))))
         cast_hit = bool(query_key in starring or (meaningful and meaningful.issubset(set(starring.split()))))
@@ -1108,6 +1120,14 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
         )
     ]
     ordered = ordered_primary + ordered_related
+    title_matches = [
+        item for item in results
+        if title_query_match_score(item.get("title", ""), meaningful_query_text) >= 0.82
+    ]
+    ordered = prioritize_title_matches(
+        [*title_matches, *ordered],
+        meaningful_query_text,
+    )
     unique: list[dict] = []
     seen: set[str] = set()
     for item in ordered:
