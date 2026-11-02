@@ -248,6 +248,114 @@ def test_recommendation_reasons_do_not_claim_metadata_mood_is_verified_audio():
     )
 
 
+def test_low_confidence_mood_seeds_get_same_language_era_fallbacks_across_genres():
+    catalog = sample_data()
+    mood = [0.5, 0.5, 0.5, 0.5, 0.4, 0.15, 0.1, 0.2, 0.8]
+    intents = [
+        "romantic", "sad", "energetic", "playful", "devotional",
+        "ghazal", "acoustic_indie", "rap_hiphop", "calm", "instrumental",
+        "motivational",
+    ]
+
+    for intent in intents:
+        hybrid = HybridRecommendationEngine(SpotifyRecommendationEngine(catalog))
+        seed = {
+            "title": f"{intent} seed",
+            "artists": "Seed Singer",
+            "album": "Seed Film",
+            "year": 1987,
+            "language": "Hindi",
+            "intent_labels": [intent],
+            "mood_vector": mood,
+            "mood_label": intent,
+            "mood_confidence": 0.58,
+            "mood_source": "metadata_fallback",
+        }
+        candidates = [
+            {
+                "song_id": f"{intent}-{index}",
+                "title": f"Unknown-vibe song {index}",
+                "artists": f"Other Singer {index}",
+                "album": f"Other Film {index}",
+                "year": 1985 + index % 5,
+                "language": "Hindi",
+                "intent_labels": ["general"],
+                "mood_vector": mood,
+                "mood_label": "neutral",
+                "mood_confidence": 0.22,
+                "mood_source": "metadata_fallback",
+            }
+            for index in range(20)
+        ]
+        if intent == "sad":
+            candidates.append({
+                **candidates[0],
+                "song_id": "explicit-conflicting-mood",
+                "title": "Happy party song",
+                "intent_labels": ["energetic"],
+            })
+
+        ranked = hybrid.rank_jio_results(
+            candidates, f"unknown-mood-{intent}", catalog, [], seed=seed,
+        )
+
+        assert len(ranked) == 20, intent
+        assert all(
+            item["recommendation_reason"]
+            == "Same language and era; mood not verified"
+            for item in ranked
+        ), intent
+        assert all(
+            item["song_id"] != "explicit-conflicting-mood"
+            for item in ranked
+        )
+
+
+def test_alone_x_faded_sparse_mood_seed_gets_nonempty_era_language_radio():
+    catalog = sample_data()
+    hybrid = HybridRecommendationEngine(SpotifyRecommendationEngine(catalog))
+    mood = [0.5, 0.5, 0.5, 0.5, 0.4, 0.15, 0.1, 0.2, 0.8]
+    seed = {
+        "title": "Alone X Faded",
+        "artists": "Xylo",
+        "album": "Alone X Faded",
+        "year": 2026,
+        "language": "English",
+        "intent_labels": ["sad"],
+        "mood_vector": mood,
+        "mood_label": "sad",
+        "mood_confidence": 0.58,
+        "mood_source": "metadata_fallback",
+    }
+    candidates = [
+        {
+            "song_id": f"english-2026-{index}",
+            "title": f"Unclassified English track {index}",
+            "artists": f"Independent Artist {index}",
+            "album": f"Independent Album {index}",
+            "year": 2026,
+            "language": "English",
+            "intent_labels": ["general"],
+            "mood_vector": mood,
+            "mood_label": "neutral",
+            "mood_confidence": 0.22,
+            "mood_source": "metadata_fallback",
+        }
+        for index in range(20)
+    ]
+
+    ranked = hybrid.rank_jio_results(
+        candidates, "alone-x-faded-user", catalog, [], seed=seed,
+    )
+
+    assert len(ranked) == 20
+    assert all(
+        item["recommendation_reason"]
+        == "Same language and era; mood not verified"
+        for item in ranked
+    )
+
+
 def test_sparse_seed_uses_same_soundtrack_audio_as_a_low_confidence_intent_hint():
     seed = {
         "title": "Babu Samjho Ishare",

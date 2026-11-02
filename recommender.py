@@ -5,7 +5,7 @@ import re
 import numpy as np
 import pandas as pd
 
-HYBRID_MODEL_VERSION = "hybrid-v31-seed-artist-balance"
+HYBRID_MODEL_VERSION = "hybrid-v32-unknown-mood-era-fallback"
 
 EXCLUDED_RECOMMENDATION_TITLES = {"jo bhi kasmein"}
 MAX_RECOMMENDATION_YEAR_DISTANCE = 15
@@ -1290,6 +1290,16 @@ class HybridRecommendationEngine:
             same_era = bool(era_match >= 0.70)
             language_match = 1.0 if seed_language and language and seed_language == language else 0.0
             language_conflict = bool(seed_language and language and seed_language != language)
+            item_intents = _infer_candidate_intents(item)
+            era_language_fallback = bool(
+                seed_year
+                and item_year
+                and abs(seed_year - item_year) <= MAX_RECOMMENDATION_YEAR_DISTANCE
+                and language_match
+                and seed_confidence < 0.75
+                and seed_intents
+                and not item_intents
+            )
             seed_cluster = (seed or {}).get("cluster_id")
             item_cluster = item.get("cluster_id")
             cluster_match = (
@@ -1325,7 +1335,6 @@ class HybridRecommendationEngine:
             metadata_similarity = _sparse_cosine(
                 seed_feature_tokens, _semantic_metadata_tokens(item)
             )
-            item_intents = _infer_candidate_intents(item)
             intent_match = (
                 len(seed_intents.intersection(item_intents)) / max(len(seed_intents), 1)
                 if seed_intents else 0.0
@@ -1375,6 +1384,7 @@ class HybridRecommendationEngine:
             item["_metadata_similarity"] = metadata_similarity
             item["_intent_match"] = intent_match
             item["_intent_conflict"] = intent_conflict
+            item["_era_language_fallback"] = era_language_fallback
             item["_era_delta"] = era_delta
             item["_same_era"] = same_era
             audio_verified = audio_match >= 0.62
@@ -1392,6 +1402,10 @@ class HybridRecommendationEngine:
                 item["recommendation_reason"] = "Same artist and similar audio profile"
             elif seed_artist_match and mood_match >= 0.62:
                 item["recommendation_reason"] = "Same artist; metadata suggests a similar vibe"
+            elif era_language_fallback:
+                item["recommendation_reason"] = (
+                    "Same language and era; mood not verified"
+                )
             elif mood_match >= 0.62:
                 item["recommendation_reason"] = "Metadata suggests a similar vibe; audio not verified"
             elif metadata_similarity >= 0.45:
@@ -1558,6 +1572,7 @@ class HybridRecommendationEngine:
                     float(item.get("_audio_match", 0.0)) >= 0.62
                     or float(item.get("_intent_match", 0.0)) >= 0.5
                     or float(item.get("_album_match", 0.0)) >= 1.0
+                    or bool(item.get("_era_language_fallback", False))
                     or (
                         seed_year
                         and candidate_year
@@ -1626,7 +1641,7 @@ class HybridRecommendationEngine:
                     continue
                 if bool(item.get("_intent_conflict", False)) and not same_soundtrack:
                     continue
-                candidate_intents = item_intents
+                candidate_intents = _infer_candidate_intents(item)
                 specialized_intents = {"devotional", "ghazal", "motivational", "acoustic_indie", "energetic", "playful", "rap_hiphop"}
                 seed_specialized = seed_intents.intersection(specialized_intents)
                 candidate_specialized = candidate_intents.intersection(specialized_intents)
@@ -1646,7 +1661,8 @@ class HybridRecommendationEngine:
                     and seed_intents
                     and not candidate_intents
                     and not (
-                        same_soundtrack
+                        bool(item.get("_era_language_fallback", False))
+                        or same_soundtrack
                         or (
                             float(item.get("_audio_match", 0.0)) >= 0.78
                             and float(item.get("_mood_match", 0.0)) >= 0.70
