@@ -5,9 +5,10 @@ import re
 import numpy as np
 import pandas as pd
 
-HYBRID_MODEL_VERSION = "hybrid-v25-verified-context"
+HYBRID_MODEL_VERSION = "hybrid-v26-nearby-era-mix"
 
 EXCLUDED_RECOMMENDATION_TITLES = {"jo bhi kasmein"}
+MAX_RECOMMENDATION_YEAR_DISTANCE = 15
 
 
 def recommendation_source_work(item: dict) -> str:
@@ -40,8 +41,9 @@ def _release_year(value: object) -> int:
 
 
 def _interleave_recommendation_contexts(items: list[dict], seed_year: int) -> list[dict]:
-    """Keep the seed decade and balance year closeness with mood relevance."""
+    """Favor the seed decade, then mix in close decades by mood relevance."""
     seed_decade = seed_year // 10 * 10 if seed_year else 0
+    buckets: dict[int, list[tuple[int, dict]]] = {0: [], 1: [], 2: []}
 
     def context_order(
         entry: tuple[int, dict],
@@ -66,14 +68,31 @@ def _interleave_recommendation_contexts(items: list[dict], seed_year: int) -> li
 
     if not seed_decade:
         return items
-    same_decade = [
-        (index, item)
-        for index, item in enumerate(items)
-        if _release_year(item.get("year")) // 10 * 10 == seed_decade
-    ]
-    return [
-        item for _, item in sorted(same_decade, key=context_order)
-    ]
+    for index, item in enumerate(items):
+        year = _release_year(item.get("year"))
+        if not year or abs(year - seed_year) > MAX_RECOMMENDATION_YEAR_DISTANCE:
+            continue
+        decade_delta = abs(year // 10 * 10 - seed_decade)
+        bucket = 0 if decade_delta == 0 else 1 if decade_delta == 10 else 2
+        buckets[bucket].append((index, item))
+    for bucket in buckets.values():
+        bucket.sort(key=context_order)
+
+    schedule = (0, 0, 0, 0, 0, 0, 0, 1, 1, 2)
+    ordered: list[dict] = []
+    schedule_index = 0
+    while any(buckets.values()):
+        preferred_bucket = schedule[schedule_index % len(schedule)]
+        schedule_index += 1
+        available = [bucket for bucket, entries in buckets.items() if entries]
+        bucket = (
+            preferred_bucket
+            if buckets[preferred_bucket]
+            else min(available, key=lambda value: (abs(value - preferred_bucket), value))
+        )
+        _, item = buckets[bucket].pop(0)
+        ordered.append(item)
+    return ordered
 
 
 def _metadata_feature_tokens(item: dict) -> dict[str, float]:
@@ -822,10 +841,11 @@ class HybridRecommendationEngine:
                 if not _is_excluded_recommendation_title(item.get("title", ""))
             ]
             if seed_year:
-                seed_decade = seed_year // 10
                 results = [
                     item for item in results
-                    if _release_year(item.get("year")) // 10 == seed_decade
+                    if _release_year(item.get("year"))
+                    and abs(_release_year(item.get("year")) - seed_year)
+                    <= MAX_RECOMMENDATION_YEAR_DISTANCE
                 ]
         if not results:
             return []
@@ -1219,6 +1239,12 @@ class HybridRecommendationEngine:
                     or float(item.get("_intent_match", 0.0)) >= 0.5
                     or float(item.get("_album_match", 0.0)) >= 1.0
                     or (
+                        float(item.get("_seed_artist_match", 0.0)) >= 1.0
+                        and 0 < int(item.get("_era_delta", 0) or 0)
+                        <= MAX_RECOMMENDATION_YEAR_DISTANCE
+                        and not bool(item.get("_intent_conflict", False))
+                    )
+                    or (
                         float(item.get("_metadata_score", 0.0)) >= 0.55
                         and float(item.get("_mood_match", 0.0)) >= 0.60
                     )
@@ -1292,6 +1318,11 @@ class HybridRecommendationEngine:
                         or (
                             float(item.get("_audio_match", 0.0)) >= 0.78
                             and float(item.get("_mood_match", 0.0)) >= 0.70
+                        )
+                        or (
+                            float(item.get("_seed_artist_match", 0.0)) >= 1.0
+                            and 0 < int(item.get("_era_delta", 0) or 0)
+                            <= MAX_RECOMMENDATION_YEAR_DISTANCE
                         )
                     )
                 ):

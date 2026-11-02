@@ -355,20 +355,26 @@ def test_listener_mood_and_era_profiles_follow_recent_listening():
     assert ranked[0]["recommendation_features"]["listener_era"] > 0.7
 
 
-def test_recommendations_stay_in_seed_decade_and_drop_unknown_years():
+def test_recommendations_mix_seed_and_nearby_decades_but_drop_distant_years():
     candidates = [
         *({"song_id": f"seventies-{index}", "year": 1970 + index % 10} for index in range(14)),
         *({"song_id": f"sixties-{index}", "year": 1960 + index} for index in range(2)),
         *({"song_id": f"eighties-{index}", "year": 1980 + index} for index in range(2)),
-        {"song_id": "nineties", "year": 1995},
+        {"song_id": "near-other-decade", "year": 1989},
+        {"song_id": "near-second-decade", "year": 1990},
+        {"song_id": "distant-year", "year": 1995},
         {"song_id": "unknown-year", "year": ""},
     ]
 
     ordered = _interleave_recommendation_contexts(candidates, 1975)
-    decades = [int(item["year"]) // 10 * 10 for item in ordered]
+    decades = [int(item["year"]) // 10 * 10 for item in ordered[:10]]
 
-    assert len(ordered) == 14
-    assert set(decades) == {1970}
+    assert len(ordered) == 20
+    assert decades.count(1970) == 7
+    assert decades.count(1960) + decades.count(1980) == 2
+    assert decades.count(1990) == 1
+    assert "distant-year" not in {item["song_id"] for item in ordered}
+    assert "unknown-year" not in {item["song_id"] for item in ordered}
 
 
 def test_context_priority_within_same_decade_is_taste_then_artist_then_film():
@@ -454,7 +460,7 @@ def test_same_album_name_with_distant_year_is_not_treated_as_soundtrack():
     assert ranked[0]["recommendation_features"]["era"] > 0.0
 
 
-def test_ranker_excludes_blocked_title_and_other_decades_for_each_seed():
+def test_ranker_excludes_blocked_title_and_distant_decades_for_each_seed():
     catalog = sample_data()
     hybrid = HybridRecommendationEngine(SpotifyRecommendationEngine(catalog))
     candidates = [
@@ -464,6 +470,14 @@ def test_ranker_excludes_blocked_title_and_other_decades_for_each_seed():
             "artists": "Anchor Artist",
             "album": "Another Album",
             "year": 1971,
+            "intent_labels": ["romantic"],
+        },
+        {
+            "song_id": "near-decade",
+            "title": "Nearby Decade",
+            "artists": "Other Artist",
+            "album": "Another Album",
+            "year": 1985,
             "intent_labels": ["romantic"],
         },
         {
@@ -525,8 +539,55 @@ def test_ranker_excludes_blocked_title_and_other_decades_for_each_seed():
     assert {item["song_id"] for item in seventies} == {
         "same-decade-early",
         "same-decade-late",
+        "near-decade",
+        "next-decade",
     }
-    assert {item["song_id"] for item in eighties} == {"next-decade"}
+    assert {item["song_id"] for item in eighties} == {
+        "same-decade-early",
+        "same-decade-late",
+        "near-decade",
+        "next-decade",
+    }
+
+
+def test_ranker_can_return_10_plus_era_close_shared_artist_songs():
+    catalog = sample_data()
+    hybrid = HybridRecommendationEngine(SpotifyRecommendationEngine(catalog))
+    candidates = [
+        {
+            "song_id": f"track-{year}-{index}",
+            "title": f"Artist Song {year} {index}",
+            "artists": "Seed Singer",
+            "album": f"Album {index}",
+            "year": year,
+            "language": "Hindi",
+            "intent_labels": ["general"],
+        }
+        for year in [
+            1971, 1972, 1973, 1974, 1976, 1977, 1979,
+            1965, 1968, 1980, 1981, 1983, 1985, 1989,
+        ]
+        for index in range(1)
+    ]
+
+    ranked = hybrid.rank_jio_results(
+        candidates,
+        "era-user",
+        catalog,
+        [],
+        seed={
+            "title": "Seed Song",
+            "artists": "Seed Singer",
+            "album": "Seed Album",
+            "year": 1975,
+            "language": "Hindi",
+            "intent_labels": ["romantic"],
+        },
+    )
+
+    assert len(ranked) >= 10
+    assert all(abs(int(item["year"]) - 1975) <= 15 for item in ranked)
+    assert sum(int(item["year"]) // 10 == 197 for item in ranked[:10]) >= 7
 
 
 def test_logged_impression_schema_is_read_by_ranker():
