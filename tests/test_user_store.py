@@ -1,0 +1,47 @@
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from user_store import UserStore
+
+
+def test_user_events_are_scoped_to_the_requested_account(tmp_path):
+    store = UserStore(tmp_path / "events.sqlite3", database_url="")
+    first_ok, first_id = store.register("first@example.com", "first-password")
+    second_ok, second_id = store.register("second@example.com", "second-password")
+    assert first_ok and second_ok
+
+    store.log_event(
+        first_id,
+        "track-one",
+        "jio_play",
+        "session-one",
+        metadata_json='{"title": "First song"}',
+    )
+    store.log_event(
+        second_id,
+        "track-two",
+        "jio_play",
+        "session-two",
+        metadata_json='{"title": "Second song"}',
+    )
+
+    events = store.user_events(first_id)
+    assert len(events) == 1
+    assert events[0]["track_id"] == "track-one"
+    assert events[0]["metadata_json"] == '{"title": "First song"}'
+
+
+def test_listening_time_summary_counts_only_listen_progress(tmp_path):
+    store = UserStore(tmp_path / "events.sqlite3", database_url="")
+    ok, user_id = store.register("listener@example.com", "listener-password")
+    assert ok
+
+    store.log_event(
+        user_id, "track-one", "listen_progress", "session-one", duration_ms=120_000
+    )
+    store.log_event(
+        user_id, None, "session_end", "session-one", duration_ms=300_000
+    )
+
+    assert store.summary(user_id)["listening_ms"] == 120_000

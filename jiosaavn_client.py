@@ -254,6 +254,14 @@ class JioSaavnClient:
         # One direct page first. Extra generic expansions (male/female/hindi)
         # cost tokens and mix unrelated songs into artist/film catalogues.
         first_wave = self.search_direct(query, limit=page_size)
+        # The public mirror intermittently returns HTTP 500 for some exact
+        # multi-word titles (notably "Cheri Cheri Lady"), even though a
+        # shorter prefix returns the same recording. Retry that safe fallback
+        # before treating the search as empty.
+        if not first_wave:
+            query_parts = normalized_query.split()
+            if len(query_parts) >= 2 and query_parts[0] == query_parts[1]:
+                first_wave = self.search_direct(" ".join(query_parts[:2]), limit=page_size)
         add_items(first_wave)
 
         def entity_hit(item: dict[str, Any], field: str) -> bool:

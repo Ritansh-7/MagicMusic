@@ -5,7 +5,7 @@ import re
 import numpy as np
 import pandas as pd
 
-HYBRID_MODEL_VERSION = "hybrid-v26-nearby-era-mix"
+HYBRID_MODEL_VERSION = "hybrid-v27-live-seed-era-rotation"
 
 EXCLUDED_RECOMMENDATION_TITLES = {"jo bhi kasmein"}
 MAX_RECOMMENDATION_YEAR_DISTANCE = 15
@@ -20,6 +20,22 @@ def recommendation_source_work(item: dict) -> str:
         flags=re.IGNORECASE,
     )
     return re.sub(r"[^a-z0-9]+", " ", match.group(1).casefold()).strip() if match else ""
+
+
+def _artist_credit_keys(value: object) -> set[str]:
+    if isinstance(value, list):
+        names = [
+            str(entry.get("name", "") if isinstance(entry, dict) else entry)
+            for entry in value
+        ]
+    else:
+        names = str(value or "").split(",")
+    return {
+        normalized
+        for name in names
+        if (normalized := re.sub(r"[^a-z0-9]+", " ", name.casefold()).strip())
+        and normalized not in {"unknown", "n a", "na"}
+    }
 
 
 def is_compilation_album(value: object) -> bool:
@@ -113,7 +129,7 @@ def _interleave_recommendation_contexts(items: list[dict], seed_year: int) -> li
 
     def context_order(
         entry: tuple[int, dict],
-    ) -> tuple[float, float, float, float, int]:
+    ) -> tuple[float, float, int]:
         index, item = entry
         taste = max(
             float(item.get("_listener_mood_match", 0.0) or 0.0),
@@ -128,9 +144,7 @@ def _interleave_recommendation_contexts(items: list[dict], seed_year: int) -> li
             0.55 * float(item.get("_era_match", 0.0) or 0.0)
             + 0.45 * taste
         )
-        artist = float(item.get("_seed_artist_match", 0.0) or 0.0)
-        soundtrack = float(item.get("_album_match", 0.0) or 0.0)
-        return (-era_mood, -taste, -artist, -soundtrack, index)
+        return (-era_mood, -taste, index)
 
     if not seed_decade:
         return items
@@ -141,8 +155,30 @@ def _interleave_recommendation_contexts(items: list[dict], seed_year: int) -> li
         decade_delta = abs(year // 10 * 10 - seed_decade)
         bucket = 0 if decade_delta == 0 else 1 if decade_delta == 10 else 2
         buckets[bucket].append((index, item))
-    for bucket in buckets.values():
-        bucket.sort(key=context_order)
+    for bucket_number, bucket in buckets.items():
+        remaining = sorted(bucket, key=context_order)
+        ordered_bucket: list[tuple[int, dict]] = []
+        artist_counts: dict[str, int] = {}
+        while remaining:
+            repeat_counts = [
+                max(
+                    (artist_counts.get(artist, 0) for artist in _artist_credit_keys(item.get("artists", ""))),
+                    default=0,
+                )
+                for _, item in remaining
+            ]
+            least_repeated = min(repeat_counts)
+            eligible = [
+                entry
+                for entry, repeats in zip(remaining, repeat_counts)
+                if repeats == least_repeated
+            ]
+            chosen = min(eligible, key=context_order)
+            remaining.remove(chosen)
+            ordered_bucket.append(chosen)
+            for artist in _artist_credit_keys(chosen[1].get("artists", "")):
+                artist_counts[artist] = artist_counts.get(artist, 0) + 1
+        buckets[bucket_number] = ordered_bucket
 
     schedule = (0, 0, 0, 0, 0, 0, 0, 1, 1, 2)
     ordered: list[dict] = []
@@ -1355,7 +1391,7 @@ class HybridRecommendationEngine:
             eligible: list[tuple[int, float, float, float]] = []
             for index, (base_score, item) in enumerate(remaining):
                 item_id = str(item.get("song_id") or item.get("title", ""))
-                artist_key = str(item.get("artists", "")).lower()
+                artist_keys = _artist_credit_keys(item.get("artists", ""))
                 album_key = _recommendation_work_key(item) or str(item.get("album", "")).lower()
                 title_key = re.sub(r"[^a-z0-9]+", " ", str(item.get("title", "")).lower()).strip()
                 # Do not surface recently played songs or weak fallback items.
@@ -1496,13 +1532,19 @@ class HybridRecommendationEngine:
                 # first appearance is free; subsequent appearances are
                 # increasingly expensive, while still allowing a second song
                 # when the candidate pool is small.
-                adjusted -= 0.10 * artist_counts.get(artist_key, 0)
+                repeat_count = max(
+                    (artist_counts.get(artist, 0) for artist in artist_keys),
+                    default=0,
+                )
+                adjusted -= 0.30 * repeat_count
                 # Album/soundtrack continuity is useful for the first result,
                 # but repeated items from the same album must make room for
                 # equally relevant songs from the seed's era and intent.
                 adjusted -= 0.25 * album_counts.get(album_key, 0)
-                if selected and artist_key == str(selected[-1].get("artists", "")).lower():
-                    adjusted -= 0.08
+                if selected and artist_keys.intersection(
+                    _artist_credit_keys(selected[-1].get("artists", ""))
+                ):
+                    adjusted -= 0.10
                 eligible.append((index, adjusted, base_relevance, redundancy))
             # If every remaining candidate was rejected by the freshness or
             # relevance gate, finish cleanly instead of leaking weak fallbacks.
@@ -1554,9 +1596,9 @@ class HybridRecommendationEngine:
             }
             chosen["recommendation_model_version"] = HYBRID_MODEL_VERSION
             selected.append(chosen)
-            artist_key = str(chosen.get("artists", "")).lower()
             album_key = _recommendation_work_key(chosen) or str(chosen.get("album", "")).lower()
-            artist_counts[artist_key] = artist_counts.get(artist_key, 0) + 1
+            for artist in _artist_credit_keys(chosen.get("artists", "")):
+                artist_counts[artist] = artist_counts.get(artist, 0) + 1
             album_counts[album_key] = album_counts.get(album_key, 0) + 1
 
         # Keep year closeness and mood ahead of artist/soundtrack context.

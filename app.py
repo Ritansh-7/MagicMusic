@@ -757,6 +757,7 @@ def log_behavior(
         return
     st.session_state["events_dirty"] = True
     st.session_state["summary_dirty"] = True
+    st.session_state["user_events_dirty"] = True
 
 
 def defer_player_event(
@@ -792,6 +793,18 @@ def cached_user_summary(user_id: str, session_id: str | None = None) -> dict[str
     cache[cache_key] = summary
     st.session_state["summary_dirty"] = False
     return summary
+
+
+def cached_user_events(user_id: str) -> list[dict]:
+    """Cache private analytics rows until this listener writes another event."""
+    cache = st.session_state.setdefault("user_events_cache", {})
+    cache_key = str(user_id)
+    if cache_key in cache and not st.session_state.get("user_events_dirty"):
+        return cache[cache_key]
+    events = user_store.user_events(user_id)
+    cache[cache_key] = events
+    st.session_state["user_events_dirty"] = False
+    return events
 
 
 def account_listening_time() -> None:
@@ -1492,6 +1505,7 @@ def build_jio_up_next(
     # without inserting one database row per visible recommendation.
     if queue and st.session_state.get("local_user_id"):
         impression_key = "|".join([
+            HYBRID_MODEL_VERSION,
             str(seed.get("song_id") or seed.get("title", "")),
             str(st.session_state.get("local_session_id", "")),
             "|".join(str(item.get("song_id") or item.get("title", "")) for item in queue[:25]),
@@ -1506,12 +1520,20 @@ def build_jio_up_next(
                     "experiment_variant": st.session_state.get("recommendation_variant", "control"),
                     "seed_track_id": str(seed.get("song_id") or seed.get("title", "")),
                     "seed_title": seed.get("title", ""),
+                    "seed_artists": seed.get("artists", ""),
+                    "seed_album": seed.get("album", ""),
+                    "seed_year": seed.get("year", ""),
+                    "seed_mood": seed.get("mood_label") or seed.get("mood", ""),
                     "items": [
                         {
                             "track_id": str(item.get("song_id") or item.get("title", "")),
                             "title": item.get("title", ""),
+                            "artists": item.get("artists", ""),
+                            "album": item.get("album", ""),
+                            "year": item.get("year", ""),
                             "rank": item.get("recommendation_rank"),
                             "score": item.get("recommendation_score", 0.0),
+                            "reason": item.get("recommendation_reason", ""),
                             "source": item.get("recommendation_source", "current_track_radio"),
                             "features": item.get("recommendation_features", {}),
                         }
@@ -1551,6 +1573,7 @@ with st.sidebar:
             st.session_state.pop("local_user_id", None)
             st.session_state.pop("local_is_admin", None)
             st.session_state.pop("user_summary_cache", None)
+            st.session_state.pop("user_events_cache", None)
             st.query_params.pop(AUTH_SESSION_PARAM, None)
             st.rerun()
     else:
@@ -1698,14 +1721,18 @@ def render_admin_dashboard() -> None:
             e3.metric("Exposure play-through", f"{recommended_plays / len(exposed_ids) * 100:.1f}%")
             e4.metric("Precision@10", f"{np.mean(precision_values) * 100:.1f}%" if precision_values else "—")
             e5.metric("NDCG@10", f"{np.mean(ndcg_values):.3f}" if ndcg_values else "—")
-        # Explainability audit: show diagnostics only for the latest played song.
+        # Explainability audit: show the queue generated for the latest play,
+        # rather than leaving an older seed visible when the new queue is not
+        # ready yet.
         latest_impression = None
         latest_play = plays.iloc[-1] if not plays.empty else None
-        latest_play_metadata = {}
+        latest_play_index = plays.index[-1] if not plays.empty else None
+        latest_play_metadata = (
+            metadata_rows[latest_play_index]
+            if latest_play_index is not None and latest_play_index < len(metadata_rows)
+            else {}
+        )
         if latest_play is not None:
-            latest_play_index = plays.index[-1]
-            if latest_play_index < len(metadata_rows):
-                latest_play_metadata = metadata_rows[latest_play_index]
             latest_play_track_id = str(latest_play.get("track_id") or "")
             for event_index in range(len(metadata_rows) - 1, -1, -1):
                 event = events.iloc[event_index]
@@ -1731,7 +1758,6 @@ def render_admin_dashboard() -> None:
                 ):
                     latest_impression = (events.iloc[event_index], event_metadata)
                     break
-
         diagnostic_rows = []
         if latest_impression:
             impression_event, impression_metadata = latest_impression
@@ -1741,8 +1767,11 @@ def render_admin_dashboard() -> None:
                 features = item.get("features") or {}
                 diagnostic_rows.append({
                     "track": item.get("title", item.get("track_id", "")),
+                    "artist": item.get("artists", ""),
+                    "year": item.get("year", ""),
                     "rank": item.get("rank"),
                     "score": item.get("score"),
+                    "reason": item.get("reason", ""),
                     "base_relevance": features.get("base_relevance", item.get("score", 0.0)),
                     "final_rank_score": features.get("final_rank_score", item.get("score", 0.0)),
                     "redundancy_penalty": features.get("redundancy_penalty", 0.0),
@@ -1768,10 +1797,29 @@ def render_admin_dashboard() -> None:
                 if str(value or "").strip()
             )
             st.caption(
-                f"Latest queue for {seed_details or 'the latest played song'} · "
-                f"generated: {impression_event['created_at']}"
+                f"Latest logged queue · seed: {seed_details or 'unknown'} · "
+                f"model: {impression_metadata.get('model_version', 'unknown')} · "
+                f"generated: {impression_event['created_at']} · "
+                "updates when the current song gets a newly generated queue. "
+                "Metadata-only mood is not audio proof."
             )
-            st.dataframe(pd.DataFrame(diagnostic_rows), width="stretch", hide_index=True)
+            diagnostics = pd.DataFrame(diagnostic_rows)
+            rank_scores = diagnostics[["track", "rank", "final_rank_score"]].copy()
+            rank_scores["rank"] = pd.to_numeric(rank_scores["rank"], errors="coerce")
+            rank_scores["final_rank_score"] = pd.to_numeric(
+                rank_scores["final_rank_score"], errors="coerce"
+            )
+            rank_scores = rank_scores.dropna(
+                subset=["rank", "final_rank_score"]
+            ).sort_values("rank")
+            if not rank_scores.empty:
+                st.markdown("**Recommendation rank scores**")
+                st.bar_chart(
+                    rank_scores.set_index("track")[["final_rank_score"]],
+                    horizontal=True,
+                    height=max(240, len(rank_scores) * 36),
+                )
+            st.dataframe(diagnostics, width="stretch", hide_index=True)
         elif latest_play is not None:
             latest_play_title = (
                 latest_play_metadata.get("title")
@@ -1780,7 +1828,10 @@ def render_admin_dashboard() -> None:
                 or "Unknown song"
             )
             st.subheader("Latest recommendation diagnostics")
-            st.caption(f"No queue has been generated for the latest played song ({latest_play_title}) yet.")
+            st.caption(
+                f"No recommendation queue has been generated for the latest played song "
+                f"({latest_play_title}) yet."
+            )
         source_counts = metadata.get("feature_source", pd.Series(dtype=str)).fillna("unknown").value_counts()
         matched = int(source_counts.get("local_audio_catalog", 0))
         fallback = int(source_counts.get("live_metadata_fallback", 0))
@@ -2295,6 +2346,7 @@ if jio_now and (
     except Exception:
         pass
 if jio_now:
+    current_queue_seed = str(jio_now.get("song_id") or jio_now.get("title", ""))
     current_queue = list(st.session_state.get("jio_queue", []))
     st.html("<div id='tune-match-player-anchor'></div>")
     st.markdown('<div class="shelf-title">TuneMatch player</div>', unsafe_allow_html=True)
@@ -2635,11 +2687,12 @@ if jio_now:
         st.session_state["jio_queue_refill_attempted_id"] = ""
         st.rerun()
 
-with st.expander("Current session activity and data-science metrics", expanded=True):
+with st.expander("Your listening analytics", expanded=True):
     activity = cached_user_summary(
         local_user_id,
         session_id=st.session_state["local_session_id"],
     )
+    st.caption("Your account only · choose a period to explore listening habits and recommendation feedback.")
     a, b, c, d = st.columns(4)
     a.metric("Events", activity["events"])
     b.metric("Tracks played", activity["tracks_played"])
@@ -2652,7 +2705,165 @@ with st.expander("Current session activity and data-science metrics", expanded=T
             )) * 1000
         )
     d.metric("Listening time", f"{live_ms / 60000:.1f} min")
-    st.caption("Play starts, skips, likes, dislikes, session duration, and recommendation seeds are collected for future ranking evaluation.")
+    st.subheader("Listening trends")
+
+    analytics_events = pd.DataFrame(cached_user_events(local_user_id))
+    if analytics_events.empty:
+        st.info("Your charts will appear after you play or interact with a few tracks.")
+    else:
+        analytics_events["created_at"] = pd.to_datetime(
+            analytics_events["created_at"], errors="coerce", utc=True
+        )
+        analytics_events["event_type"] = analytics_events["event_type"].fillna("").astype(str)
+        analytics_events["duration_ms"] = pd.to_numeric(
+            analytics_events.get("duration_ms", 0), errors="coerce"
+        ).fillna(0)
+        analytics_events["duration_min"] = analytics_events["duration_ms"].where(
+            analytics_events["event_type"] == "listen_progress", 0
+        ) / 60000
+
+        period = st.selectbox(
+            "Time range",
+            ["Last 7 days", "Last 30 days", "Last 90 days", "All time"],
+            index=1,
+            key="listener_analytics_period",
+        )
+        period_days = {
+            "Last 7 days": 7,
+            "Last 30 days": 30,
+            "Last 90 days": 90,
+        }.get(period)
+        if period_days:
+            cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=period_days)
+            analytics_events = analytics_events[
+                analytics_events["created_at"] >= cutoff
+            ].copy()
+
+        play_types = {"jio_play", "play_start"}
+        like_types = {"jio_like", "like"}
+        skip_types = {"jio_skip", "skip"}
+        plays = analytics_events[analytics_events["event_type"].isin(play_types)]
+        likes = analytics_events[analytics_events["event_type"].isin(like_types)]
+        skips = analytics_events[analytics_events["event_type"].isin(skip_types)]
+        unique_tracks = int(plays["track_id"].nunique()) if "track_id" in plays else 0
+        play_count = len(plays)
+        like_count = len(likes)
+        skip_count = len(skips)
+        listening_minutes = float(analytics_events["duration_min"].sum())
+
+        kpis = st.columns(5)
+        kpis[0].metric("Play starts", f"{play_count:,}")
+        kpis[1].metric("Unique tracks", f"{unique_tracks:,}")
+        kpis[2].metric("Likes", f"{like_count:,}")
+        kpis[3].metric("Skips", f"{skip_count:,}")
+        kpis[4].metric("Listening time", f"{listening_minutes:.1f} min")
+
+        def parse_event_metadata(value: object) -> dict:
+            if isinstance(value, dict):
+                return value
+            try:
+                parsed = json.loads(str(value or "{}"))
+            except (TypeError, ValueError):
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+
+        analytics_events["metadata"] = analytics_events["metadata_json"].map(
+            parse_event_metadata
+        )
+        analytics_events["date"] = analytics_events["created_at"].dt.strftime("%Y-%m-%d")
+        daily = analytics_events.dropna(subset=["created_at"]).groupby("date").agg(
+            plays=("event_type", lambda values: values.isin(play_types).sum()),
+            likes=("event_type", lambda values: values.isin(like_types).sum()),
+            skips=("event_type", lambda values: values.isin(skip_types).sum()),
+            minutes=("duration_min", "sum"),
+        )
+
+        chart_left, chart_right = st.columns(2)
+        with chart_left:
+            if not daily.empty:
+                st.markdown("**Daily plays, likes and skips**")
+                st.line_chart(
+                    daily[["plays", "likes", "skips"]],
+                    height=240,
+                    alt="Daily play, like and skip counts",
+                )
+            else:
+                st.info("No dated activity in this period.")
+        with chart_right:
+            if not daily.empty:
+                st.markdown("**Listening time by day**")
+                st.area_chart(
+                    daily[["minutes"]],
+                    height=240,
+                    alt="Listening minutes per day",
+                )
+            event_mix = analytics_events["event_type"].value_counts()
+            if not event_mix.empty:
+                st.markdown("**Activity mix**")
+                st.bar_chart(
+                    event_mix.rename("events"),
+                    horizontal=True,
+                    height=220,
+                    alt="Counts of each listener event type",
+                )
+
+        def metadata_names(value: object) -> list[str]:
+            if isinstance(value, list):
+                values = [
+                    str(item.get("name", "") if isinstance(item, dict) else item).strip()
+                    for item in value
+                ]
+            else:
+                values = str(value or "").split(",")
+            return [
+                name for name in values
+                if name and name.casefold() not in {"unknown", "n/a", "na", "-"}
+            ]
+
+        artist_values: list[str] = []
+        track_values: list[str] = []
+        mood_values: list[str] = []
+        era_values: list[str] = []
+        language_values: list[str] = []
+        for event in plays.to_dict("records"):
+            metadata = event.get("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            artist_values.extend(metadata_names(
+                metadata.get("artists") or metadata.get("artist") or metadata.get("singers")
+            ))
+            track_values.append(
+                str(metadata.get("title") or metadata.get("track_name") or event.get("track_id") or "Unknown track")
+            )
+            mood = metadata.get("mood_label") or metadata.get("mood")
+            mood_values.extend(metadata_names(mood))
+            year = str(metadata.get("year") or "")[:4]
+            if year.isdigit() and 1900 <= int(year) <= 2100:
+                era_values.append(f"{int(year) // 10 * 10}s")
+            language = str(metadata.get("language") or "").strip()
+            if language:
+                language_values.append(language)
+
+        def show_top_counts(title: str, values: list[str], label: str) -> None:
+            counts = pd.Series(values, dtype="string").dropna().value_counts().head(10)
+            counts = counts[counts.index.astype(str).str.strip() != ""]
+            if not counts.empty:
+                st.markdown(f"**{title}**")
+                st.bar_chart(
+                    counts.rename(label),
+                    horizontal=True,
+                    height=260,
+                    alt=title,
+                )
+
+        insight_left, insight_right = st.columns(2)
+        with insight_left:
+            show_top_counts("Most played artists", artist_values, "plays")
+            show_top_counts("Most played tracks", track_values, "plays")
+        with insight_right:
+            show_top_counts("Mood mix", mood_values, "plays")
+            show_top_counts("Listening by release era", era_values, "plays")
+            show_top_counts("Listening by language", language_values, "plays")
 
 with st.expander("How this recommender works"):
     st.markdown("""

@@ -600,7 +600,7 @@ def test_era_radio_returns_songs_from_other_films_when_soundtrack_has_few_tracks
     ) <= 1
 
 
-def test_context_priority_within_same_decade_is_taste_then_artist_then_film():
+def test_context_priority_within_same_decade_preserves_ranked_diversity():
     candidates = [
         {"song_id": "film", "year": 1974, "_album_match": 1.0},
         {"song_id": "artist", "year": 1976, "_seed_artist_match": 1.0},
@@ -609,7 +609,7 @@ def test_context_priority_within_same_decade_is_taste_then_artist_then_film():
 
     ordered = _interleave_recommendation_contexts(candidates, 1975)
 
-    assert [item["song_id"] for item in ordered] == ["taste", "artist", "film"]
+    assert [item["song_id"] for item in ordered] == ["taste", "film", "artist"]
 
 
 def test_context_priority_balances_era_and_mood_before_artist_or_soundtrack():
@@ -811,6 +811,58 @@ def test_ranker_can_return_10_plus_era_close_shared_artist_songs():
     assert len(ranked) >= 10
     assert all(abs(int(item["year"]) - 1975) <= 15 for item in ranked)
     assert sum(int(item["year"]) // 10 == 197 for item in ranked[:10]) >= 7
+
+
+def test_radio_rotates_singers_while_preserving_seed_mood_and_era():
+    catalog = sample_data()
+    hybrid = HybridRecommendationEngine(SpotifyRecommendationEngine(catalog))
+    mood = [0.8, 0.65, 0.7, 0.75, 0.2, 0.1, 0.08, 0.2, 0.8]
+    artists = ["Mukesh"] * 6 + [
+        "Lata Mangeshkar",
+        "Kishore Kumar",
+        "Manna Dey",
+        "Mohammed Rafi",
+        "Asha Bhosle",
+        "Hemlata",
+    ]
+    candidates = [
+        {
+            "song_id": f"era-track-{index}",
+            "title": f"Romantic tune {index}",
+            "artists": artist,
+            "album": f"Film {index}",
+            "year": 1971 + index % 8,
+            "language": "Hindi",
+            "mood_vector": mood,
+            "mood_label": "romantic",
+            "mood_confidence": 0.95,
+            "mood_source": "local_audio_catalog",
+            "intent_labels": ["romantic"],
+        }
+        for index, artist in enumerate(artists)
+    ]
+    seed = {
+        "title": "Seed ballad",
+        "artists": "Mukesh",
+        "album": "Seed film",
+        "year": 1975,
+        "language": "Hindi",
+        "mood_vector": mood,
+        "mood_label": "romantic",
+        "mood_confidence": 0.95,
+        "mood_source": "local_audio_catalog",
+        "intent_labels": ["romantic"],
+    }
+
+    ranked = hybrid.rank_jio_results(
+        candidates, "era-mood-user", catalog, [], seed=seed,
+    )
+    top_eight_artists = [item["artists"] for item in ranked[:8]]
+
+    assert len(set(top_eight_artists)) >= 5
+    assert top_eight_artists.count("Mukesh") <= 3
+    assert all(abs(int(item["year"]) - 1975) <= 15 for item in ranked[:8])
+    assert all(item["recommendation_features"]["mood"] > 0.99 for item in ranked[:8])
 
 
 def test_logged_impression_schema_is_read_by_ranker():

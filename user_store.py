@@ -281,8 +281,23 @@ class UserStore:
                 SELECT user_id, track_id, event_type, session_id, duration_ms,
                        metadata_json, created_at
                 FROM behavior_events
-                ORDER BY created_at ASC
+                ORDER BY created_at ASC, id ASC
                 """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def user_events(self, user_id: str) -> list[dict]:
+        """Return one listener's activity for their private analytics view."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                self._sql("""
+                SELECT track_id, event_type, session_id, duration_ms,
+                       metadata_json, created_at
+                FROM behavior_events
+                WHERE user_id = ?
+                ORDER BY created_at ASC
+                """),
+                (str(user_id),),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -337,7 +352,9 @@ class UserStore:
                     COUNT(DISTINCT CASE WHEN event_type IN ('play_start', 'jio_play') THEN track_id END) AS tracks_played,
                     COUNT(CASE WHEN event_type IN ('like', 'jio_like') THEN 1 END) AS likes,
                     COUNT(CASE WHEN event_type IN ('skip', 'jio_skip') THEN 1 END) AS skips,
-                    COALESCE(SUM(duration_ms), 0) AS listening_ms
+                    COALESCE(SUM(
+                        CASE WHEN event_type = 'listen_progress' THEN duration_ms ELSE 0 END
+                    ), 0) AS listening_ms
                 FROM behavior_events WHERE user_id = ?{session_clause}
                 """),
                 parameters,
