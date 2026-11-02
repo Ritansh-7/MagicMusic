@@ -5,6 +5,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from user_store import UserStore
 
 
+def test_admin_allowlist_reads_streamlit_secrets(monkeypatch, tmp_path):
+    import streamlit as st
+
+    store = UserStore(tmp_path / "events.sqlite3", database_url="")
+    ok, user_id = store.register("admin@example.com", "admin-password")
+    assert ok
+
+    monkeypatch.delenv("TUNEMATCH_ADMIN_EMAIL", raising=False)
+    monkeypatch.setattr(
+        st,
+        "secrets",
+        {"TUNEMATCH_ADMIN_EMAIL": "ADMIN@example.com"},
+    )
+
+    assert store.is_admin(user_id)
+
+
 def test_user_events_are_scoped_to_the_requested_account(tmp_path):
     store = UserStore(tmp_path / "events.sqlite3", database_url="")
     first_ok, first_id = store.register("first@example.com", "first-password")

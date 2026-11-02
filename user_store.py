@@ -263,8 +263,16 @@ class UserStore:
         return str(row["email"]) if row else ""
 
     def is_admin(self, user_id: str) -> bool:
-        """Admin access is allowlisted by an environment variable, never by UI input."""
-        admin_email = os.getenv("TUNEMATCH_ADMIN_EMAIL", "").strip().lower()
+        """Check the deployment allowlist, never an address supplied by the UI."""
+        admin_email = os.getenv("TUNEMATCH_ADMIN_EMAIL", "").strip()
+        if not admin_email:
+            try:
+                import streamlit as st
+
+                admin_email = str(st.secrets.get("TUNEMATCH_ADMIN_EMAIL", "")).strip()
+            except (ImportError, FileNotFoundError, KeyError, AttributeError):
+                admin_email = ""
+        admin_email = admin_email.lower()
         return bool(admin_email and self.user_email(user_id).lower() == admin_email)
 
     def admin_users(self) -> list[dict]:

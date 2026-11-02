@@ -39,7 +39,7 @@ Personalized queue (up to 30 tracks)
 
 ### Content and live-feature enrichment
 
-The local catalog contains 4,002 tracks with artist, genre, popularity and audio features. The local content engine builds a single normalized feature vector from genre TF-IDF, lower-weight artist TF-IDF and min-max-scaled audio features, then compares tracks with cosine similarity.
+The local catalog contains 4,002 unique tracks with artist, genre, popularity and audio features. The local content engine builds a normalized feature vector from genre TF-IDF (weight `1.0`), lower-weight artist TF-IDF (`0.35`) and min-max-scaled numeric audio features (`0.8`), then compares tracks with cosine similarity.
 
 For the local track-to-track baseline, the score is:
 
@@ -47,7 +47,7 @@ For the local track-to-track baseline, the score is:
 local_score = (1 - p) × cosine_similarity + p × normalized_popularity
 ```
 
-The default popularity weight is `p = 0.15`; recommendation calls can override it. The listener dashboard also builds profile-based shelves from this local catalog.
+The default popularity weight is `p = 0.15`; recommendation calls can override it, clamped to `[0, 0.8]`. The listener dashboard also builds profile-based shelves from this local catalog.
 
 Live JioSaavn results are normalized using title, artist, album, language, year, duration, song ID and version type. When a live result matches the local catalog by normalized title and artist, it inherits:
 
@@ -85,7 +85,7 @@ Song A → Song B
 Song A → Song C
 ```
 
-If Song B frequently follows Song A for the same listener in a session, the transition score for A → B increases. This gives the Next queue a session-aware signal instead of relying only on long-term taste.
+Play adjacency inside each user's sessions contributes to shared transition counts: repeated A → B sequences strengthen that transition. Candidate transition counts are normalized within the current candidate set before scoring, giving the Next queue a session-aware signal instead of relying only on long-term taste.
 
 ## Ranking and scoring math
 
@@ -105,11 +105,24 @@ seed_score(i) =
   + 0.08 × era_match(i)
   + 0.04 × metadata_mood_fallback(i)
   + 0.03 × intent_match(i)
-  + 0.03 × exploration_score(i)
+  + 0.03 × normalized_bandit_score(i)
   + 0.01 × event_popularity(i)
 ```
 
 These are coefficients in the implementation, not percentages; component values may be zero when evidence is unavailable. The score is min-max normalized over the candidate set before diversity reranking. Verified audio similarity is used only when both seed and candidate have matched local audio features. Metadata mood is a separate fallback signal.
+
+The bandit signal is an upper-confidence-style score based on observed feedback:
+
+```text
+bandit_raw(i) =
+    total_reward(i) / max(1, observed_feedback_count(i))
+  + 0.08 × sqrt(log(1 + total_feedback_events) / (1 + observed_feedback_count(i)))
+
+reward: play = +1, like = +2, skip = -1
+normalized_bandit_score = min-max normalization of bandit_raw over candidates
+```
+
+The current implementation computes these counts from play, like and skip events; recommendation-impression payloads are used by the learned ranker but are not included in the bandit counts. The exploration term is bounded by candidate-set normalization; it is not a standalone recommendation fallback.
 
 The main sub-scores are formed as follows:
 
@@ -254,9 +267,10 @@ Create `.streamlit/secrets.toml` locally and do not commit it. An example is ava
 ```toml
 DATABASE_URL = "replace-with-your-provider-url"
 TUNEMATCH_ADMIN_EMAIL = "your-admin-email@example.com"
+TUNEMATCH_SESSION_SECRET = "generate-a-long-random-secret"
 ```
 
-For PostgreSQL, paste the provider-issued URL into `DATABASE_URL`.
+`DATABASE_URL` accepts provider-issued MySQL or PostgreSQL URLs. `TUNEMATCH_ADMIN_EMAIL` is checked against the signed-in account email and can be supplied as an environment variable or Streamlit secret. Set `TUNEMATCH_SESSION_SECRET` to a stable, private random value so signed login tickets remain valid across app restarts.
 
 The current Streamlit UI does not start a Spotify OAuth flow, so Spotify API credentials are not required. Spotify personalization is available through the local history-export import described above.
 
@@ -279,6 +293,7 @@ Main file: app.py
 ```toml
 DATABASE_URL = "replace-with-your-provider-url"
 TUNEMATCH_ADMIN_EMAIL = "your-admin-email@example.com"
+TUNEMATCH_SESSION_SECRET = "generate-a-long-random-secret"
 ```
 
 7. Reboot the app after saving secrets.
@@ -297,7 +312,7 @@ Start command:
 streamlit run app.py --server.address=0.0.0.0 --server.port=$PORT
 ```
 
-Add `DATABASE_URL` and `TUNEMATCH_ADMIN_EMAIL` as Render environment variables. `render.yaml` also sets the default JioSaavn API base URL; override `JIOSAAVN_API_URL` only when using a compatible API endpoint. Render is the recommended target for this Streamlit server; Vercel is not the preferred target for a long-running Streamlit application.
+Add `DATABASE_URL`, `TUNEMATCH_ADMIN_EMAIL` and a stable `TUNEMATCH_SESSION_SECRET` as Render environment variables. `render.yaml` also sets the default JioSaavn API base URL; override `JIOSAAVN_API_URL` only when using a compatible API endpoint. Render is the recommended target for this Streamlit server; Vercel is not the preferred target for a long-running Streamlit application.
 
 ## Test
 
