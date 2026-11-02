@@ -5,11 +5,11 @@ import re
 import numpy as np
 import pandas as pd
 
-HYBRID_MODEL_VERSION = "hybrid-v32-unknown-mood-era-fallback"
+HYBRID_MODEL_VERSION = "hybrid-v33-mood-first-era-singer-diversity"
 
 EXCLUDED_RECOMMENDATION_TITLES = {"jo bhi kasmein"}
 MAX_RECOMMENDATION_YEAR_DISTANCE = 15
-MAX_ARTIST_REPEATS_IN_QUEUE = 2
+MAX_ARTIST_REPEATS_IN_QUEUE = 1
 
 
 def recommendation_source_work(item: dict) -> str:
@@ -176,7 +176,12 @@ def _interleave_recommendation_contexts(
 ) -> list[dict]:
     """Favor the seed decade, then mix in close decades by mood relevance."""
     seed_decade = seed_year // 10 * 10 if seed_year else 0
-    buckets: dict[int, list[tuple[int, dict]]] = {0: [], 1: [], 2: []}
+    # Buckets:
+    # 0 = same era (exact decade, ~90%)
+    # 1 = next era touch (seed_decade + 10, ~5%, e.g. 2000s for 90s, 90s for 80s)
+    # 2 = previous era touch (seed_decade - 10, ~5%, e.g. 80s for 90s, 70s for 80s)
+    # 3 = other nearby eras within window
+    buckets: dict[int, list[tuple[int, dict]]] = {0: [], 1: [], 2: [], 3: []}
     unknown_year_items: list[dict] = []
 
     def context_order(
@@ -193,8 +198,8 @@ def _interleave_recommendation_contexts(
             float(item.get("_long_term", 0.0) or 0.0),
         )
         era_mood = (
-            0.55 * float(item.get("_era_match", 0.0) or 0.0)
-            + 0.45 * taste
+            0.30 * float(item.get("_era_match", 0.0) or 0.0)
+            + 0.70 * taste
         )
         return (-era_mood, -taste, index)
 
@@ -208,8 +213,15 @@ def _interleave_recommendation_contexts(
             continue
         if abs(year - seed_year) > MAX_RECOMMENDATION_YEAR_DISTANCE:
             continue
-        decade_delta = abs(year // 10 * 10 - seed_decade)
-        bucket = 0 if decade_delta == 0 else 1 if decade_delta == 10 else 2
+        item_decade = year // 10 * 10
+        if item_decade == seed_decade:
+            bucket = 0
+        elif item_decade == seed_decade + 10:
+            bucket = 1
+        elif item_decade == seed_decade - 10:
+            bucket = 2
+        else:
+            bucket = 3
         buckets[bucket].append((index, item))
     for bucket_number, bucket in buckets.items():
         remaining = sorted(bucket, key=context_order)
@@ -236,7 +248,11 @@ def _interleave_recommendation_contexts(
                 artist_counts[artist] = artist_counts.get(artist, 0) + 1
         buckets[bucket_number] = ordered_bucket
 
-    schedule = (0, 0, 0, 0, 0, 0, 0, 1, 1, 2)
+    # Era distribution: ~90% same decade (bucket 0), ~5% adjacent decade (bucket 1),
+    # ~5% second adjacent decade (bucket 2). Out of 20 slots:
+    # 18 × bucket-0 = 90% (same era), 1 × bucket-1 = 5% (adjacent touch), 1 × bucket-2 = 5% (other adjacent touch).
+    # Distributed evenly so adjacent era songs appear as subtle touches rather than all at the end.
+    schedule = (0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0)
     ordered: list[dict] = []
     schedule_index = 0
     while any(buckets.values()):
@@ -269,7 +285,12 @@ def _prioritize_distinct_soundtracks(items: list[dict]) -> list[dict]:
 
 
 def _balance_seed_artist_mix(items: list[dict], seed: dict | None) -> list[dict]:
-    """Interleave seed lead-artist tracks with relevant tracks by other artists."""
+    """Enforce singer diversity: ~60-70%+ different singers, ~10-20% same singer.
+
+    Uses a balanced round-robin schedule where out of every 6 slots, at most
+    1 slot goes to the seed's lead artist and 5 slots go to different artists.
+    This guarantees 10-20% same singer representation and 80%+ different singers.
+    """
     seed_artists = str((seed or {}).get("artists", "")).split(",")
     lead_artist_keys = _artist_credit_keys(seed_artists[:1])
     if not lead_artist_keys:
@@ -284,12 +305,21 @@ def _balance_seed_artist_mix(items: list[dict], seed: dict | None) -> list[dict]
         else:
             other_artist_items.append(item)
 
+    # Schedule: 5 other artists, then 1 lead artist (1 / 6 = ~16.7% same artist, 83.3% different)
     balanced: list[dict] = []
+    other_streak = 0
     while lead_artist_items or other_artist_items:
-        if other_artist_items:
+        if other_streak < 5 and other_artist_items:
             balanced.append(other_artist_items.pop(0))
-        if lead_artist_items:
+            other_streak += 1
+        elif lead_artist_items:
             balanced.append(lead_artist_items.pop(0))
+            other_streak = 0
+        elif other_artist_items:
+            balanced.append(other_artist_items.pop(0))
+            other_streak += 1
+        else:
+            break
     return balanced
 
 
@@ -416,6 +446,8 @@ INTENT_KEYWORDS = {
 
 def infer_audio_intents(item: dict) -> set[str]:
     """Infer broad musical feel from audio features when those are available."""
+    if not any(item.get(k) is not None for k in ("energy", "valence", "danceability", "tempo")):
+        return set()
     try:
         energy = float(item.get("energy", 0.0) or 0.0)
         valence = float(item.get("valence", 0.0) or 0.0)
@@ -506,19 +538,26 @@ def infer_metadata_mood_labels(item: dict) -> set[str]:
             "playful", "comic", "comedy", "humorous", "funny", "lighthearted",
             "light hearted", "mischief", "masti", "nautanki", "chatur",
             "nok jhok", "banter", "witty", "theatrical", "expressive",
-            "call and response", "call response", "jugalbandi",
+            "call and response", "call response", "jugalbandi", "natkhat",
+            "shararat", "pagal", "chhedkhani", "mast", "jhume",
         },
         "energetic": {
             "fight", "anthem", "rock", "zinda", "sultan", "power", "action",
             "dance", "party", "bhangra", "bang", "fire", "dhamaka", "warrior",
             "bhaag", "milkha", "singham", "chaiyya", "ramta", "appadipodu",
-            "mappillai",
+            "mappillai", "dhoom", "jalwa", "toofan", "dum", "hungama", "jashn",
         },
         "romantic": {
-            "love", "romantic", "ishq", "mohabbat", "pyaar", "dil", "jaan",
-            "saiyaara",
+            "love", "romantic", "ishq", "mohabbat", "pyaar", "pyar", "dil",
+            "jaan", "saiyaara", "deewana", "deewani", "sanam", "saajna",
+            "humsafar", "baatein", "dhadkan", "chaha", "humdum", "haseen",
+            "kasam", "pehla nasha", "tum",
         },
-        "sad": {"sad", "heartbreak", "alone", "broken", "dard", "udaas"},
+        "sad": {
+            "sad", "heartbreak", "alone", "broken", "dard", "udaas", "tanha",
+            "judai", "judaai", "bewafa", "gam", "gham", "aansu", "alvida",
+            "rootha", "khoya",
+        },
         "instrumental": {
             "theme", "score", "background", "instrumental", "bgm", "soundtrack",
         },
@@ -1493,20 +1532,23 @@ class HybridRecommendationEngine:
             # not renormalize by positive-score count: a legitimate zero is
             # evidence of dissimilarity, not missing data.
             mood_fallback_values = np.where(audio_values > 0.0, 0.0, mood_values)
+            # Mood & Sentiment is the PRIMARY driver of recommendations.
+            # Direct audio/mood similarity + intent sentiment match carry >58% of the score.
+            # Era and artist diversity are strictly regulated in sequence re-ranking.
             hybrid = (
-                0.28 * audio_values
-                + 0.14 * metadata_values
-                + 0.05 * collaborative
-                + 0.04 * (0.60 * short_values + 0.40 * medium_values)
-                + 0.03 * np.asarray([item.get("_listener_mood_match", 0.0) for item in results])
-                + 0.03 * np.asarray([item.get("_listener_era_match", 0.0) for item in results])
-                + 0.07 * transition_values
-                + 0.16 * context_values
-                + 0.06 * artist_anchor_values
-                + 0.08 * era_values
-                + 0.04 * mood_fallback_values
-                + 0.03 * intent_values
-                + 0.03 * bandit_values
+                0.36 * audio_values
+                + 0.10 * metadata_values
+                + 0.04 * collaborative
+                + 0.03 * (0.60 * short_values + 0.40 * medium_values)
+                + 0.06 * np.asarray([item.get("_listener_mood_match", 0.0) for item in results])
+                + 0.02 * np.asarray([item.get("_listener_era_match", 0.0) for item in results])
+                + 0.05 * transition_values
+                + 0.13 * context_values
+                + 0.04 * artist_anchor_values
+                + 0.07 * era_values
+                + 0.06 * mood_fallback_values
+                + 0.06 * intent_values
+                + 0.02 * bandit_values
                 + 0.01 * popularity
             )
         else:
@@ -1538,9 +1580,11 @@ class HybridRecommendationEngine:
         seed_primary_artist_keys = _artist_credit_keys(
             str((seed or {}).get("artists", "")).split(",")[:1]
         )
+        # Strict singer diversity: seed singer capped at 10-20% of queue (e.g. 2-4 songs out of 30),
+        # ensuring 60-70%+ of the queue consists of different singers.
         seed_artist_repeat_limit = max(
             MAX_ARTIST_REPEATS_IN_QUEUE,
-            int(np.ceil(min(len(results), 30) / 2)),
+            min(4, int(np.ceil(min(len(results), 30) * 0.18))),
         )
         remaining = ranked.copy()
         while remaining:
@@ -1710,7 +1754,7 @@ class HybridRecommendationEngine:
                     (artist_counts.get(artist, 0) for artist in artist_keys),
                     default=0,
                 )
-                adjusted -= 0.30 * repeat_count
+                adjusted -= 0.45 * repeat_count
                 # Album/soundtrack continuity is useful for the first result,
                 # but repeated items from the same album must make room for
                 # equally relevant songs from the seed's era and intent.

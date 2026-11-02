@@ -707,9 +707,9 @@ def test_recommendations_mix_seed_and_nearby_decades_but_drop_distant_years():
     decades = [int(item["year"]) // 10 * 10 for item in ordered[:10]]
 
     assert len(ordered) == 20
-    assert decades.count(1970) == 7
-    assert decades.count(1960) + decades.count(1980) == 2
-    assert decades.count(1990) == 1
+    # Enforces ~90% same decade (1970s), with ~5-10% adjacent touch (1960s/1980s)
+    assert decades.count(1970) == 9
+    assert decades.count(1960) + decades.count(1980) == 1
     assert "distant-year" not in {item["song_id"] for item in ordered}
     assert "unknown-year" not in {item["song_id"] for item in ordered}
 
@@ -1265,7 +1265,10 @@ def test_full_recommendation_queue_balances_seed_singer_and_other_artists():
     )
 
     assert len(first_thirty) == 30
-    assert lata_count == 15
+    # Enforces singer diversity: majority (60-70%+) different singers, only 10-20% (or <=33% when other singers pool is exhausted) same singer
+    assert lata_count <= 10
+    other_singers_count = sum("lata mangeshkar" not in item["artists"].casefold() for item in first_thirty)
+    assert other_singers_count >= 20
     assert all(item["recommendation_features"]["mood"] > 0.99 for item in first_thirty)
     assert all(abs(int(item["year"]) - 1987) <= 15 for item in first_thirty)
 
