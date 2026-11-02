@@ -5,7 +5,7 @@ import re
 import numpy as np
 import pandas as pd
 
-HYBRID_MODEL_VERSION = "hybrid-v33-mood-first-era-singer-diversity"
+HYBRID_MODEL_VERSION = "hybrid-v34-era-mood-singer-diversity"
 
 EXCLUDED_RECOMMENDATION_TITLES = {"jo bhi kasmein"}
 MAX_RECOMMENDATION_YEAR_DISTANCE = 15
@@ -119,6 +119,304 @@ def _mood_era_discovery_queries(
     if not queries:
         queries.append(f"{era}{language_part} songs")
     return queries
+
+
+# ---------------------------------------------------------------------------
+# Classic era × mood × singer discovery table
+# ---------------------------------------------------------------------------
+# Keys: decade (int, e.g. 1970) → mood-label (str) → list[singer names]
+# Mood labels match the INTENT_KEYWORDS categories defined further below.
+# Purpose: when building recommendations for a Hindi/Indian seed we inject
+#   queries for well-known singers from the SAME decade + mood who are NOT
+#   the seed's own artist.  This ensures "Tere Bina Zindagi Se" (70s romantic,
+#   Kishore Kumar) surfaces Lata Mangeshkar / Rafi 70s romantic tracks, and
+#   "Get Ready to Fight" (2010s motivational) surfaces Sultan / Bhaag Milkha
+#   Bhaag era motivational tracks without hard-coding any titles.
+# The lists are deliberately ordered: best-known names first.
+CLASSIC_ERA_SINGERS: dict[str, dict[int, dict[str, list[str]]]] = {
+    "hindi": {
+        1950: {
+            "romantic":    ["Lata Mangeshkar", "Mohammed Rafi", "Mukesh", "Geeta Dutt"],
+            "sad":         ["Mukesh", "Mohammed Rafi", "Lata Mangeshkar", "Talat Mahmood"],
+            "devotional":  ["Lata Mangeshkar", "Mukesh"],
+            "playful":     ["Asha Bhosle", "Geeta Dutt", "Mohammed Rafi"],
+            "energetic":   ["Mohammed Rafi", "Lata Mangeshkar"],
+        },
+        1960: {
+            "romantic":    ["Lata Mangeshkar", "Mohammed Rafi", "Mukesh", "Asha Bhosle", "Hemant Kumar"],
+            "sad":         ["Mukesh", "Mohammed Rafi", "Lata Mangeshkar", "Talat Mahmood"],
+            "devotional":  ["Lata Mangeshkar", "Mohammed Rafi", "Mukesh"],
+            "playful":     ["Asha Bhosle", "Mohammed Rafi", "Kishore Kumar"],
+            "energetic":   ["Mohammed Rafi", "Kishore Kumar"],
+        },
+        1970: {
+            "romantic":    ["Kishore Kumar", "Mohammed Rafi", "Lata Mangeshkar", "Asha Bhosle", "Mukesh"],
+            "sad":         ["Kishore Kumar", "Mohammed Rafi", "Lata Mangeshkar", "Mukesh"],
+            "devotional":  ["Lata Mangeshkar", "Asha Bhosle", "Mukesh"],
+            "playful":     ["Kishore Kumar", "Asha Bhosle", "Mohammed Rafi"],
+            "energetic":   ["Kishore Kumar", "Mohammed Rafi", "Asha Bhosle"],
+            "ghazal":      ["Jagjit Singh", "Pankaj Udhas", "Ghulam Ali"],
+        },
+        1980: {
+            "romantic":    ["Kishore Kumar", "Lata Mangeshkar", "Asha Bhosle", "SP Balasubrahmanyam", "Mohammed Rafi"],
+            "sad":         ["Kishore Kumar", "Lata Mangeshkar", "SP Balasubrahmanyam"],
+            "devotional":  ["Anuradha Paudwal", "Lata Mangeshkar", "SP Balasubrahmanyam"],
+            "playful":     ["Kishore Kumar", "Asha Bhosle", "Kavita Krishnamurthy"],
+            "energetic":   ["Kishore Kumar", "SP Balasubrahmanyam"],
+            "ghazal":      ["Jagjit Singh", "Pankaj Udhas", "Ghulam Ali", "Asha Bhosle"],
+        },
+        1990: {
+            "romantic":    ["Kumar Sanu", "Udit Narayan", "Alka Yagnik", "Kavita Krishnamurthy", "SP Balasubrahmanyam"],
+            "sad":         ["Kumar Sanu", "Udit Narayan", "Lata Mangeshkar", "Alka Yagnik"],
+            "devotional":  ["Anuradha Paudwal", "Udit Narayan", "Kumar Sanu"],
+            "playful":     ["Udit Narayan", "Alka Yagnik", "Sonu Nigam", "Kavita Krishnamurthy"],
+            "energetic":   ["Udit Narayan", "Sonu Nigam", "Ila Arun"],
+            "ghazal":      ["Jagjit Singh", "Pankaj Udhas", "Talat Aziz"],
+        },
+        2000: {
+            "romantic":    ["Sonu Nigam", "KK", "Shreya Ghoshal", "Sunidhi Chauhan", "Udit Narayan"],
+            "sad":         ["KK", "Sonu Nigam", "Shreya Ghoshal", "Mohit Chauhan"],
+            "motivational": ["Sonu Nigam", "Shankar Mahadevan", "Sukhwinder Singh", "Udit Narayan"],
+            "energetic":   ["Shankar Mahadevan", "Sunidhi Chauhan", "Sukhwinder Singh"],
+            "playful":     ["Shreya Ghoshal", "Sunidhi Chauhan", "Sonu Nigam"],
+            "devotional":  ["Shreya Ghoshal", "Sonu Nigam", "Anuradha Paudwal"],
+            "ghazal":      ["Jagjit Singh", "Hariharan"],
+            "acoustic_indie": ["Strings", "Lucky Ali", "KK"],
+        },
+        2010: {
+            "romantic":    ["Arijit Singh", "Atif Aslam", "Shreya Ghoshal", "Mohit Chauhan", "Rahat Fateh Ali Khan"],
+            "sad":         ["Arijit Singh", "KK", "Mohit Chauhan", "Jubin Nautiyal"],
+            "motivational": ["KK", "Siddharth Mahadevan", "Vishal Dadlani", "Sukhwinder Singh", "Daler Mehndi"],
+            "energetic":   ["Vishal Dadlani", "Nakash Aziz", "Sunidhi Chauhan", "Divya Kumar"],
+            "playful":     ["Shreya Ghoshal", "Benny Dayal", "Sunidhi Chauhan"],
+            "devotional":  ["Shreya Ghoshal", "Palak Muchhal", "Sonu Nigam"],
+            "acoustic_indie": ["Prateek Kuhad", "Anand Bhaskar", "Papon", "Ankur Tewari"],
+            "rap_hiphop":  ["Raftaar", "Divine", "Badshah", "Yo Yo Honey Singh"],
+        },
+        2020: {
+            "romantic":    ["Arijit Singh", "Jubin Nautiyal", "Shreya Ghoshal", "Darshan Raval", "Raghav Chaitanya"],
+            "sad":         ["Arijit Singh", "Jubin Nautiyal", "Stebin Ben"],
+            "motivational": ["Diljit Dosanjh", "Vishal Dadlani", "Amit Trivedi"],
+            "energetic":   ["Vishal Dadlani", "Sunidhi Chauhan", "Harshdeep Kaur"],
+            "playful":     ["Neha Kakkar", "Darshan Raval", "Jubin Nautiyal"],
+            "acoustic_indie": ["Prateek Kuhad", "Armaan Malik", "Nikhil D'Souza"],
+            "rap_hiphop":  ["Divine", "Raftaar", "MC Stan", "Badshah"],
+        },
+    },
+    "english": {
+        1960: {
+            "romantic":    ["The Beatles", "Elvis Presley", "Frank Sinatra", "Nat King Cole"],
+            "playful":     ["The Beatles", "The Rolling Stones", "Chuck Berry"],
+            "energetic":   ["The Rolling Stones", "Chuck Berry", "Little Richard"],
+        },
+        1970: {
+            "romantic":    ["Elton John", "Barry White", "Stevie Wonder", "Eagles", "Fleetwood Mac"],
+            "sad":         ["Elton John", "Stevie Wonder", "Fleetwood Mac"],
+            "energetic":   ["Led Zeppelin", "Queen", "ABBA"],
+            "playful":     ["ABBA", "Bee Gees", "Donna Summer"],
+        },
+        1980: {
+            "romantic":    ["Whitney Houston", "George Michael", "Phil Collins", "Lionel Richie", "Madonna"],
+            "sad":         ["Phil Collins", "Bryan Adams", "Bonnie Tyler"],
+            "energetic":   ["Michael Jackson", "Cyndi Lauper", "Prince", "Tina Turner"],
+            "playful":     ["Michael Jackson", "Cyndi Lauper", "Wham!"],
+        },
+        1990: {
+            "romantic":    ["Mariah Carey", "Celine Dion", "Boyz II Men", "Bryan Adams", "Whitney Houston"],
+            "sad":         ["Celine Dion", "Mariah Carey", "Alanis Morissette"],
+            "energetic":   ["Backstreet Boys", "Spice Girls", "TLC", "Destiny's Child"],
+            "playful":     ["Backstreet Boys", "Spice Girls", "NSYNC"],
+            "rap_hiphop":  ["Tupac", "Notorious BIG", "Jay-Z", "Eminem"],
+        },
+        2000: {
+            "romantic":    ["Norah Jones", "John Mayer", "Alicia Keys", "Coldplay", "Adele"],
+            "sad":         ["Adele", "Amy Winehouse", "John Mayer"],
+            "energetic":   ["Beyonce", "Rihanna", "Justin Timberlake", "Katy Perry"],
+            "playful":     ["Katy Perry", "Justin Timberlake", "Bruno Mars"],
+            "rap_hiphop":  ["Eminem", "Jay-Z", "Kanye West", "Lil Wayne"],
+            "acoustic_indie": ["Jack Johnson", "John Mayer", "Jason Mraz"],
+        },
+        2010: {
+            "romantic":    ["Ed Sheeran", "Sam Smith", "Adele", "John Legend", "Bruno Mars"],
+            "sad":         ["Adele", "Sam Smith", "Lana Del Rey", "Billie Eilish"],
+            "energetic":   ["Dua Lipa", "The Weeknd", "Ariana Grande", "Taylor Swift"],
+            "playful":     ["Bruno Mars", "Ed Sheeran", "Carly Rae Jepsen"],
+            "motivational": ["Eminem", "Imagine Dragons", "Coldplay", "Kendrick Lamar"],
+            "rap_hiphop":  ["Drake", "Kendrick Lamar", "Post Malone", "Travis Scott"],
+            "acoustic_indie": ["Hozier", "James Bay", "Vance Joy"],
+        },
+        2020: {
+            "romantic":    ["Harry Styles", "Olivia Rodrigo", "The Weeknd", "Dua Lipa"],
+            "sad":         ["Billie Eilish", "Olivia Rodrigo", "Lewis Capaldi"],
+            "energetic":   ["Dua Lipa", "Doja Cat", "Lizzo", "Ariana Grande"],
+            "motivational": ["Imagine Dragons", "The Kid LAROI", "Masked Wolf"],
+            "rap_hiphop":  ["Drake", "Lil Nas X", "Bad Bunny", "Kendrick Lamar"],
+        },
+    },
+}
+
+
+def era_mood_singer_discovery_queries(
+    seed_year: object,
+    seed_language: object,
+    seed_intents: set[str],
+    seed_artists: list[str],
+    max_singers: int = 6,
+) -> list[str]:
+    """Return era×mood×singer discovery queries for the seed, excluding seed's own artist.
+
+    For a 1970s Hindi romantic song (Kishore Kumar) this returns queries like:
+        "Mohammad Rafi 1970s songs", "Lata Mangeshkar 1970s romantic songs",
+        "Asha Bhosle 1970s romantic songs"
+    For a 2010s Hindi motivational song:
+        "KK 2010s motivational songs", "Vishal Dadlani 2010s songs", ...
+    """
+    year = _release_year(seed_year)
+    if not year:
+        return []
+    decade = (year // 10) * 10
+    language = str(seed_language or "").strip().lower()
+
+    # Normalise seed artist names to key form so we can exclude them.
+    seed_artist_keys: set[str] = set()
+    for name in seed_artists:
+        key = re.sub(r"[^a-z0-9]+", " ", str(name or "").casefold()).strip()
+        if key:
+            seed_artist_keys.add(key)
+
+    era_table = CLASSIC_ERA_SINGERS.get(language, {})
+    if not era_table:
+        # For unknown languages, try "hindi" as a fallback for South-Asian songs
+        era_table = CLASSIC_ERA_SINGERS.get("hindi", {})
+
+    decade_table = era_table.get(decade, {})
+    if not decade_table:
+        # Try adjacent decade if exact decade not in table
+        for adj in (decade - 10, decade + 10):
+            if adj in era_table:
+                decade_table = era_table[adj]
+                break
+
+    if not decade_table:
+        return []
+
+    # Collect singers for all matching moods; deduplicate preserving priority order.
+    mood_labels = [i for i in sorted(seed_intents) if i in decade_table]
+    if not mood_labels:
+        mood_labels = list(decade_table.keys())[:1]
+
+    collected_singers: list[str] = []
+    seen_singer_keys: set[str] = set()
+    for mood in mood_labels:
+        for singer in decade_table.get(mood, []):
+            skey = re.sub(r"[^a-z0-9]+", " ", singer.casefold()).strip()
+            if skey and skey not in seen_singer_keys and skey not in seed_artist_keys:
+                seen_singer_keys.add(skey)
+                collected_singers.append(singer)
+            if len(collected_singers) >= max_singers:
+                break
+        if len(collected_singers) >= max_singers:
+            break
+
+    if not collected_singers:
+        return []
+
+    era_str = f"{decade}s"
+    mood_term = ""
+    mood_map = {
+        "romantic": "romantic", "sad": "sad", "energetic": "energetic",
+        "playful": "feel good", "devotional": "devotional", "ghazal": "ghazal",
+        "motivational": "motivational", "acoustic_indie": "acoustic", "rap_hiphop": "hip hop",
+    }
+    if mood_labels:
+        mood_term = mood_map.get(mood_labels[0], "")
+
+    queries: list[str] = []
+    for singer in collected_singers:
+        queries.append(f"{singer} {era_str} songs")
+        if mood_term:
+            queries.append(f"{singer} {era_str} {mood_term} songs")
+    return queries
+
+
+# ---------------------------------------------------------------------------
+# Iconic era × mood film soundtrack discovery table
+# ---------------------------------------------------------------------------
+# When recommending songs for an era + mood seed, querying iconic films of that
+# exact decade and mood (e.g. Sultan / Bhaag Milkha Bhaag for 2010s motivational,
+# Aashiqui 2 / Yeh Jawaani Hai Deewani for 2010s romantic, Aandhi / Bobby for 70s romantic)
+# surfaces high-quality soundtrack tracks sharing the exact era and sentiment.
+CLASSIC_ERA_THEME_FILMS: dict[str, dict[int, dict[str, list[str]]]] = {
+    "hindi": {
+        1970: {
+            "romantic": ["Aandhi", "Kabhi Kabhie", "Bobby", "Amar Prem", "Mili"],
+            "sad": ["Anand", "Muqaddar Ka Sikandar", "Mili", "Amar Prem"],
+            "energetic": ["Sholay", "Don", "Yaadon Ki Baaraat", "Hum Kisise Kum Naheen"],
+            "playful": ["Chhoti Si Baat", "Gol Maal", "Pati Patni Aur Woh"],
+        },
+        1980: {
+            "romantic": ["Silsila", "Chandni", "Qayamat Se Qayamat Tak", "Umrao Jaan", "Saagar"],
+            "sad": ["Arth", "Saath Saath", "Sadma", "Masoom"],
+            "energetic": ["Disco Dancer", "Karz", "Mr India", "Tezaab"],
+        },
+        1990: {
+            "romantic": ["Dilwale Dulhania Le Jayenge", "Kuch Kuch Hota Hai", "Aashiqui", "Saajan", "Hum Dil De Chuke Sanam"],
+            "sad": ["Dil Se", "Hum Dil De Chuke Sanam", "Zakhm", "Sadak"],
+            "energetic": ["Mohra", "Baazigar", "Main Khiladi Tu Anari"],
+            "playful": ["Andaz Apna Apna", "Hum Aapke Hain Koun", "Judwaa"],
+        },
+        2000: {
+            "romantic": ["Kal Ho Naa Ho", "Veer Zaara", "Jab We Met", "Rehnaa Hai Terre Dil Mein"],
+            "motivational": ["Chak De India", "Lakshya", "Lagaan", "Swades", "Iqbal"],
+            "sad": ["Tere Naam", "Ghajini", "Devdas"],
+            "energetic": ["Dhoom", "Dhoom 2", "Bunty Aur Babli"],
+        },
+        2010: {
+            "romantic": ["Aashiqui 2", "Yeh Jawaani Hai Deewani", "Kabir Singh", "Ae Dil Hai Mushkil", "Rockstar"],
+            "motivational": ["Sultan", "Bhaag Milkha Bhaag", "Dangal", "Mary Kom", "Brothers", "Chak De India"],
+            "sad": ["Aashiqui 2", "Rockstar", "Hamari Adhuri Kahani"],
+            "energetic": ["Gully Boy", "Simmba", "Padmaavat", "Sultan"],
+        },
+        2020: {
+            "romantic": ["Shershaah", "Kabir Singh", "Ludo", "Brahmastra"],
+            "motivational": ["83", "Toofaan", "Maidaan", "Shershaah"],
+            "sad": ["Shershaah", "Atrangi Re"],
+            "energetic": ["RRR", "KGF Chapter 2", "Pathaan", "Jawan"],
+        },
+    },
+}
+
+
+def era_theme_film_discovery_queries(
+    seed_year: object,
+    seed_language: object,
+    seed_intents: set[str],
+    max_films: int = 4,
+) -> list[str]:
+    """Return thematic film discovery queries for the seed's era and mood."""
+    year = _release_year(seed_year)
+    if not year:
+        return []
+    decade = (year // 10) * 10
+    lang = str(seed_language or "hindi").strip().lower()
+    film_table = CLASSIC_ERA_THEME_FILMS.get(lang, {}).get(decade, {})
+    if not film_table:
+        for adj in (decade - 10, decade + 10):
+            if adj in CLASSIC_ERA_THEME_FILMS.get(lang, {}):
+                film_table = CLASSIC_ERA_THEME_FILMS[lang][adj]
+                break
+    if not film_table:
+        return []
+    queries: list[str] = []
+    mood_labels = [i for i in sorted(seed_intents) if i in film_table]
+    if not mood_labels:
+        mood_labels = list(film_table.keys())[:1]
+    for mood in mood_labels:
+        for film in film_table.get(mood, [])[:max_films]:
+            queries.append(f"{film} songs")
+            if mood in {"motivational", "romantic", "sad"}:
+                queries.append(f"{film} {mood} songs")
+    return queries[:max_films * 2]
 
 
 def _recommendation_work_key(item: dict) -> str:
@@ -501,7 +799,7 @@ def infer_same_soundtrack_audio_intents(seed: dict, candidates: list[dict]) -> s
 
 def _infer_candidate_intents(item: dict) -> set[str]:
     """Infer musical intent from the track's own metadata, never its artist."""
-    supplied_labels = item.get("intent_labels")
+    supplied_labels = item.get("intent_labels") or item.get("query_intents")
     if isinstance(supplied_labels, (list, tuple, set)):
         labels = {
             str(label).strip().casefold()
@@ -514,7 +812,7 @@ def _infer_candidate_intents(item: dict) -> set[str]:
         str(item.get(field, ""))
         for field in (
             "title", "album", "track_genre", "genre", "language", "mood",
-            "description", "tags", "intent_labels",
+            "description", "tags", "intent_labels", "candidate_source",
         )
     ).casefold()
     tokens = set(re.findall(r"[a-z0-9]+", text))
@@ -1716,6 +2014,11 @@ class HybridRecommendationEngine:
                         or (
                             float(item.get("_seed_artist_match", 0.0)) >= 1.0
                             and year_compatible
+                        )
+                        or (
+                            relaxed_context
+                            and float(item.get("_era_match", 0.0)) >= 0.40
+                            and not bool(item.get("_intent_conflict", False))
                         )
                     )
                 ):

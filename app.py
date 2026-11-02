@@ -20,6 +20,8 @@ from recommender import (
     SpotifyRecommendationEngine,
     _era_artist_discovery_queries,
     _mood_era_discovery_queries,
+    era_mood_singer_discovery_queries,
+    era_theme_film_discovery_queries,
     _soundtrack_peer_artists,
     infer_audio_intents,
     infer_metadata_mood_labels,
@@ -1161,7 +1163,7 @@ def build_jio_up_next(
     user_id: str,
     catalog: pd.DataFrame,
     preferred_track_ids: list[str],
-    limit: int = 30,
+    limit: int = 35,
     exclude_items: list[dict] | None = None,
 ) -> list[dict]:
     """Build a separate recommendation queue; never reuse search results."""
@@ -1318,14 +1320,30 @@ def build_jio_up_next(
             f"{artist_names[0]} essentials" if artist_names else f"{language_query} feel good songs",
         ],
     ]
+    seed_intents_set = set(seed.get("intent_labels", []))
+    era_singer_queries = era_mood_singer_discovery_queries(
+        seed_year,
+        seed_language,
+        seed_intents_set,
+        artist_names,
+        max_singers=5,
+    )
+    era_film_queries = era_theme_film_discovery_queries(
+        seed_year,
+        seed_language,
+        seed_intents_set,
+        max_films=4,
+    )
     prioritized_queries = (
         related_queries[:3]
         + title_variants[refresh_round % len(title_variants)]
         + _mood_era_discovery_queries(
             seed_year,
             seed_language,
-            set(seed.get("intent_labels", [])),
+            seed_intents_set,
         )
+        + era_singer_queries
+        + era_film_queries
         + _era_artist_discovery_queries(seed_year, artist_names)
         + related_queries[3:]
     )
@@ -1474,9 +1492,9 @@ def build_jio_up_next(
         except Exception:
             pass
 
-    # Ensure queue always contains 10+ (up to 30) songs:
-    # If the seed singer only has 1-2 matching tracks, discover more songs by
-    # OTHER artists from the EXACT same era and matching mood.
+    # Guarantee queue contains 10-35 songs matching seed's mood + era with diverse singers:
+    # If the initial queries yield < 15 relevant songs, fire an intensive expansion wave
+    # targeting other singers from that exact era doing the same mood + iconic era films.
     if len(ranked) < 15:
         era_term = f"{(seed_year // 10) * 10}s" if seed_year else ""
         lang_term = seed_language or "hindi"
@@ -1489,6 +1507,25 @@ def build_jio_up_next(
             else "hits"
         )
         expansion_queries = []
+        # Era-aware different singer queries (Rafi, Lata, Asha, etc. for 70s romantic)
+        expansion_queries.extend(
+            era_mood_singer_discovery_queries(
+                seed_year,
+                seed_language,
+                seed_intents_set,
+                artist_names,
+                max_singers=8,
+            )
+        )
+        # Iconic era film soundtrack queries (e.g. Sultan/Bhaag Milkha Bhaag for 2010s motivational)
+        expansion_queries.extend(
+            era_theme_film_discovery_queries(
+                seed_year,
+                seed_language,
+                seed_intents_set,
+                max_films=6,
+            )
+        )
         if era_term:
             expansion_queries.extend([
                 f"{era_term} {lang_term} {mood_str} songs",
@@ -1512,7 +1549,7 @@ def build_jio_up_next(
                 f"top {lang_term} {mood_str} songs",
                 f"{lang_term} superhits",
             ])
-        collect_queries(expansion_queries, page_limit=30, max_queries=10, source="same_era_mood_artist_expansion")
+        collect_queries(expansion_queries, page_limit=40, max_queries=16, source="same_era_mood_artist_expansion")
         enriched_collected = enrich_live_items(collected)
         try:
             expanded_ranked = hybrid.rank_jio_results(
@@ -1525,6 +1562,37 @@ def build_jio_up_next(
             )
             if len(expanded_ranked) > len(ranked):
                 ranked = expanded_ranked
+        except Exception:
+            pass
+
+    # Safety floor: never let queue drop below 10 songs under any circumstance
+    if len(ranked) < 10:
+        safety_queries = []
+        era_term = f"{(seed_year // 10) * 10}s" if seed_year else ""
+        lang_term = seed_language or "hindi"
+        if era_term:
+            safety_queries.extend([
+                f"{era_term} {lang_term} hits",
+                f"{era_term} {lang_term} songs",
+                f"best of {era_term} songs",
+            ])
+        safety_queries.extend([
+            f"{lang_term} classics" if era_term and int(str(seed_year)[:4]) < 2000 else f"{lang_term} top hits",
+            f"popular {lang_term} songs",
+        ])
+        collect_queries(safety_queries, page_limit=40, max_queries=6, source="safety_floor_expansion")
+        enriched_collected = enrich_live_items(collected)
+        try:
+            safety_ranked = hybrid.rank_jio_results(
+                enriched_collected,
+                user_id,
+                catalog,
+                preferred_track_ids,
+                seed=seed,
+                relaxed_context=True,
+            )
+            if len(safety_ranked) > len(ranked):
+                ranked = safety_ranked
         except Exception:
             pass
     st.session_state["jio_queue_status"] = {
