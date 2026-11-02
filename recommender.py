@@ -40,6 +40,72 @@ def _release_year(value: object) -> int:
     return year if 1900 <= year <= 2100 else 0
 
 
+def _era_artist_discovery_queries(seed_year: object, artists: list[str]) -> list[str]:
+    year = _release_year(seed_year)
+    if not year:
+        return []
+
+    min_year = year - MAX_RECOMMENDATION_YEAR_DISTANCE
+    max_year = year + MAX_RECOMMENDATION_YEAR_DISTANCE
+    seed_decade = year // 10 * 10
+    decades = [
+        decade
+        for decade in range(min_year // 10 * 10, max_year // 10 * 10 + 1, 10)
+        if decade != seed_decade and min_year <= decade and decade + 9 <= max_year
+    ]
+    queries: list[str] = []
+    seen_artists: set[str] = set()
+    for artist in artists:
+        artist = str(artist or "").strip()
+        artist_key = re.sub(r"[^a-z0-9]+", " ", artist.casefold()).strip()
+        if not artist_key or artist_key in seen_artists:
+            continue
+        seen_artists.add(artist_key)
+        query_start = max(min_year, year - 2)
+        query_end = min(max_year, year + 2)
+        queries.extend(
+            f"{artist} {query_year} songs"
+            for query_year in range(query_start, query_end + 1)
+        )
+        queries.extend(f"{artist} {decade}s songs" for decade in decades)
+        if len(seen_artists) >= 2:
+            break
+    return queries
+
+
+def _recommendation_work_key(item: dict) -> str:
+    work = recommendation_source_work(item)
+    album = work or str(item.get("album", "")).casefold()
+    if not album or is_compilation_album(album):
+        return ""
+    album = re.sub(
+        r"\b(?:original\s+motion\s+picture\s+)?soundtrack\b",
+        "",
+        album,
+    )
+    return re.sub(r"[^a-z0-9]+", " ", album).strip()
+
+
+def _soundtrack_peer_artists(seed: dict, candidates: list[dict]) -> list[str]:
+    seed_work = _recommendation_work_key(seed)
+    if not seed_work:
+        return []
+    seed_artists = {
+        re.sub(r"[^a-z0-9]+", " ", artist.casefold()).strip()
+        for artist in str(seed.get("artists", "")).split(",")
+    }
+    artists: dict[str, str] = {}
+    for candidate in candidates:
+        if _recommendation_work_key(candidate) != seed_work:
+            continue
+        for artist in str(candidate.get("artists", "")).split(","):
+            artist = artist.strip()
+            artist_key = re.sub(r"[^a-z0-9]+", " ", artist.casefold()).strip()
+            if artist_key and artist_key not in seed_artists:
+                artists.setdefault(artist_key, artist)
+    return list(artists.values())[:1]
+
+
 def _interleave_recommendation_contexts(items: list[dict], seed_year: int) -> list[dict]:
     """Favor the seed decade, then mix in close decades by mood relevance."""
     seed_decade = seed_year // 10 * 10 if seed_year else 0
@@ -93,6 +159,21 @@ def _interleave_recommendation_contexts(items: list[dict], seed_year: int) -> li
         _, item = buckets[bucket].pop(0)
         ordered.append(item)
     return ordered
+
+
+def _prioritize_distinct_soundtracks(items: list[dict]) -> list[dict]:
+    unique: list[dict] = []
+    repeats: list[dict] = []
+    seen_work_keys: set[str] = set()
+    for item in items:
+        work_key = _recommendation_work_key(item)
+        if work_key and work_key in seen_work_keys:
+            repeats.append(item)
+        else:
+            unique.append(item)
+            if work_key:
+                seen_work_keys.add(work_key)
+    return unique + repeats
 
 
 def _metadata_feature_tokens(item: dict) -> dict[str, float]:
@@ -207,7 +288,7 @@ INTENT_KEYWORDS = {
     "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "pyar", "dil", "jaan", "milan", "sanam", "aashiqui", "prem", "saiyaara"},
     "playful": {"playful", "comic", "comedy", "humorous", "funny", "lighthearted", "light hearted", "mischief", "masti", "nautanki", "chatur", "nok jhok", "banter", "witty", "theatrical", "expressive", "call and response", "call response", "jugalbandi"},
     "ghazal": {"ghazal", "ghazals", "mehfil", "rekhta", "shayari", "ghulam ali", "chupke chupke classics"},
-    "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "bajrang", "shiva", "shivay", "mahadev", "krishna", "radhe", "aarti", "qawwali devotional"},
+    "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "bajrang", "shiva", "shivay", "mahadev", "krishna", "radhe", "ghanshyam", "aarti", "qawwali devotional"},
     "motivational": {"motivation", "motivational", "fight", "fighting", "battle", "victory", "fighter", "warrior", "rise", "zinda", "jeet", "inspire", "goal", "champion", "unstoppable"},
     "energetic": {"fight", "fighting", "anthem", "rock", "dance", "party", "bhangra", "dhamaka", "dhamaal", "energetic", "power", "action", "high energy"},
     "acoustic_indie": {"acoustic", "unplugged", "indie", "folk", "coke studio", "singer songwriter"},
@@ -233,6 +314,38 @@ def infer_audio_intents(item: dict) -> set[str]:
     ):
         return {"playful"}
     return set()
+
+
+def infer_same_soundtrack_audio_intents(seed: dict, candidates: list[dict]) -> set[str]:
+    """Use matching soundtrack peers as a low-confidence intent hint for sparse seeds."""
+    if infer_audio_intents(seed):
+        return set()
+
+    seed_work = _recommendation_work_key(seed)
+    if not seed_work:
+        return set()
+
+    peer_intents = []
+    for candidate in candidates:
+        if _recommendation_work_key(candidate) != seed_work:
+            continue
+        if str(candidate.get("mood_source", "")) != "local_audio_catalog":
+            continue
+        if not any(candidate.get(key) is not None for key in ("energy", "valence", "danceability", "tempo")):
+            continue
+        peer_intents.append(infer_audio_intents(candidate))
+    if not peer_intents:
+        return set()
+
+    intent_counts: dict[str, int] = {}
+    for intents in peer_intents:
+        for intent in intents:
+            intent_counts[intent] = intent_counts.get(intent, 0) + 1
+    minimum_votes = len(peer_intents) // 2 + 1
+    return {
+        intent for intent, count in intent_counts.items()
+        if count >= minimum_votes
+    }
 
 
 def _infer_candidate_intents(item: dict) -> set[str]:
@@ -1243,7 +1356,7 @@ class HybridRecommendationEngine:
             for index, (base_score, item) in enumerate(remaining):
                 item_id = str(item.get("song_id") or item.get("title", ""))
                 artist_key = str(item.get("artists", "")).lower()
-                album_key = str(item.get("album", "")).lower()
+                album_key = _recommendation_work_key(item) or str(item.get("album", "")).lower()
                 title_key = re.sub(r"[^a-z0-9]+", " ", str(item.get("title", "")).lower()).strip()
                 # Do not surface recently played songs or weak fallback items.
                 # A user-history recommendation is allowed only when it also
@@ -1387,7 +1500,7 @@ class HybridRecommendationEngine:
                 # Album/soundtrack continuity is useful for the first result,
                 # but repeated items from the same album must make room for
                 # equally relevant songs from the seed's era and intent.
-                adjusted -= 0.06 * album_counts.get(album_key, 0)
+                adjusted -= 0.25 * album_counts.get(album_key, 0)
                 if selected and artist_key == str(selected[-1].get("artists", "")).lower():
                     adjusted -= 0.08
                 eligible.append((index, adjusted, base_relevance, redundancy))
@@ -1395,6 +1508,16 @@ class HybridRecommendationEngine:
             # relevance gate, finish cleanly instead of leaking weak fallbacks.
             if not eligible:
                 break
+            distinct_soundtracks = [
+                candidate
+                for candidate in eligible
+                if not (
+                    (work_key := _recommendation_work_key(remaining[candidate[0]][1]))
+                    and album_counts.get(work_key, 0)
+                )
+            ]
+            if distinct_soundtracks:
+                eligible = distinct_soundtracks
             best = max(eligible, key=lambda pair: pair[1])
             best_index = best[0]
             _, chosen = remaining.pop(best_index)
@@ -1432,12 +1555,13 @@ class HybridRecommendationEngine:
             chosen["recommendation_model_version"] = HYBRID_MODEL_VERSION
             selected.append(chosen)
             artist_key = str(chosen.get("artists", "")).lower()
-            album_key = str(chosen.get("album", "")).lower()
+            album_key = _recommendation_work_key(chosen) or str(chosen.get("album", "")).lower()
             artist_counts[artist_key] = artist_counts.get(artist_key, 0) + 1
             album_counts[album_key] = album_counts.get(album_key, 0) + 1
 
         # Keep year closeness and mood ahead of artist/soundtrack context.
         selected = _interleave_recommendation_contexts(selected, seed_year)
+        selected = _prioritize_distinct_soundtracks(selected)
         for item in selected:
             item.pop("_context_score", None)
             item.pop("_profile_score", None)

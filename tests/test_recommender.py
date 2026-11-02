@@ -7,9 +7,12 @@ from recommender import (
     HybridRecommendationEngine,
     SpotifyRecommendationEngine,
     _canonical_recording_key,
+    _era_artist_discovery_queries,
     _infer_candidate_intents,
     _interleave_recommendation_contexts,
     infer_audio_intents,
+    infer_same_soundtrack_audio_intents,
+    _soundtrack_peer_artists,
     is_compilation_album,
     recommendation_source_work,
     recommendation_history_keys,
@@ -161,6 +164,7 @@ def test_intent_detection_separates_motivational_from_romantic_candidates():
     assert not seed_intents.intersection(_infer_candidate_intents(romantic_candidate))
     assert seed_intents.intersection(_infer_candidate_intents(motivational_candidate))
     assert "motivational" in _infer_candidate_intents({"title": "Fight for victory"})
+    assert "devotional" in _infer_candidate_intents({"title": "Darshan Do Ghanshyam"})
 
 
 def test_playful_intent_uses_descriptive_metadata_and_lively_audio_features():
@@ -169,6 +173,43 @@ def test_playful_intent_uses_descriptive_metadata_and_lively_audio_features():
 
     assert _infer_candidate_intents(described) == {"playful"}
     assert infer_audio_intents(mellow) == set()
+
+
+def test_sparse_seed_uses_same_soundtrack_audio_as_a_low_confidence_intent_hint():
+    seed = {
+        "title": "Babu Samjho Ishare",
+        "album": "Chalti Ka Naam Gaadi",
+        "intent_labels": ["general"],
+    }
+    soundtrack_peer = {
+        "title": "Ek Ladki Bheegi Bhagi Si",
+        "album": "Chalti Ka Naam Gaadi (Original Motion Picture Soundtrack)",
+        "mood_source": "local_audio_catalog",
+        "energy": 0.455,
+        "valence": 0.892,
+        "danceability": 0.563,
+        "tempo": 120.784,
+    }
+    unrelated_track = {
+        **soundtrack_peer,
+        "album": "Different Film",
+        "energy": 0.90,
+        "valence": 0.95,
+        "danceability": 0.80,
+    }
+    mellow_soundtrack_peer = {
+        **soundtrack_peer,
+        "energy": 0.30,
+        "valence": 0.45,
+        "danceability": 0.40,
+    }
+
+    assert infer_same_soundtrack_audio_intents(seed, [soundtrack_peer]) == {"playful"}
+    assert infer_same_soundtrack_audio_intents(seed, [unrelated_track]) == set()
+    assert infer_same_soundtrack_audio_intents(
+        seed,
+        [soundtrack_peer, mellow_soundtrack_peer],
+    ) == set()
 
 
 def test_playful_theatrical_seed_prefers_lively_audio_over_same_artist_ballad():
@@ -445,6 +486,118 @@ def test_recommendations_mix_seed_and_nearby_decades_but_drop_distant_years():
     assert decades.count(1990) == 1
     assert "distant-year" not in {item["song_id"] for item in ordered}
     assert "unknown-year" not in {item["song_id"] for item in ordered}
+
+
+def test_era_discovery_queries_include_seed_artists_and_only_nearby_decades():
+    queries = _era_artist_discovery_queries(
+        1958,
+        ["Kishore Kumar", "Manna Dey", "Kishore Kumar"],
+    )
+
+    assert "Kishore Kumar 1956 songs" in queries
+    assert "Kishore Kumar 1957 songs" in queries
+    assert "Kishore Kumar 1958 songs" in queries
+    assert "Kishore Kumar 1960 songs" in queries
+    assert "Kishore Kumar 1960s songs" in queries
+    assert "Manna Dey 1956 songs" in queries
+    assert len(queries) == len(set(queries))
+    assert all("1940s" not in query for query in queries)
+    assert all("1950s" not in query for query in queries)
+    assert all("1970s" not in query for query in queries)
+    assert all("1980s" not in query for query in queries)
+    assert _era_artist_discovery_queries(1975, ["Kishore Kumar"]) == [
+        "Kishore Kumar 1973 songs",
+        "Kishore Kumar 1974 songs",
+        "Kishore Kumar 1975 songs",
+        "Kishore Kumar 1976 songs",
+        "Kishore Kumar 1977 songs",
+        "Kishore Kumar 1960s songs",
+        "Kishore Kumar 1980s songs",
+    ]
+
+
+def test_soundtrack_peer_artists_expand_era_search_without_repeating_seed_singers():
+    seed = {
+        "title": "Babu Samjho Ishare",
+        "artists": "Kishore Kumar, Manna Dey",
+        "album": "Chalti Ka Naam Gaadi",
+    }
+    same_work = {
+        "title": "Haal Kaisa Hai Janab Ka (From 'Chalti Ka Naam Gaadi')",
+        "artists": "Asha Bhosle, Kishore Kumar",
+        "album": "Drive",
+    }
+    different_work = {
+        "title": "Another Song",
+        "artists": "Lata Mangeshkar",
+        "album": "Different Film",
+    }
+
+    assert _soundtrack_peer_artists(seed, [same_work, different_work]) == [
+        "Asha Bhosle"
+    ]
+
+
+def test_era_radio_returns_songs_from_other_films_when_soundtrack_has_few_tracks():
+    catalog = sample_data()
+    hybrid = HybridRecommendationEngine(SpotifyRecommendationEngine(catalog))
+    seed = {
+        "title": "Babu Samjho Ishare",
+        "artists": "Kishore Kumar, Manna Dey",
+        "album": "Chalti Ka Naam Gaadi",
+        "year": 1958,
+        "language": "Hindi",
+        "mood_vector": [0.50, 0.50, 0.50, 0.50, 0.40, 0.15, 0.10, 0.20, 0.80],
+        "mood_confidence": 0.22,
+        "mood_source": "metadata_fallback",
+        "intent_labels": ["general"],
+    }
+    candidates = [
+        {
+            "song_id": "same-film",
+            "title": "Ek Ladki Bheegi Bhagi Si",
+            "artists": "Kishore Kumar",
+            "album": "Chalti Ka Naam Gaadi",
+            "year": 1958,
+            "language": "Hindi",
+        },
+        {
+            "song_id": "same-film-reissue",
+            "title": "Another Soundtrack Song (From 'Chalti Ka Naam Gaadi')",
+            "artists": "Kishore Kumar",
+            "album": "Drive",
+            "year": 1958,
+            "language": "Hindi",
+        },
+        *[
+            {
+                "song_id": f"other-film-{index}",
+                "title": f"Era Match Song {index}",
+                "artists": "Kishore Kumar" if index % 2 else "Manna Dey",
+                "album": f"Different Film {index}",
+                "year": 1958 + index,
+                "language": "Hindi",
+            }
+            for index in range(1, 13)
+        ],
+    ]
+
+    ranked = hybrid.rank_jio_results(
+        candidates,
+        "old-film-radio-user",
+        catalog,
+        [],
+        seed=seed,
+    )
+
+    assert len(ranked) >= 10
+    assert len({item["album"] for item in ranked[:10]}) >= 8
+    assert sum(item["album"] == "Chalti Ka Naam Gaadi" for item in ranked[:10]) <= 1
+    assert sum(
+        item["album"] == "Chalti Ka Naam Gaadi"
+        or recommendation_source_work(item) == "chalti ka naam gaadi"
+        for item in ranked[:10]
+    ) <= 1
 
 
 def test_context_priority_within_same_decade_is_taste_then_artist_then_film():

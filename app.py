@@ -18,7 +18,10 @@ from recommender import (
     HYBRID_MODEL_VERSION,
     HybridRecommendationEngine,
     SpotifyRecommendationEngine,
+    _era_artist_discovery_queries,
+    _soundtrack_peer_artists,
     infer_audio_intents,
+    infer_same_soundtrack_audio_intents,
     is_compilation_album,
     recommendation_source_work as _recommendation_source_work,
     recommendation_history_keys as _recommendation_history_keys,
@@ -294,7 +297,7 @@ INTENT_TERMS = {
     "energetic": {"fight", "anthem", "rock", "power", "action", "dance", "party", "bhangra", "bang", "fire", "dhamaka", "dhamaal", "high", "energy"},
     "rap_hiphop": {"rap", "rapper", "hip hop", "hiphop", "gully", "desi hip hop", "freestyle", "mixtape"},
     "sad": {"sad", "heartbreak", "alone", "broken", "dard", "udaas", "tanha", "judai"},
-    "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "bajrang", "bajrangbali", "bajranbali", "anjaney", "aarti", "kirtan", "mantra", "om namah shivay", "krishna", "allah", "khuda"},
+    "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "bajrang", "bajrangbali", "bajranbali", "anjaney", "aarti", "kirtan", "mantra", "om namah shivay", "krishna", "ghanshyam", "allah", "khuda"},
     "calm": {"acoustic", "unplugged", "lofi", "sleep", "calm", "peace", "sukoon", "soothing", "instrumental"},
     "acoustic_indie": {"acoustic", "unplugged", "indie", "folk", "singer songwriter", "singer-songwriter", "coke studio", "soul"},
 }
@@ -1321,6 +1324,7 @@ def build_jio_up_next(
     prioritized_queries = (
         related_queries[:3]
         + title_variants[refresh_round % len(title_variants)]
+        + _era_artist_discovery_queries(seed_year, artist_names)
         + related_queries[3:]
     )
     # Recommendation ranking still uses search-shelf candidates plus a short
@@ -1392,6 +1396,16 @@ def build_jio_up_next(
         source="seed_search_results",
     )
     collect_queries(prioritized_queries, page_limit=30, max_queries=20, source="seed_title_album_artist")
+    soundtrack_peer_queries = _era_artist_discovery_queries(
+        seed_year,
+        _soundtrack_peer_artists(seed, collected),
+    )
+    collect_queries(
+        soundtrack_peer_queries,
+        page_limit=30,
+        max_queries=6,
+        source="soundtrack_peer_era",
+    )
     # Artist radio needs the provider's expanded catalogue endpoint. The
     # narrow direct query often returns only one or two Coldplay recordings;
     # this extra artist-only fetch stays inside the recommendation pipeline,
@@ -1405,6 +1419,16 @@ def build_jio_up_next(
         except Exception:
             provider_failures += 1
     enriched_collected = enrich_live_items(collected)
+    soundtrack_intents = infer_same_soundtrack_audio_intents(
+        seed,
+        enriched_collected,
+    )
+    if soundtrack_intents:
+        seed["intent_labels"] = sorted(
+            (set(seed.get("intent_labels", [])) - {"general", "neutral"})
+            | soundtrack_intents
+        )
+        seed["intent_source"] = "same_soundtrack_audio_proxy"
     try:
         ranked = hybrid.rank_jio_results(
             enriched_collected,
