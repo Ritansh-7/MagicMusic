@@ -18,6 +18,8 @@ from recommender import (
     HYBRID_MODEL_VERSION,
     HybridRecommendationEngine,
     SpotifyRecommendationEngine,
+    is_compilation_album,
+    recommendation_source_work as _recommendation_source_work,
     recommendation_history_keys as _recommendation_history_keys,
     recommendation_title_key as _recommendation_title_key,
 )
@@ -1220,7 +1222,10 @@ def build_jio_up_next(
     # tokens without changing the ranker.
     if title:
         related_queries.append(title)
-    if album:
+    source_work = _recommendation_source_work(seed)
+    if source_work:
+        related_queries.append(f"{source_work} soundtrack songs")
+    if album and not is_compilation_album(album):
         related_queries.append(f"{album} songs")
     related_queries.extend(f"{artist} songs" for artist in artist_names[:2])
     # Some live providers return only the seed for a niche artist/title query.

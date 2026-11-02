@@ -5,9 +5,30 @@ import re
 import numpy as np
 import pandas as pd
 
-HYBRID_MODEL_VERSION = "hybrid-v24-era-mood-priority"
+HYBRID_MODEL_VERSION = "hybrid-v25-verified-context"
 
 EXCLUDED_RECOMMENDATION_TITLES = {"jo bhi kasmein"}
+
+
+def recommendation_source_work(item: dict) -> str:
+    """Return a film/work named in a provider title annotation, if present."""
+    title = str(item.get("title", ""))
+    match = re.search(
+        r"\bfrom\s+['\"“]?(.+?)['\"”]?(?:\)|\]|\s*[-–—]\s*|$)",
+        title,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(r"[^a-z0-9]+", " ", match.group(1).casefold()).strip() if match else ""
+
+
+def is_compilation_album(value: object) -> bool:
+    """Identify album labels that describe a playlist/compilation, not a work."""
+    album = str(value or "").casefold()
+    return bool(re.search(
+        r"\b(best\s+of|greatest\s+hits|hits|mix|collection|essentials|"
+        r"world\s+music\s+day|top\s+(?:songs|hits)|playlist|radio)\b",
+        album,
+    ))
 
 
 def _release_year(value: object) -> int:
@@ -61,6 +82,18 @@ def _metadata_feature_tokens(item: dict) -> dict[str, float]:
         str(item.get(field, "")).lower()
         for field in ("title", "album", "artists", "language")
     )
+    counts: dict[str, float] = {}
+    for token in re.findall(r"[a-z0-9]+", text):
+        counts[token] = counts.get(token, 0.0) + 1.0
+    return counts
+
+
+def _semantic_metadata_tokens(item: dict) -> dict[str, float]:
+    """Build relevance tokens without repeating artist or compilation matches."""
+    title = recommendation_title_key(item.get("title", ""))
+    text = " ".join(
+        (title, str(item.get("track_genre", "")), str(item.get("genre", "")))
+    ).lower()
     counts: dict[str, float] = {}
     for token in re.findall(r"[a-z0-9]+", text):
         counts[token] = counts.get(token, 0.0) + 1.0
@@ -776,6 +809,8 @@ class HybridRecommendationEngine:
                 deduped.append(item)
         results = deduped
         seed_year = _release_year((seed or {}).get("year"))
+        if is_compilation_album((seed or {}).get("album", "")):
+            seed_year = 0
         if seed:
             seed_identity = recommendation_history_keys(seed)
             results = [
@@ -837,7 +872,7 @@ class HybridRecommendationEngine:
         seed_mood = np.asarray((seed or {}).get("mood_vector", []), dtype=float)
         listener_mood = self.user_mood_profiles.get(str(user_id), np.asarray([]))
         listener_eras = self.user_era_profiles.get(str(user_id), {})
-        seed_feature_tokens = _metadata_feature_tokens(seed or {})
+        seed_feature_tokens = _semantic_metadata_tokens(seed or {})
         seed_confidence = float((seed or {}).get("mood_confidence", 0.0) or 0.0)
         seed_intents = _infer_candidate_intents(seed or {})
 
@@ -906,11 +941,22 @@ class HybridRecommendationEngine:
             )
             item_year = _release_year(item.get("year"))
             era_delta = abs(seed_year - item_year) if seed_year and item_year else 0
-            album_match = float(
-                bool(seed_album)
-                and seed_album == str(item.get("album", "")).strip().lower()
-                and (not seed_year or not item_year or era_delta <= 3)
-            )
+            seed_source_work = recommendation_source_work(seed or {})
+            item_source_work = recommendation_source_work(item)
+            if seed_source_work or item_source_work:
+                album_match = float(
+                    bool(seed_source_work)
+                    and seed_source_work == item_source_work
+                )
+            else:
+                album_name = str(item.get("album", "")).strip()
+                album_match = float(
+                    bool(seed_album)
+                    and seed_album == album_name.lower()
+                    and not is_compilation_album(seed_album)
+                    and not is_compilation_album(album_name)
+                    and (not seed_year or not item_year or era_delta <= 3)
+                )
             era_match = (
                 float(np.exp(-((seed_year - item_year) / 18.0) ** 2))
                 if seed_year and item_year else 0.0
@@ -950,7 +996,9 @@ class HybridRecommendationEngine:
                 str((seed or {}).get("mood_source", "")) == "local_audio_catalog"
                 and str(item.get("mood_source", "")) == "local_audio_catalog"
             ) else 0.0
-            metadata_similarity = _sparse_cosine(seed_feature_tokens, _metadata_feature_tokens(item))
+            metadata_similarity = _sparse_cosine(
+                seed_feature_tokens, _semantic_metadata_tokens(item)
+            )
             item_intents = _infer_candidate_intents(item)
             intent_match = (
                 len(seed_intents.intersection(item_intents)) / max(len(seed_intents), 1)
@@ -1008,10 +1056,8 @@ class HybridRecommendationEngine:
                 item["recommendation_reason"] = "Same soundtrack with verified mood"
             elif seed_artist_match and mood_match >= 0.62:
                 item["recommendation_reason"] = "Same artist and current mood"
-            elif seed_artist_match:
-                item["recommendation_reason"] = "Same artist, with a different mood"
             elif album_match:
-                item["recommendation_reason"] = "Similar album or soundtrack"
+                item["recommendation_reason"] = "Same film or soundtrack"
             elif audio_verified and mood_match >= 0.78 and same_era:
                 item["recommendation_reason"] = "Similar mood, era and sound"
             elif audio_verified and mood_match >= 0.78 and era_delta:
@@ -1208,18 +1254,13 @@ class HybridRecommendationEngine:
                     )
                 )
                 low_confidence_seed = float((seed or {}).get("mood_confidence", 0.0) or 0.0) < 0.5
-                if low_confidence_seed and (direct_artist_evidence or sparse_metadata_bridge):
-                    strong_context = True
-                # Live providers often omit mood/language metadata. A shared
-                # artist is safe evidence when the candidate has no
-                # contradictory intent or language signal; this prevents
-                # valid sparse-metadata artist radios from going empty while
-                # still rejecting incompatible tracks.
-                if (
-                    direct_artist_evidence
-                    and not bool(item.get("_intent_conflict", False))
-                    and not bool(item.get("_language_conflict", False))
-                    and not _infer_candidate_intents(item)
+                mood_evidence = (
+                    float(item.get("_audio_match", 0.0)) >= 0.50
+                    or float(item.get("_mood_match", 0.0)) >= 0.58
+                )
+                if low_confidence_seed and (
+                    (direct_artist_evidence and mood_evidence)
+                    or sparse_metadata_bridge
                 ):
                     strong_context = True
                 # Do not recommend a known different-language track merely
@@ -1264,10 +1305,10 @@ class HybridRecommendationEngine:
                     # language, era, style, or metadata bridge instead of
                     # accepting arbitrary popularity.
                     relaxed_bridge = (
-                        float(item.get("_language_match", 0.0)) >= 1.0
-                        or float(item.get("_era_match", 0.0)) >= 0.45
-                        or float(item.get("_style_match", 0.0)) >= 1.0
-                        or float(item.get("_metadata_similarity", 0.0)) >= 0.15
+                        float(item.get("_audio_match", 0.0)) >= 0.50
+                        or float(item.get("_mood_match", 0.0)) >= 0.58
+                        or float(item.get("_intent_match", 0.0)) >= 0.5
+                        or same_soundtrack
                     )
                     if not relaxed_bridge:
                         continue

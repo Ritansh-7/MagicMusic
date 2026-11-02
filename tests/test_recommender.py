@@ -9,6 +9,8 @@ from recommender import (
     _canonical_recording_key,
     _infer_candidate_intents,
     _interleave_recommendation_contexts,
+    is_compilation_album,
+    recommendation_source_work,
     recommendation_history_keys,
     recommendation_title_key,
 )
@@ -83,6 +85,18 @@ def test_recommendation_title_key_collapses_slowed_and_sped_up_releases():
     assert recommendation_title_key("Snowman (Sped Up Version)") == "snowman"
     assert recommendation_title_key("Song (Part 1)") != recommendation_title_key("Song (Part 2)")
     assert recommendation_title_key("Live and Let Die") == "live and let die"
+
+
+def test_source_work_and_compilation_detection():
+    assert recommendation_source_work({
+        "title": "Darkhaast (From 'Shivaay')",
+    }) == "shivaay"
+    assert recommendation_source_work({
+        "title": "Song (From Aashiqui 2)",
+    }) == "aashiqui 2"
+    assert is_compilation_album("World Music Day - Best Of Bollywood Hits")
+    assert is_compilation_album("Hindi Chill Mix")
+    assert not is_compilation_album("Shivaay")
 
 
 def test_recommendation_history_matches_long_title_across_artist_credit_variants():
@@ -215,6 +229,65 @@ def test_ranker_keeps_same_soundtrack_but_rejects_conflicting_intent():
     )
 
     assert [item["song_id"] for item in ranked] == ["soundtrack-track"]
+
+
+def test_same_artist_without_mood_intent_or_soundtrack_is_not_enough():
+    catalog = sample_data()
+    hybrid = HybridRecommendationEngine(SpotifyRecommendationEngine(catalog))
+    ranked = hybrid.rank_jio_results(
+        [{
+            "song_id": "artist-only",
+            "title": "Unrelated Song",
+            "artists": "Anchor Artist",
+            "album": "World Music Day - Best Of Bollywood Hits",
+            "year": 2026,
+            "language": "Hindi",
+            "intent_labels": ["general"],
+        }],
+        "era-user",
+        catalog,
+        [],
+        seed={
+            "title": "Darkhaast (From 'Shivaay')",
+            "artists": "Anchor Artist",
+            "album": "World Music Day - Best Of Bollywood Hits",
+            "year": 2026,
+            "language": "Hindi",
+            "intent_labels": ["general"],
+        },
+    )
+
+    assert ranked == []
+
+
+def test_same_source_film_is_soundtrack_evidence_even_on_compilation_release():
+    catalog = sample_data()
+    hybrid = HybridRecommendationEngine(SpotifyRecommendationEngine(catalog))
+    ranked = hybrid.rank_jio_results(
+        [{
+            "song_id": "same-film",
+            "title": "Other Song (From 'Shivaay')",
+            "artists": "Different Singer",
+            "album": "World Music Day - Best Of Bollywood Hits",
+            "year": 2026,
+            "language": "Hindi",
+            "intent_labels": ["general"],
+        }],
+        "era-user",
+        catalog,
+        [],
+        seed={
+            "title": "Darkhaast (From 'Shivaay')",
+            "artists": "Anchor Artist",
+            "album": "World Music Day - Best Of Bollywood Hits",
+            "year": 2026,
+            "language": "Hindi",
+            "intent_labels": ["general"],
+        },
+    )
+
+    assert [item["song_id"] for item in ranked] == ["same-film"]
+    assert ranked[0]["recommendation_features"]["soundtrack"] == 1.0
 
 
 def test_listener_mood_and_era_profiles_follow_recent_listening():
@@ -391,6 +464,7 @@ def test_ranker_excludes_blocked_title_and_other_decades_for_each_seed():
             "artists": "Anchor Artist",
             "album": "Another Album",
             "year": 1971,
+            "intent_labels": ["romantic"],
         },
         {
             "song_id": "same-decade-late",
@@ -398,6 +472,7 @@ def test_ranker_excludes_blocked_title_and_other_decades_for_each_seed():
             "artists": "Anchor Artist",
             "album": "Another Album",
             "year": 1979,
+            "intent_labels": ["romantic"],
         },
         {
             "song_id": "blocked-song",
@@ -419,6 +494,7 @@ def test_ranker_excludes_blocked_title_and_other_decades_for_each_seed():
             "artists": "Anchor Artist",
             "album": "Another Album",
             "year": 1980,
+            "intent_labels": ["romantic"],
         },
         {
             "song_id": "unknown-year",
@@ -433,6 +509,7 @@ def test_ranker_excludes_blocked_title_and_other_decades_for_each_seed():
         "artists": "Anchor Artist",
         "album": "Seed Album",
         "year": 1975,
+        "intent_labels": ["romantic"],
     }
     seventies = hybrid.rank_jio_results(
         candidates, "era-user", catalog, [], seed=seed,
