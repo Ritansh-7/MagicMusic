@@ -6,7 +6,56 @@ import numpy as np
 import pandas as pd
 
 ERA_COMPATIBILITY_WINDOW_YEARS = 30
-HYBRID_MODEL_VERSION = "hybrid-v20-listener-mood-and-era"
+HYBRID_MODEL_VERSION = "hybrid-v21-era-taste-artist-soundtrack-order"
+
+
+def _interleave_recommendation_contexts(items: list[dict], seed_year: int) -> list[dict]:
+    """Interleave era, listener taste, seed artist, and soundtrack discoveries."""
+    remaining = list(items)
+    if not remaining:
+        return []
+
+    seed_decade = seed_year // 10 * 10 if seed_year else 0
+
+    def candidate_decade(item: dict) -> int:
+        try:
+            year = int(str(item.get("year", ""))[:4])
+        except (TypeError, ValueError):
+            return 0
+        return year // 10 * 10 if 1900 <= year <= 2100 else 0
+
+    def listener_taste_match(item: dict) -> bool:
+        return max(
+            float(item.get("_listener_mood_match", 0.0) or 0.0),
+            float(item.get("_short_term", 0.0) or 0.0),
+            float(item.get("_medium_term", 0.0) or 0.0),
+            float(item.get("_long_term", 0.0) or 0.0),
+        ) >= 0.35 or max(
+            float(item.get("_audio_match", 0.0) or 0.0),
+            float(item.get("_intent_match", 0.0) or 0.0),
+        ) >= 0.65
+
+    categories = (
+        lambda item: bool(seed_decade and candidate_decade(item) == seed_decade),
+        listener_taste_match,
+        lambda item: float(item.get("_seed_artist_match", 0.0) or 0.0) > 0.0,
+        lambda item: float(item.get("_album_match", 0.0) or 0.0) >= 1.0,
+    )
+    ordered: list[dict] = []
+    while remaining:
+        for matches_context in categories:
+            match_index = next(
+                (index for index, item in enumerate(remaining) if matches_context(item)),
+                None,
+            )
+            if match_index is not None:
+                ordered.append(remaining.pop(match_index))
+            if not remaining:
+                break
+        else:
+            ordered.extend(remaining)
+            break
+    return ordered
 
 
 def _metadata_feature_tokens(item: dict) -> dict[str, float]:
@@ -1285,34 +1334,9 @@ class HybridRecommendationEngine:
             artist_counts[artist_key] = artist_counts.get(artist_key, 0) + 1
             album_counts[album_key] = album_counts.get(album_key, 0) + 1
 
-        # Make the queue travel through time naturally. For a 1990s seed,
-        # same-decade tracks lead, followed by the 1980s, then the 1970s;
-        # newer decades and missing-year items come after the descending-era
-        # bridge. This changes presentation order only after relevance,
-        # intent, freshness and diversity gates have already passed.
-        if seed_year and selected:
-            seed_decade = (seed_year // 10) * 10
-
-            def era_progression(item: dict) -> tuple[int, int]:
-                try:
-                    year = int(str(item.get("year", ""))[:4])
-                except (TypeError, ValueError):
-                    year = 0
-                if not year:
-                    return (3, 999)
-                decade = (year // 10) * 10
-                if decade == seed_decade:
-                    return (0, 0)
-                if decade < seed_decade:
-                    return (1, seed_decade - decade)
-                return (2, decade - seed_decade)
-
-            selected = [
-                item for _, item in sorted(
-                    enumerate(selected),
-                    key=lambda pair: (*era_progression(pair[1]), pair[0]),
-                )
-            ]
+        # Give each recommendation context a predictable place in the mix:
+        # same era, listener taste, seed artist, then soundtrack.
+        selected = _interleave_recommendation_contexts(selected, seed_year)
         for item in selected:
             item.pop("_context_score", None)
             item.pop("_profile_score", None)

@@ -8,6 +8,7 @@ from recommender import (
     SpotifyRecommendationEngine,
     _canonical_recording_key,
     _infer_candidate_intents,
+    _interleave_recommendation_contexts,
     recommendation_history_keys,
     recommendation_title_key,
 )
@@ -279,6 +280,29 @@ def test_listener_mood_and_era_profiles_follow_recent_listening():
     assert len(ranked) == 1
     assert ranked[0]["recommendation_features"]["listener_mood"] > 0.99
     assert ranked[0]["recommendation_features"]["listener_era"] > 0.7
+
+
+def test_recommendations_cycle_through_era_taste_artist_and_soundtrack():
+    candidates = [
+        {"song_id": "filler"},
+        {"song_id": "same-era", "year": 2016},
+        {"song_id": "same-taste", "_listener_mood_match": 0.8},
+        {"song_id": "same-artist", "_seed_artist_match": 1.0},
+        {"song_id": "same-film", "_album_match": 1.0},
+        {"song_id": "next-era", "year": 2019},
+    ]
+
+    ordered = _interleave_recommendation_contexts(candidates, 2015)
+
+    assert [item["song_id"] for item in ordered[:4]] == [
+        "same-era",
+        "same-taste",
+        "same-artist",
+        "same-film",
+    ]
+    assert sorted(item["song_id"] for item in ordered) == sorted(
+        item["song_id"] for item in candidates
+    )
 
 
 def test_logged_impression_schema_is_read_by_ranker():
