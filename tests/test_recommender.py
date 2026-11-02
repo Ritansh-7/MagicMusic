@@ -17,6 +17,7 @@ from recommender import (
     _soundtrack_peer_artists,
     is_compilation_album,
     recommendation_source_work,
+    recommendation_seed_year,
     recommendation_history_keys,
     recommendation_title_key,
 )
@@ -103,6 +104,29 @@ def test_source_work_and_compilation_detection():
     assert is_compilation_album("World Music Day - Best Of Bollywood Hits")
     assert is_compilation_album("Hindi Chill Mix")
     assert not is_compilation_album("Shivaay")
+
+
+def test_compilation_seed_year_comes_from_matching_film_tracks():
+    seed = {
+        "title": "Darkhaast (From 'Shivaay')",
+        "album": "World Music Day - Best Of Bollywood Hits",
+        "year": 2026,
+    }
+    candidates = [
+        {
+            "title": "Other Song (From 'Shivaay')",
+            "album": "Shivaay",
+            "year": 2016,
+        },
+        {
+            "title": "Unrelated Song",
+            "album": "Other Film",
+            "year": 1980,
+        },
+    ]
+
+    assert recommendation_seed_year(seed, candidates) == 2016
+    assert recommendation_seed_year(seed, [candidates[1]]) == 0
 
 
 def test_recommendation_history_matches_long_title_across_artist_credit_variants():
@@ -448,6 +472,51 @@ def test_same_source_film_is_soundtrack_evidence_even_on_compilation_release():
 
     assert [item["song_id"] for item in ranked] == ["same-film"]
     assert ranked[0]["recommendation_features"]["soundtrack"] == 1.0
+
+
+def test_compilation_seed_uses_same_film_year_to_find_other_same_era_songs():
+    catalog = sample_data()
+    hybrid = HybridRecommendationEngine(SpotifyRecommendationEngine(catalog))
+    seed = {
+        "title": "Darkhaast (From 'Shivaay')",
+        "artists": "Mithoon, Arijit Singh",
+        "album": "World Music Day - Best Of Bollywood Hits",
+        "year": 2026,
+        "language": "Hindi",
+        "intent_labels": ["general"],
+    }
+    candidates = [{
+        "song_id": "same-film-year-anchor",
+        "title": "Other Song (From 'Shivaay')",
+        "artists": "Different Singer",
+        "album": "Shivaay",
+        "year": 2016,
+        "language": "Hindi",
+        "intent_labels": ["general"],
+    }] + [
+        {
+            "song_id": f"same-era-{index}",
+            "title": f"Era Song {index}",
+            "artists": f"Era Singer {index}",
+            "album": f"Different Film {index}",
+            "year": 2014 + index % 5,
+            "language": "Hindi",
+            "intent_labels": ["romantic" if index % 2 else "energetic"],
+        }
+        for index in range(1, 13)
+    ]
+
+    ranked = hybrid.rank_jio_results(
+        candidates, "shivaay-radio-user", catalog, [], seed=seed,
+    )
+
+    assert len(ranked) >= 10
+    assert all(abs(int(item["year"]) - 2016) <= 15 for item in ranked)
+    assert all(item["recommendation_features"]["language"] == 1.0 for item in ranked)
+    assert sum(
+        item["recommendation_features"]["soundtrack"] == 1.0
+        for item in ranked[:10]
+    ) <= 1
 
 
 def test_listener_mood_and_era_profiles_follow_recent_listening():

@@ -5,7 +5,7 @@ import re
 import numpy as np
 import pandas as pd
 
-HYBRID_MODEL_VERSION = "hybrid-v29-same-era-mood-discovery"
+HYBRID_MODEL_VERSION = "hybrid-v30-compilation-era-radio"
 
 EXCLUDED_RECOMMENDATION_TITLES = {"jo bhi kasmein"}
 MAX_RECOMMENDATION_YEAR_DISTANCE = 15
@@ -130,6 +130,23 @@ def _recommendation_work_key(item: dict) -> str:
         album,
     )
     return re.sub(r"[^a-z0-9]+", " ", album).strip()
+
+
+def recommendation_seed_year(seed: dict, candidates: list[dict]) -> int:
+    """Prefer a seed's release year, or infer a compilation's year from its film peers."""
+    if not is_compilation_album(seed.get("album", "")):
+        return _release_year(seed.get("year"))
+    seed_work = _recommendation_work_key(seed)
+    if not seed_work:
+        return 0
+    peer_years = [
+        year
+        for item in candidates
+        if _recommendation_work_key(item) == seed_work
+        and not is_compilation_album(item.get("album", ""))
+        and (year := _release_year(item.get("year")))
+    ]
+    return int(np.median(peer_years)) if peer_years else 0
 
 
 def _soundtrack_peer_artists(seed: dict, candidates: list[dict]) -> list[str]:
@@ -1091,9 +1108,7 @@ class HybridRecommendationEngine:
                 seen_result_keys.add(result_key)
                 deduped.append(item)
         results = deduped
-        seed_year = _release_year((seed or {}).get("year"))
-        if is_compilation_album((seed or {}).get("album", "")):
-            seed_year = 0
+        seed_year = recommendation_seed_year(seed or {}, results) if seed else 0
         if seed:
             seed_identity = recommendation_history_keys(seed)
             results = [
@@ -1512,6 +1527,14 @@ class HybridRecommendationEngine:
                     or float(item.get("_intent_match", 0.0)) >= 0.5
                     or float(item.get("_album_match", 0.0)) >= 1.0
                     or (
+                        seed_year
+                        and candidate_year
+                        and abs(int(item.get("_era_delta", 0) or 0))
+                        <= MAX_RECOMMENDATION_YEAR_DISTANCE
+                        and float(item.get("_language_match", 0.0)) >= 1.0
+                        and not seed_intents
+                    )
+                    or (
                         float(item.get("_seed_artist_match", 0.0)) >= 1.0
                         and year_compatible
                         and not bool(item.get("_intent_conflict", False))
@@ -1575,7 +1598,12 @@ class HybridRecommendationEngine:
                 specialized_intents = {"devotional", "ghazal", "motivational", "acoustic_indie", "energetic", "playful", "rap_hiphop"}
                 seed_specialized = seed_intents.intersection(specialized_intents)
                 candidate_specialized = candidate_intents.intersection(specialized_intents)
-                if candidate_specialized and not seed_specialized.intersection(candidate_specialized) and not same_soundtrack:
+                if (
+                    seed_specialized
+                    and candidate_specialized
+                    and not seed_specialized.intersection(candidate_specialized)
+                    and not same_soundtrack
+                ):
                     continue
                 # A confident seed intent is a hard semantic contract. A
                 # candidate with no evidence for that intent is not allowed

@@ -25,6 +25,7 @@ from recommender import (
     infer_metadata_mood_labels,
     infer_same_soundtrack_audio_intents,
     is_compilation_album,
+    recommendation_seed_year as _recommendation_seed_year,
     recommendation_source_work as _recommendation_source_work,
     recommendation_history_keys as _recommendation_history_keys,
     recommendation_title_key as _recommendation_title_key,
@@ -1269,13 +1270,10 @@ def build_jio_up_next(
         if genres.size:
             for genre in genres.value_counts().head(3).index:
                 related_queries.append(f"{genre.split(',')[0].strip()} songs")
-    try:
-        seed_year = int(str(seed.get("year", ""))[:4])
-    except ValueError:
-        seed_year = 0
+    seed_year = _recommendation_seed_year(seed, search_results)
     # Recover a missing live release year from same-artist/album search rows.
     # This is data-driven and avoids singer-specific era rules.
-    if not seed_year:
+    if not seed_year and not is_compilation_album(album):
         seed_artist_keys = {_compact_key(value) for value in artists.split(",") if _compact_key(value)}
         year_votes: list[int] = []
         for candidate in search_results:
@@ -1415,6 +1413,21 @@ def build_jio_up_next(
             )
         except Exception:
             provider_failures += 1
+    inferred_seed_year = _recommendation_seed_year(seed, collected)
+    if inferred_seed_year and not seed_year:
+        seed_year = inferred_seed_year
+        seed["year"] = seed_year
+        collect_queries(
+            _mood_era_discovery_queries(
+                seed_year,
+                seed_language,
+                set(seed.get("intent_labels", [])),
+            )
+            + _era_artist_discovery_queries(seed_year, artist_names),
+            page_limit=30,
+            max_queries=8,
+            source="seed_inferred_era_mood",
+        )
     enriched_collected = enrich_live_items(collected)
     soundtrack_intents = infer_same_soundtrack_audio_intents(
         seed,
