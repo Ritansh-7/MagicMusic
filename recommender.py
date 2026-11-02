@@ -122,10 +122,15 @@ def _soundtrack_peer_artists(seed: dict, candidates: list[dict]) -> list[str]:
     return list(artists.values())[:1]
 
 
-def _interleave_recommendation_contexts(items: list[dict], seed_year: int) -> list[dict]:
+def _interleave_recommendation_contexts(
+    items: list[dict],
+    seed_year: int,
+    include_unknown_year: bool = False,
+) -> list[dict]:
     """Favor the seed decade, then mix in close decades by mood relevance."""
     seed_decade = seed_year // 10 * 10 if seed_year else 0
     buckets: dict[int, list[tuple[int, dict]]] = {0: [], 1: [], 2: []}
+    unknown_year_items: list[dict] = []
 
     def context_order(
         entry: tuple[int, dict],
@@ -150,7 +155,11 @@ def _interleave_recommendation_contexts(items: list[dict], seed_year: int) -> li
         return items
     for index, item in enumerate(items):
         year = _release_year(item.get("year"))
-        if not year or abs(year - seed_year) > MAX_RECOMMENDATION_YEAR_DISTANCE:
+        if not year:
+            if include_unknown_year:
+                unknown_year_items.append(item)
+            continue
+        if abs(year - seed_year) > MAX_RECOMMENDATION_YEAR_DISTANCE:
             continue
         decade_delta = abs(year // 10 * 10 - seed_decade)
         bucket = 0 if decade_delta == 0 else 1 if decade_delta == 10 else 2
@@ -194,7 +203,7 @@ def _interleave_recommendation_contexts(items: list[dict], seed_year: int) -> li
         )
         _, item = buckets[bucket].pop(0)
         ordered.append(item)
-    return ordered
+    return ordered + unknown_year_items
 
 
 def _prioritize_distinct_soundtracks(items: list[dict]) -> list[dict]:
@@ -1014,12 +1023,14 @@ class HybridRecommendationEngine:
                 if not _is_excluded_recommendation_title(item.get("title", ""))
             ]
             if seed_year:
-                results = [
-                    item for item in results
-                    if _release_year(item.get("year"))
-                    and abs(_release_year(item.get("year")) - seed_year)
-                    <= MAX_RECOMMENDATION_YEAR_DISTANCE
-                ]
+                compatible: list[dict] = []
+                for item in results:
+                    item_year = _release_year(item.get("year"))
+                    if not item_year:
+                        compatible.append(item)
+                    elif abs(item_year - seed_year) <= MAX_RECOMMENDATION_YEAR_DISTANCE:
+                        compatible.append(item)
+                results = compatible
         if not results:
             return []
         preferred = catalog[catalog["track_id"].astype(str).isin({str(x) for x in preferred_track_ids})]
@@ -1407,14 +1418,18 @@ class HybridRecommendationEngine:
                 # alone can never pass; a candidate needs verified audio,
                 # matching intent, same album/cluster, or strong metadata
                 # evidence. The queue may legitimately be shorter.
+                candidate_year = _release_year(item.get("year"))
+                year_compatible = (
+                    not candidate_year
+                    or 0 < int(item.get("_era_delta", 0) or 0) <= MAX_RECOMMENDATION_YEAR_DISTANCE
+                )
                 strong_context = (
                     float(item.get("_audio_match", 0.0)) >= 0.62
                     or float(item.get("_intent_match", 0.0)) >= 0.5
                     or float(item.get("_album_match", 0.0)) >= 1.0
                     or (
                         float(item.get("_seed_artist_match", 0.0)) >= 1.0
-                        and 0 < int(item.get("_era_delta", 0) or 0)
-                        <= MAX_RECOMMENDATION_YEAR_DISTANCE
+                        and year_compatible
                         and not bool(item.get("_intent_conflict", False))
                     )
                     or (
@@ -1494,8 +1509,7 @@ class HybridRecommendationEngine:
                         )
                         or (
                             float(item.get("_seed_artist_match", 0.0)) >= 1.0
-                            and 0 < int(item.get("_era_delta", 0) or 0)
-                            <= MAX_RECOMMENDATION_YEAR_DISTANCE
+                            and year_compatible
                         )
                     )
                 ):
@@ -1602,7 +1616,11 @@ class HybridRecommendationEngine:
             album_counts[album_key] = album_counts.get(album_key, 0) + 1
 
         # Keep year closeness and mood ahead of artist/soundtrack context.
-        selected = _interleave_recommendation_contexts(selected, seed_year)
+        selected = _interleave_recommendation_contexts(
+            selected,
+            seed_year,
+            include_unknown_year=True,
+        )
         selected = _prioritize_distinct_soundtracks(selected)
         for item in selected:
             item.pop("_context_score", None)

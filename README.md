@@ -151,7 +151,7 @@ For candidates with known release years, era similarity is a Gaussian-shaped sco
 era_match = exp(-((seed_year - candidate_year) / 18)^2)
 ```
 
-When the seed year is known, the candidate must also have a year within 15 years of the seed. Compilation seed albums do not provide a year anchor.
+When both the seed and candidate years are known, the candidate must also be within 15 years of the seed. Live candidates with missing year metadata remain eligible when mood, intent, soundtrack, or artist evidence supports the match; missing metadata alone is not treated as an era mismatch. Compilation seed albums do not provide a year anchor.
 
 Recent, medium-term and long-term artist profiles use exponential time decay:
 

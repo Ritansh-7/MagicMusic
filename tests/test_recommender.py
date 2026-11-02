@@ -733,12 +733,6 @@ def test_ranker_excludes_blocked_title_and_distant_decades_for_each_seed():
             "year": 1980,
             "intent_labels": ["romantic"],
         },
-        {
-            "song_id": "unknown-year",
-            "title": "Unknown Year",
-            "artists": "Anchor Artist",
-            "album": "Another Album",
-        },
     ]
 
     seed = {
@@ -771,6 +765,58 @@ def test_ranker_excludes_blocked_title_and_distant_decades_for_each_seed():
         "near-decade",
         "next-decade",
     }
+
+
+def test_ranker_returns_20_contextual_candidates_when_live_years_are_missing():
+    catalog = sample_data()
+    hybrid = HybridRecommendationEngine(SpotifyRecommendationEngine(catalog))
+    mood = [0.8, 0.65, 0.7, 0.75, 0.2, 0.1, 0.08, 0.2, 0.8]
+    seed = {
+        "title": "Seed ballad",
+        "artists": "Anchor Artist",
+        "album": "Seed film",
+        "year": 1975,
+        "language": "Hindi",
+        "mood_vector": mood,
+        "mood_label": "romantic",
+        "mood_confidence": 0.95,
+        "mood_source": "local_audio_catalog",
+        "intent_labels": ["romantic"],
+    }
+    candidates = [
+        {
+            "song_id": f"same-artist-no-year-{index}",
+            "title": f"Romantic tune {index}",
+            "artists": "Anchor Artist",
+            "album": f"Film {index}",
+            "language": "Hindi",
+            "mood_vector": mood,
+            "mood_label": "romantic",
+            "mood_confidence": 0.95,
+            "mood_source": "local_audio_catalog",
+            "intent_labels": ["romantic"],
+        }
+        for index in range(20)
+    ] + [
+        {
+            "song_id": "distant-year-other-artist",
+            "title": "Wrong artist",
+            "artists": "Other Artist",
+            "album": "Film B",
+            "year": 2020,
+            "language": "Hindi",
+            "mood_vector": mood,
+            "mood_label": "romantic",
+            "mood_confidence": 0.95,
+            "mood_source": "local_audio_catalog",
+            "intent_labels": ["romantic"],
+        },
+    ]
+
+    ranked = hybrid.rank_jio_results(candidates, "missing-year-user", catalog, [], seed=seed)
+
+    assert len(ranked) >= 20
+    assert all(item["song_id"].startswith("same-artist-no-year-") for item in ranked)
 
 
 def test_ranker_can_return_10_plus_era_close_shared_artist_songs():
