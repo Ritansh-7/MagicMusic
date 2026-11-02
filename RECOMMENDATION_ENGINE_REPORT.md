@@ -1,11 +1,11 @@
-# TuneMatch Recommendation Engine — Team Report
+# Cozybeats Recommendation Engine — Team Report
 
 ## 1. Executive summary
 
-TuneMatch is a Spotify-inspired Streamlit music discovery application. It has two recommendation layers:
+Cozybeats is a Spotify-inspired Streamlit music discovery application. It has two recommendation layers:
 
 1. A local catalog engine built from `spotify_tracks_data.csv`.
-2. A live music discovery layer that retrieves external song metadata and audio URLs, then ranks those results for the signed-in TuneMatch user.
+2. A live music discovery layer that retrieves external song metadata and audio URLs, then ranks those results for the signed-in Cozybeats user.
 
 The current live ranking is an audio-first, semantic-gated, sequence-aware recommender. It combines:
 
@@ -28,7 +28,7 @@ The important production caveat is that the current external catalog does not pr
 The user flow is:
 
 ```text
-Create/login to TuneMatch account
+Create/login to Cozybeats account
         ↓
 Search for a song, artist, album, or genre
         ↓
@@ -268,7 +268,7 @@ When the current user has no learned factor or a candidate has never appeared in
 
 Collaborative filtering becomes useful only when:
 
-- multiple TuneMatch users exist;
+- multiple Cozybeats users exist;
 - those users interact with overlapping songs;
 - songs are represented with stable IDs;
 - the current user has enough behavior to map to a latent preference vector.
@@ -373,7 +373,7 @@ Listening duration is approximate because a normal Streamlit script cannot recei
 
 ## 10. Authentication and privacy
 
-TuneMatch login is local and independent of Spotify. It supports:
+Cozybeats login is local and independent of Spotify. It supports:
 
 - email/password account creation;
 - salted password hashing;
@@ -396,7 +396,7 @@ For production, the project should add:
 
 ### Recommendation quality
 
-The local catalog has no original multi-user listening dataset. The collaborative model is therefore only as good as events collected by TuneMatch users.
+The local catalog has no original multi-user listening dataset. The collaborative model is therefore only as good as events collected by Cozybeats users.
 
 ### External ID coverage
 
@@ -517,9 +517,8 @@ The best production weights should be selected from held-out behavior, not intui
 
 The short explanation to the team is:
 
-> TuneMatch retrieves candidate music, represents the listener through onboarding and behavior, learns latent preferences from the user-item interaction matrix, and combines content similarity, collaborative signals, and popularity into one ranked list. Search results answer the user’s explicit query, while the separate Up Next queue is generated from related candidates and refreshed after new feedback. The system is cold-start aware: before enough multi-user behavior exists, it relies mostly on content signals and popularity.
+> Cozybeats retrieves candidate music, represents the listener through onboarding and behavior, learns latent preferences from the user-item interaction matrix, and combines content similarity, collaborative signals, and popularity into one ranked list. Search results answer the user’s explicit query, while the separate Up Next queue is generated from related candidates and refreshed after new feedback. The system is cold-start aware: before enough multi-user behavior exists, it relies mostly on content signals and popularity.
 
 The honest limitation is:
 
 > The architecture supports collaborative filtering and matrix factorization, but their quality depends on collecting enough shared user-song interactions. The live external catalog also lacks the full audio-feature vector used by the local content engine, so external live content matching currently relies mainly on artist/title metadata.
-

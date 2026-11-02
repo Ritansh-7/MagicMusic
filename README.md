@@ -1,12 +1,12 @@
-# TuneMatch
+# Cozybeats
 
-TuneMatch is a Spotify-inspired, live music recommendation platform built with Streamlit. It combines live JioSaavn discovery with a local audio-feature catalog, implicit user feedback, mood clustering and session-aware ranking.
+Cozybeats is a Spotify-inspired, live music recommendation platform built with Streamlit. It combines live JioSaavn discovery with a local audio-feature catalog, implicit user feedback, mood clustering and session-aware ranking.
 
 It is not Spotify's proprietary system. It is an explainable, deployable recommendation-engine project demonstrating search, playback, personalization, feedback loops, diversity, cold start and analytics.
 
 ## What the project does
 
-- Creates TuneMatch accounts with salted PBKDF2 password hashes.
+- Creates Cozybeats accounts with salted PBKDF2 password hashes.
 - Searches live songs through an unofficial JioSaavn API without requiring a JioSaavn login.
 - Shows live artwork, artist/album metadata and available audio previews.
 - Provides search, an in-page audio player, Like, Next, Loop and Refresh controls; playback advances automatically when a track ends.
@@ -283,7 +283,7 @@ TUNEMATCH_ADMIN_EMAIL = "your-admin-email@example.com"
 
 7. Reboot the app after saving secrets.
 
-Without `DATABASE_URL`, local SQLite is used and cloud data may not survive a restart. Existing local SQLite data is not automatically migrated to the cloud database. `TUNEMATCH_ADMIN_EMAIL` must match the email address of the account that should see the admin workspace.
+Without `DATABASE_URL`, local SQLite is used and cloud data may not survive a restart. Existing local SQLite data is not automatically migrated to the cloud database. `TUNEMATCH_ADMIN_EMAIL` must match the email address of the account that should see the admin workspace. The `TUNEMATCH_*` setting names and `tune_match_events.sqlite3` filename are retained for backward compatibility with existing deployments and local listening data.
 
 ## Deploy on Render
 

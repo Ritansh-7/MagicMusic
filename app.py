@@ -33,35 +33,35 @@ from user_store import UserStore
 
 ERA_COMPATIBILITY_WINDOW_YEARS = 30
 
-st.set_page_config(page_title="TuneMatch | Spotify Recommender", page_icon="🎧", layout="wide")
+st.set_page_config(page_title="Cozybeats | NextGen Recommender", page_icon="🎧", layout="wide")
 
 # A small bidirectional Streamlit component is used for the player because
 # st.audio does not expose the browser's `ended` event to Python. The event
 # lets the server advance the already-ranked queue without requiring a click.
-TUNEMATCH_AUDIO = st.components.v2.component(
-    "tunematch_audio_player",
+COZYBEATS_AUDIO = st.components.v2.component(
+    "cozybeats_audio_player",
     html="""
-<div class="tm-audio-shell">
-  <div class="tm-audio-label" id="tm-audio-label"></div>
+<div class="cb-audio-shell">
+  <div class="cb-audio-label" id="cb-audio-label"></div>
   <audio id="tm-audio" controls preload="metadata"></audio>
 </div>
 """,
     css="""
-.tm-audio-shell { padding: .2rem 0; }
-.tm-audio-label { color: #b6d3d1; font-size: .82rem; margin-bottom: .3rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cb-audio-shell { padding: .2rem 0; }
+.cb-audio-label { color: #b6d3d1; font-size: .82rem; margin-bottom: .3rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 audio { width: 100%; min-height: 42px; }
 """,
     js="""
 export default function(component) {
   const { data, parentElement, setTriggerValue } = component;
   const audio = parentElement.querySelector('#tm-audio');
-  const label = parentElement.querySelector('#tm-audio-label');
+  const label = parentElement.querySelector('#cb-audio-label');
   if (!audio || !data) return;
 
   const src = data.url || '';
   const changed = audio.dataset.tmSrc !== src;
   audio.loop = Boolean(data.loop);
-  label.textContent = data.title || 'TuneMatch player';
+  label.textContent = data.title || 'Cozybeats player';
 
   if (changed) {
     const shouldPlay = Boolean(data.autoplay);
@@ -207,7 +207,7 @@ audio { width: 100%; min-height: 46px; accent-color: var(--tm-cyan); }
 </style>
 """)
 
-st.markdown('''<div class="hero-panel"><div class="hero-title">TuneMatch</div><div class="hero-copy">Your next favorite is one play away. Discover a mix that moves with you.</div><span class="hero-chip">✦ Made for your mood</span><span class="hero-chip">◉ Your sound, evolving</span><span class="hero-chip">⚡ Live discovery</span></div>''', unsafe_allow_html=True)
+st.markdown('''<div class="hero-panel"><div class="hero-title">Cozybeats</div><div class="hero-copy">Your next favorite is one play away. Discover a mix that moves with you.</div><span class="hero-chip">✦ Made for your mood</span><span class="hero-chip">◉ Your sound, evolving</span><span class="hero-chip">⚡ Live discovery</span></div>''', unsafe_allow_html=True)
 
 DATA_PATH = Path(__file__).parent / "spotify_tracks_data.csv"
 EVENT_DB_PATH = Path(__file__).parent / "tune_match_events.sqlite3"
@@ -666,7 +666,7 @@ except Exception:
     user_store = build_user_store(str(EVENT_DB_PATH), "")
     if database_url:
         st.warning(
-            "Cloud database is unavailable right now. TuneMatch is using temporary local storage; "
+            "Cloud database is unavailable right now. Cozybeats is using temporary local storage; "
             "fix DATABASE_URL and reboot to persist users and activity."
         )
 jio_client = JioSaavnClient()
@@ -1548,7 +1548,7 @@ spotify_client = SpotifyOAuth.from_environment()
 spotify_token = None
 spotify_taste = st.session_state.get("spotify_taste")
 with st.sidebar:
-    st.header("Your TuneMatch account")
+    st.header("Your Cozybeats account")
     local_user_id = st.session_state.get("local_user_id")
     if not local_user_id:
         restored_session = _read_auth_session_ticket()
@@ -1566,7 +1566,7 @@ with st.sidebar:
         if st.session_state.get("local_session_started_at"):
             minutes = (time.time() - st.session_state["local_session_started_at"]) / 60
             st.caption(f"Current session: {minutes:.1f} min")
-        if st.button("Log out of TuneMatch", width="stretch"):
+        if st.button("Log out of Cozybeats", width="stretch"):
             account_listening_time()
             started = st.session_state.pop("local_session_started_at", time.time())
             log_behavior("session_end", duration_ms=int((time.time() - started) * 1000))
@@ -1577,7 +1577,7 @@ with st.sidebar:
             st.query_params.pop(AUTH_SESSION_PARAM, None)
             st.rerun()
     else:
-        st.subheader("Welcome to TuneMatch")
+        st.subheader("Welcome to Cozybeats")
         auth_choice = st.radio(
             "Choose an option to continue",
             ["I am new — create account", "I already have an account — log in"],
@@ -1619,7 +1619,7 @@ with st.sidebar:
             else:
                 st.error(message)
     if not st.session_state.get("local_user_id"):
-        st.info("Create a TuneMatch account to save likes, plays, skips, and session analytics.")
+        st.info("Create a Cozybeats account to save likes, plays, skips, and session analytics.")
         st.stop()
 
 account_listening_time()
@@ -1628,7 +1628,7 @@ account_listening_time()
 @st.fragment(run_every="10s")
 def render_admin_dashboard() -> None:
     """Admin-only observability view; normal listeners never see this data."""
-    st.header("TuneMatch admin analytics")
+    st.header("Cozybeats admin analytics")
     st.caption("Operational and data-science metrics from local implicit-feedback events · auto-refreshes every 10 seconds")
     events = pd.DataFrame(user_store.admin_events())
     users = pd.DataFrame(user_store.admin_users())
@@ -1955,7 +1955,7 @@ def render_admin_dashboard() -> None:
 
 if st.session_state.get("local_is_admin", False):
     with st.sidebar:
-        workspace_view = st.radio("Workspace", ["TuneMatch", "Admin dashboard"], key="workspace_view")
+        workspace_view = st.radio("Workspace", ["Cozybeats", "Admin dashboard"], key="workspace_view")
     if workspace_view == "Admin dashboard":
         render_admin_dashboard()
         st.stop()
@@ -2349,11 +2349,11 @@ if jio_now:
     current_queue_seed = str(jio_now.get("song_id") or jio_now.get("title", ""))
     current_queue = list(st.session_state.get("jio_queue", []))
     st.html("<div id='tune-match-player-anchor'></div>")
-    st.markdown('<div class="shelf-title">TuneMatch player</div>', unsafe_allow_html=True)
+    st.markdown('<div class="shelf-title">Cozybeats player</div>', unsafe_allow_html=True)
     now_cols = st.columns([1, 3, 1, 1])
     with now_cols[0]:
         if jio_now.get("image_url"):
-            st.image(jio_now["image_url"], width="stretch", alt=jio_now.get("title", "TuneMatch song"))
+            st.image(jio_now["image_url"], width="stretch", alt=jio_now.get("title", "Cozybeats song"))
     with now_cols[1]:
         st.markdown(f"**{jio_now.get('title', 'Unknown song')}**")
         now_details = f"Singer: {jio_now.get('artists', '')}"
@@ -2369,15 +2369,15 @@ if jio_now:
         stream_url = jio_now.get("stream_url", "")
         perma_url = jio_now.get("perma_url", "")
         if stream_url:
-            audio_result = TUNEMATCH_AUDIO(
+            audio_result = COZYBEATS_AUDIO(
                 data={
                     "url": stream_url,
-                    "title": jio_now.get("title", "TuneMatch player"),
+                    "title": jio_now.get("title", "Cozybeats player"),
                     "track_id": current_id,
                     "autoplay": True,
                     "loop": bool(st.session_state.get("jio_loop", False)),
                 },
-                key=f"tm-audio-{audio_component_key}",
+                key=f"cb-audio-{audio_component_key}",
                 on_ended_change=lambda: None,
             )
             audio_ended = bool(

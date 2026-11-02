@@ -1,4 +1,4 @@
-"""Optional learned ranking layer for TuneMatch.
+"""Optional learned ranking layer for Cozybeats.
 
 The recommender must remain useful before enough feedback exists.  This module
 therefore trains only from recommendation-impression events and falls back to
@@ -162,4 +162,3 @@ class LearnedRanker:
             return np.clip(values, 0.0, 1.0)
         except (ValueError, RuntimeError, AttributeError):
             return np.zeros(len(items), dtype=float)
-
