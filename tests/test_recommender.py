@@ -9,6 +9,7 @@ from recommender import (
     _canonical_recording_key,
     _infer_candidate_intents,
     _interleave_recommendation_contexts,
+    infer_audio_intents,
     is_compilation_album,
     recommendation_source_work,
     recommendation_history_keys,
@@ -160,6 +161,75 @@ def test_intent_detection_separates_motivational_from_romantic_candidates():
     assert not seed_intents.intersection(_infer_candidate_intents(romantic_candidate))
     assert seed_intents.intersection(_infer_candidate_intents(motivational_candidate))
     assert "motivational" in _infer_candidate_intents({"title": "Fight for victory"})
+
+
+def test_playful_intent_uses_descriptive_metadata_and_lively_audio_features():
+    described = {"title": "A song", "mood": "playful, comic and theatrical"}
+    mellow = {"energy": 0.38, "valence": 0.54, "danceability": 0.46, "tempo": 109}
+
+    assert _infer_candidate_intents(described) == {"playful"}
+    assert infer_audio_intents(mellow) == set()
+
+
+def test_playful_theatrical_seed_prefers_lively_audio_over_same_artist_ballad():
+    catalog = sample_data()
+    hybrid = HybridRecommendationEngine(SpotifyRecommendationEngine(catalog))
+    seed_mood = [0.68, 0.625, 0.82, 0.68, 0.25, 0.15, 0.10, 0.20, 0.875]
+    lively_mood = [0.59, 0.70, 0.768, 0.705, 0.839, 0.0, 0.217, 0.097, 0.90]
+    mellow_mood = [0.38, 0.55, 0.541, 0.461, 0.872, 0.0, 0.031, 0.08, 0.82]
+    seed = {
+        "title": "Ek Chatur Naar Karke Sringar",
+        "artists": "Kishore Kumar, Manna Dey, Mehmood",
+        "album": "Padosan",
+        "year": 1968,
+        "language": "Hindi",
+        "mood_vector": seed_mood,
+        "mood_confidence": 0.72,
+        "mood_source": "metadata_fallback",
+    }
+    lively = {
+        "song_id": "lively-classic",
+        "title": "Mere Samnewali Khidki Mein",
+        "artists": "Kishore Kumar",
+        "album": "Padosan",
+        "year": 1968,
+        "language": "Hindi",
+        "energy": 0.591,
+        "valence": 0.768,
+        "danceability": 0.705,
+        "tempo": 139.782,
+        "mood_vector": lively_mood,
+        "mood_confidence": 0.95,
+        "mood_source": "local_audio_catalog",
+    }
+    romantic_ballad = {
+        "song_id": "mellow-romantic",
+        "title": "O Mere Dil Ke Chain",
+        "artists": "Kishore Kumar",
+        "album": "Mere Jeevan Saathi",
+        "year": 1972,
+        "language": "Hindi",
+        "energy": 0.377,
+        "valence": 0.541,
+        "danceability": 0.461,
+        "tempo": 109.017,
+        "mood_vector": mellow_mood,
+        "mood_confidence": 0.95,
+        "mood_source": "local_audio_catalog",
+        "intent_labels": ["romantic"],
+    }
+
+    assert "playful" in _infer_candidate_intents(seed)
+    assert infer_audio_intents(lively) == {"playful"}
+    ranked = hybrid.rank_jio_results(
+        [romantic_ballad, lively],
+        "playful-user",
+        catalog,
+        [],
+        seed=seed,
+    )
+
+    assert [item["song_id"] for item in ranked] == ["lively-classic"]
 
 
 def test_ranker_keeps_same_soundtrack_but_rejects_conflicting_intent():

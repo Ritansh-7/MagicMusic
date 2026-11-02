@@ -205,6 +205,7 @@ def recommendation_history_keys(item: dict) -> set[str]:
 
 INTENT_KEYWORDS = {
     "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "pyar", "dil", "jaan", "milan", "sanam", "aashiqui", "prem", "saiyaara"},
+    "playful": {"playful", "comic", "comedy", "humorous", "funny", "lighthearted", "light hearted", "mischief", "masti", "nautanki", "chatur", "nok jhok", "banter", "witty", "theatrical", "expressive", "call and response", "call response", "jugalbandi"},
     "ghazal": {"ghazal", "ghazals", "mehfil", "rekhta", "shayari", "ghulam ali", "chupke chupke classics"},
     "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "bajrang", "shiva", "shivay", "mahadev", "krishna", "radhe", "aarti", "qawwali devotional"},
     "motivational": {"motivation", "motivational", "fight", "fighting", "battle", "victory", "fighter", "warrior", "rise", "zinda", "jeet", "inspire", "goal", "champion", "unstoppable"},
@@ -213,6 +214,25 @@ INTENT_KEYWORDS = {
     "rap_hiphop": {"rap", "hip hop", "hiphop", "freestyle", "gully", "mixtape"},
     "calm": {"lofi", "sleep", "calm", "peace", "soothing", "sukoon", "instrumental"},
 }
+
+
+def infer_audio_intents(item: dict) -> set[str]:
+    """Infer broad musical feel from audio features when those are available."""
+    try:
+        energy = float(item.get("energy", 0.0) or 0.0)
+        valence = float(item.get("valence", 0.0) or 0.0)
+        danceability = float(item.get("danceability", 0.0) or 0.0)
+        tempo = float(item.get("tempo", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return set()
+    if (
+        energy >= 0.40
+        and valence >= 0.72
+        and danceability >= 0.50
+        and 90 <= tempo <= 160
+    ):
+        return {"playful"}
+    return set()
 
 
 def _infer_candidate_intents(item: dict) -> set[str]:
@@ -225,16 +245,20 @@ def _infer_candidate_intents(item: dict) -> set[str]:
             if str(label).strip().casefold() not in {"", "general", "neutral"}
         }
         if labels:
-            return labels
+            return labels | infer_audio_intents(item)
     text = " ".join(
         str(item.get(field, ""))
-        for field in ("title", "album", "track_genre", "genre", "language")
+        for field in (
+            "title", "album", "track_genre", "genre", "language", "mood",
+            "description", "tags", "intent_labels",
+        )
     ).casefold()
     tokens = set(re.findall(r"[a-z0-9]+", text))
-    return {
+    labels = {
         label for label, terms in INTENT_KEYWORDS.items()
         if any(term in text if " " in term else term in tokens for term in terms)
     }
+    return labels | infer_audio_intents(item)
 import re
 from scipy.sparse import hstack, csr_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -1300,7 +1324,7 @@ class HybridRecommendationEngine:
                 if bool(item.get("_intent_conflict", False)) and not same_soundtrack:
                     continue
                 candidate_intents = item_intents
-                specialized_intents = {"devotional", "ghazal", "motivational", "acoustic_indie", "energetic", "rap_hiphop"}
+                specialized_intents = {"devotional", "ghazal", "motivational", "acoustic_indie", "energetic", "playful", "rap_hiphop"}
                 seed_specialized = seed_intents.intersection(specialized_intents)
                 candidate_specialized = candidate_intents.intersection(specialized_intents)
                 if candidate_specialized and not seed_specialized.intersection(candidate_specialized) and not same_soundtrack:

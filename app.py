@@ -18,6 +18,7 @@ from recommender import (
     HYBRID_MODEL_VERSION,
     HybridRecommendationEngine,
     SpotifyRecommendationEngine,
+    infer_audio_intents,
     is_compilation_album,
     recommendation_source_work as _recommendation_source_work,
     recommendation_history_keys as _recommendation_history_keys,
@@ -287,6 +288,7 @@ MOOD_VECTOR_FEATURES = (
 
 INTENT_TERMS = {
     "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "pyar", "dil", "jaan", "sanam", "sajan", "saiyaara", "milan"},
+    "playful": {"playful", "comic", "comedy", "humorous", "funny", "lighthearted", "light hearted", "mischief", "masti", "nautanki", "chatur", "nok jhok", "banter", "witty", "theatrical", "expressive", "call and response", "call response", "jugalbandi"},
     "ghazal": {"ghazal", "ghazals", "shayar", "shayari", "mehfil", "rekhta", "ghulam ali", "ghulam ali classics", "ustad bade ghulam ali", "ghulam ali khan", "chupke chupke classics"},
     "motivational": {"motivation", "motivational", "fight", "fighting", "battle", "zinda", "jeet", "victory", "fighter", "warrior", "rise", "goal", "inspire", "champion", "unstoppable"},
     "energetic": {"fight", "anthem", "rock", "power", "action", "dance", "party", "bhangra", "bang", "fire", "dhamaka", "dhamaal", "high", "energy"},
@@ -352,7 +354,13 @@ def infer_metadata_mood(item: dict) -> dict:
     ranker a low-cost, low-confidence vector until an audio-feature match is
     available from the local catalog.
     """
-    text = " ".join(str(item.get(field, "")) for field in ("title", "album", "artists", "language")).lower()
+    text = " ".join(
+        str(item.get(field, ""))
+        for field in (
+            "title", "album", "artists", "language", "mood", "description",
+            "tags", "intent_labels", "track_genre", "genre",
+        )
+    ).lower()
     vector = {
         "energy": 0.50, "tempo": 100.0, "valence": 0.50, "danceability": 0.50,
         "acousticness": 0.40, "instrumentalness": 0.15, "speechiness": 0.10,
@@ -360,6 +368,7 @@ def infer_metadata_mood(item: dict) -> dict:
     }
     labels = []
     groups = {
+        "playful": {"playful", "comic", "comedy", "humorous", "funny", "lighthearted", "light hearted", "mischief", "masti", "nautanki", "chatur", "nok jhok", "banter", "witty", "theatrical", "expressive", "call and response", "call response", "jugalbandi"},
         "energetic": {"fight", "anthem", "rock", "zinda", "sultan", "power", "action", "dance", "party", "bhangra", "bang", "fire", "dhamaka", "warrior", "bhaag", "milkha", "singham", "chaiyya", "ramta", "appadipodu", "mappillai"},
         "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "dil", "jaan", "saiyaara"},
         "sad": {"sad", "heartbreak", "alone", "broken", "dard", "udaas"},
@@ -373,7 +382,9 @@ def infer_metadata_mood(item: dict) -> dict:
         label for label, words in groups.items()
         if any((word in text if " " in word else word in tokens) for word in words)
     }
-    if "energetic" in matched:
+    if "playful" in matched:
+        vector.update(energy=0.68, tempo=125.0, valence=0.82, danceability=0.68, acousticness=0.25, loudness=-7.5)
+    elif "energetic" in matched:
         vector.update(energy=0.85, tempo=135.0, valence=0.72, danceability=0.72, acousticness=0.18, loudness=-6.0)
     elif "sad" in matched:
         vector.update(energy=0.30, tempo=72.0, valence=0.20, danceability=0.25, acousticness=0.58, loudness=-15.0)
@@ -400,14 +411,18 @@ def infer_music_intents(item: dict) -> list[str]:
     """Infer intent independently from a track's own metadata."""
     text = " ".join(
         str(item.get(field, ""))
-        for field in ("title", "album", "track_genre", "genre", "language")
+        for field in (
+            "title", "album", "track_genre", "genre", "language", "mood",
+            "description", "tags", "intent_labels",
+        )
     ).casefold()
     tokens = set(re.findall(r"[a-z0-9]+", text))
     labels = []
     for label, terms in INTENT_TERMS.items():
         if any(term in text if " " in term else term in tokens for term in terms):
             labels.append(label)
-    return sorted(set(labels)) or ["general"]
+    labels = set(labels) | infer_audio_intents(item)
+    return sorted(labels) or ["general"]
 
 
 @st.cache_resource
