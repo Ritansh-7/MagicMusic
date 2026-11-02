@@ -19,6 +19,7 @@ from recommender import (
     HybridRecommendationEngine,
     SpotifyRecommendationEngine,
     _era_artist_discovery_queries,
+    _mood_era_discovery_queries,
     _soundtrack_peer_artists,
     infer_audio_intents,
     infer_metadata_mood_labels,
@@ -1316,12 +1317,16 @@ def build_jio_up_next(
     prioritized_queries = (
         related_queries[:3]
         + title_variants[refresh_round % len(title_variants)]
+        + _mood_era_discovery_queries(
+            seed_year,
+            seed_language,
+            set(seed.get("intent_labels", [])),
+        )
         + _era_artist_discovery_queries(seed_year, artist_names)
         + related_queries[3:]
     )
-    # Recommendation ranking still uses search-shelf candidates plus a short
-    # seed/artist/album page. Extra era/intent/audio-neighbour queries were
-    # dropped so this path uses fewer upstream tokens.
+    # Put broad same-era/mood discovery before artist-only expansions so the
+    # live queue can find comparable songs from other performers and films.
 
     collected: list[dict] = []
     provider_failures = 0

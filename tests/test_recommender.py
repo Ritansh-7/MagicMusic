@@ -10,6 +10,7 @@ from recommender import (
     _era_artist_discovery_queries,
     _infer_candidate_intents,
     _interleave_recommendation_contexts,
+    _mood_era_discovery_queries,
     infer_audio_intents,
     infer_metadata_mood_labels,
     infer_same_soundtrack_audio_intents,
@@ -564,6 +565,18 @@ def test_era_discovery_queries_include_seed_artists_and_only_nearby_decades():
     ]
 
 
+def test_mood_era_discovery_includes_same_decade_mood_queries():
+    assert _mood_era_discovery_queries(
+        2016, "Hindi", {"romantic"},
+    ) == ["2010s hindi romantic songs"]
+    assert _mood_era_discovery_queries(
+        2016, "Hindi", {"romantic", "sad"},
+    ) == ["2010s hindi romantic songs", "2010s hindi sad songs"]
+    assert _mood_era_discovery_queries(
+        2016, "", {"romantic"},
+    ) == ["2010s romantic songs"]
+
+
 def test_soundtrack_peer_artists_expand_era_search_without_repeating_seed_singers():
     seed = {
         "title": "Babu Samjho Ishare",
@@ -646,6 +659,64 @@ def test_era_radio_returns_songs_from_other_films_when_soundtrack_has_few_tracks
         or recommendation_source_work(item) == "chalti ka naam gaadi"
         for item in ranked[:10]
     ) <= 1
+
+
+def test_same_era_mood_radio_prefers_other_films_over_soundtrack_flood():
+    catalog = sample_data()
+    hybrid = HybridRecommendationEngine(SpotifyRecommendationEngine(catalog))
+    mood = [0.8, 0.65, 0.7, 0.75, 0.2, 0.1, 0.08, 0.2, 0.8]
+    seed = {
+        "title": "Seed Ballad",
+        "artists": "Seed Singer",
+        "album": "Seed Film",
+        "year": 2016,
+        "language": "Hindi",
+        "mood_vector": mood,
+        "mood_label": "romantic",
+        "mood_confidence": 0.95,
+        "mood_source": "local_audio_catalog",
+        "intent_labels": ["romantic"],
+    }
+    candidates = [
+        {
+            "song_id": f"same-film-{index}",
+            "title": f"Seed Film Song {index}",
+            "artists": f"Seed Singer {index}",
+            "album": "Seed Film",
+            "year": 2016,
+            "language": "Hindi",
+            "mood_vector": mood,
+            "mood_label": "romantic",
+            "mood_confidence": 0.95,
+            "mood_source": "local_audio_catalog",
+            "intent_labels": ["romantic"],
+        }
+        for index in range(1, 4)
+    ] + [
+        {
+            "song_id": f"other-film-{index}",
+            "title": f"Era Romance {index}",
+            "artists": f"Different Singer {index}",
+            "album": f"Different Film {index}",
+            "year": 2014 + index % 5,
+            "language": "Hindi",
+            "mood_vector": mood,
+            "mood_label": "romantic",
+            "mood_confidence": 0.95,
+            "mood_source": "local_audio_catalog",
+            "intent_labels": ["romantic"],
+        }
+        for index in range(1, 13)
+    ]
+
+    ranked = hybrid.rank_jio_results(
+        candidates, "same-era-romance-user", catalog, [], seed=seed,
+    )
+
+    assert len(ranked) >= 10
+    assert sum(item["album"] == "Seed Film" for item in ranked[:10]) <= 1
+    assert len({item["artists"] for item in ranked[:10]}) >= 8
+    assert all(item["recommendation_features"]["mood"] > 0.99 for item in ranked[:10])
 
 
 def test_context_priority_within_same_decade_preserves_ranked_diversity():

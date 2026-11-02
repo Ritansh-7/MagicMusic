@@ -5,7 +5,7 @@ import re
 import numpy as np
 import pandas as pd
 
-HYBRID_MODEL_VERSION = "hybrid-v28-mood-artist-diversity"
+HYBRID_MODEL_VERSION = "hybrid-v29-same-era-mood-discovery"
 
 EXCLUDED_RECOMMENDATION_TITLES = {"jo bhi kasmein"}
 MAX_RECOMMENDATION_YEAR_DISTANCE = 15
@@ -87,6 +87,35 @@ def _era_artist_discovery_queries(seed_year: object, artists: list[str]) -> list
         queries.extend(f"{artist} {decade}s songs" for decade in decades)
         if len(seen_artists) >= 2:
             break
+    return queries
+
+
+def _mood_era_discovery_queries(
+    seed_year: object,
+    language: object,
+    intents: set[str],
+) -> list[str]:
+    year = _release_year(seed_year)
+    if not year:
+        return []
+    language_name = str(language or "").strip().lower()
+    mood_terms = {
+        "romantic": "romantic",
+        "sad": "sad",
+        "energetic": "energetic",
+        "playful": "feel good",
+        "devotional": "devotional",
+        "ghazal": "ghazal",
+        "acoustic_indie": "acoustic",
+        "rap_hiphop": "hip hop",
+        "calm": "calm",
+    }
+    terms = [mood_terms[intent] for intent in sorted(intents) if intent in mood_terms]
+    era = f"{year // 10 * 10}s"
+    language_part = f" {language_name}" if language_name else ""
+    queries = [f"{era}{language_part} {term} songs" for term in terms[:2]]
+    if not queries:
+        queries.append(f"{era}{language_part} songs")
     return queries
 
 
