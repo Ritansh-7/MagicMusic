@@ -1232,8 +1232,13 @@ def build_jio_up_next(
     # Keep recommendation discovery to a few high-signal queries. Search
     # already fetched the artist/film catalogue; extra expansions only spend
     # tokens without changing the ranker.
+    clean_title = _recommendation_title_key(title)
     if title:
         related_queries.append(title)
+        if clean_title and clean_title != title.casefold():
+            related_queries.append(clean_title)
+            if artist_names:
+                related_queries.append(f"{clean_title} {artist_names[0]}")
     source_work = _recommendation_source_work(seed)
     if source_work:
         related_queries.append(f"{source_work} soundtrack songs")
@@ -1294,21 +1299,22 @@ def build_jio_up_next(
     refresh_round = int(st.session_state.get("recommendation_refresh_round", 0) or 0)
     decade_query = f"{(seed_year // 10) * 10}s" if seed_year else ""
     language_query = seed_language or "pop"
+    title_query_base = clean_title or title
     title_variants = [
         [
-            f"songs like {title}",
-            f"{artist_names[0]} similar artists songs" if artist_names else "",
+            f"songs like {title_query_base}",
+            f"{artist_names[0]} hits" if artist_names else "",
         ],
         [
-            f"similar to {title}",
+            f"similar to {title_query_base}",
             f"{decade_query} {language_query} hits" if decade_query else f"{language_query} indie pop songs",
         ],
         [
-            f"{title} similar songs",
-            f"{language_query} acoustic pop songs",
+            f"{title_query_base} similar songs",
+            f"{language_query} dance hits" if seed_language == "english" else f"{language_query} acoustic pop songs",
         ],
         [
-            f"radio for {title}",
+            f"radio for {title_query_base}",
             f"{artist_names[0]} essentials" if artist_names else f"{language_query} feel good songs",
         ],
     ]
@@ -1405,10 +1411,10 @@ def build_jio_up_next(
     # narrow direct query often returns only one or two Coldplay recordings;
     # this extra artist-only fetch stays inside the recommendation pipeline,
     # where the ranker still enforces the seed's language, mood and era.
-    for artist in artist_names[:1]:
+    for artist in artist_names[:2]:
         try:
             collect_items(
-                client.search(artist, limit=60),
+                client.search(artist, limit=40),
                 source="seed_artist_catalogue",
             )
         except Exception:

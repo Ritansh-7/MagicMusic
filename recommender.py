@@ -42,6 +42,8 @@ def _artist_credit_keys(value: object) -> set[str]:
 def is_compilation_album(value: object) -> bool:
     """Identify album labels that describe a playlist/compilation, not a work."""
     album = str(value or "").casefold()
+    if re.search(r"\b(extended\s+mix|club\s+mix|original\s+mix|dub\s+mix)\b", album):
+        return False
     return bool(re.search(
         r"\b(best\s+of|greatest\s+hits|hits|mix|collection|essentials|"
         r"world\s+music\s+day|top\s+(?:songs|hits)|playlist|radio)\b",
