@@ -285,7 +285,7 @@ MOOD_VECTOR_FEATURES = (
 INTENT_TERMS = {
     "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "pyar", "dil", "jaan", "sanam", "sajan", "saiyaara", "milan"},
     "ghazal": {"ghazal", "ghazals", "shayar", "shayari", "mehfil", "rekhta", "ghulam ali", "ghulam ali classics", "ustad bade ghulam ali", "ghulam ali khan", "chupke chupke classics"},
-    "motivational": {"motivation", "motivational", "zinda", "jeet", "victory", "fighter", "warrior", "rise", "goal", "inspire"},
+    "motivational": {"motivation", "motivational", "fight", "fighting", "battle", "zinda", "jeet", "victory", "fighter", "warrior", "rise", "goal", "inspire", "champion", "unstoppable"},
     "energetic": {"fight", "anthem", "rock", "power", "action", "dance", "party", "bhangra", "bang", "fire", "dhamaka", "dhamaal", "high", "energy"},
     "rap_hiphop": {"rap", "rapper", "hip hop", "hiphop", "gully", "desi hip hop", "freestyle", "mixtape"},
     "sad": {"sad", "heartbreak", "alone", "broken", "dard", "udaas", "tanha", "judai"},
@@ -427,6 +427,7 @@ def build_live_catalog_lookup(data: pd.DataFrame) -> dict[tuple[str, str], dict]
             "feature_source": "local_audio_catalog",
             "catalog_artists": str(getattr(row, "artists", "")),
             "catalog_language_hint": language_hint,
+            "track_genre": str(getattr(row, "track_genre", "")),
             **{
                 column: float(getattr(row, column, 0) or 0)
                 for column in MOOD_FEATURES

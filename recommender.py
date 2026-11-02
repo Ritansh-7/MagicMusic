@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 ERA_COMPATIBILITY_WINDOW_YEARS = 30
-HYBRID_MODEL_VERSION = "hybrid-v18-independent-candidate-intents"
+HYBRID_MODEL_VERSION = "hybrid-v20-listener-mood-and-era"
 
 
 def _metadata_feature_tokens(item: dict) -> dict[str, float]:
@@ -100,16 +100,26 @@ def recommendation_history_keys(item: dict) -> set[str]:
 INTENT_KEYWORDS = {
     "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "pyar", "dil", "jaan", "milan", "sanam", "aashiqui", "prem", "saiyaara"},
     "ghazal": {"ghazal", "ghazals", "mehfil", "rekhta", "shayari", "ghulam ali", "chupke chupke classics"},
-    "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "shiva", "shivay", "mahadev", "krishna", "radhe", "aarti", "qawwali devotional"},
-    "motivational": {"motivation", "motivational", "victory", "fighter", "warrior", "zinda", "jeet", "inspire", "goal", "champion"},
-    "energetic": {"anthem", "rock", "dance", "party", "bhangra", "dhamaka", "dhamaal", "energetic", "power", "action"},
+    "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "bajrang", "shiva", "shivay", "mahadev", "krishna", "radhe", "aarti", "qawwali devotional"},
+    "motivational": {"motivation", "motivational", "fight", "fighting", "battle", "victory", "fighter", "warrior", "rise", "zinda", "jeet", "inspire", "goal", "champion", "unstoppable"},
+    "energetic": {"fight", "fighting", "anthem", "rock", "dance", "party", "bhangra", "dhamaka", "dhamaal", "energetic", "power", "action", "high energy"},
     "acoustic_indie": {"acoustic", "unplugged", "indie", "folk", "coke studio", "singer songwriter"},
     "rap_hiphop": {"rap", "hip hop", "hiphop", "freestyle", "gully", "mixtape"},
+    "calm": {"lofi", "sleep", "calm", "peace", "soothing", "sukoon", "instrumental"},
 }
 
 
 def _infer_candidate_intents(item: dict) -> set[str]:
     """Infer musical intent from the track's own metadata, never its artist."""
+    supplied_labels = item.get("intent_labels")
+    if isinstance(supplied_labels, (list, tuple, set)):
+        labels = {
+            str(label).strip().casefold()
+            for label in supplied_labels
+            if str(label).strip().casefold() not in {"", "general", "neutral"}
+        }
+        if labels:
+            return labels
     text = " ".join(
         str(item.get(field, ""))
         for field in ("title", "album", "track_genre", "genre", "language")
@@ -489,6 +499,8 @@ class HybridRecommendationEngine:
         self.short_artist_preferences: dict[str, dict[str, float]] = {}
         self.medium_artist_preferences: dict[str, dict[str, float]] = {}
         self.long_artist_preferences: dict[str, dict[str, float]] = {}
+        self.user_mood_profiles: dict[str, np.ndarray] = {}
+        self.user_era_profiles: dict[str, dict[int, float]] = {}
         self.bandit_counts: dict[str, float] = {}
         self.bandit_rewards: dict[str, float] = {}
         self.learned_ranker = LearnedRanker()
@@ -506,6 +518,8 @@ class HybridRecommendationEngine:
         self.short_artist_preferences = {}
         self.medium_artist_preferences = {}
         self.long_artist_preferences = {}
+        self.user_mood_profiles = {}
+        self.user_era_profiles = {}
         self.learned_ranker.fit(frame)
         self.bandit_counts = {}
         self.bandit_rewards = {}
@@ -548,6 +562,9 @@ class HybridRecommendationEngine:
         self.short_artist_preferences = {}
         self.medium_artist_preferences = {}
         self.long_artist_preferences = {}
+        mood_sums: dict[str, np.ndarray] = {}
+        mood_weights: dict[str, float] = {}
+        era_weights: dict[str, dict[int, float]] = {}
         now = pd.Timestamp.now(tz="UTC")
         for row in frame.itertuples(index=False):
             metadata = getattr(row, "metadata_json", "") or ""
@@ -555,25 +572,55 @@ class HybridRecommendationEngine:
                 payload = json.loads(metadata) if isinstance(metadata, str) else {}
             except (TypeError, ValueError):
                 payload = {}
-            artists = [part.strip().casefold() for part in str(payload.get("artists", "")).split(",") if part.strip()]
-            if not artists:
-                continue
+            artists = [
+                part.strip().casefold()
+                for part in str(payload.get("artists", "")).split(",")
+                if part.strip()
+            ]
             try:
-                age_days = max(0.0, (now - getattr(row, "created_at")).total_seconds() / 86400.0)
+                created_at = getattr(row, "created_at")
+                age_days = (
+                    max(0.0, (now - created_at).total_seconds() / 86400.0)
+                    if pd.notna(created_at) else 30.0
+                )
             except (AttributeError, TypeError, ValueError):
                 age_days = 30.0
             weight = float(getattr(row, "weight", 0.0) or 0.0)
             short_weight = weight * float(np.exp(-age_days / 14.0))
             long_weight = weight * float(np.exp(-age_days / 180.0))
             user = str(getattr(row, "user_id", ""))
-            short_map = self.short_artist_preferences.setdefault(user, {})
-            medium_map = self.medium_artist_preferences.setdefault(user, {})
-            long_map = self.long_artist_preferences.setdefault(user, {})
-            for artist in artists:
-                short_map[artist] = short_map.get(artist, 0.0) + short_weight
-                medium_weight = weight * float(np.exp(-age_days / 30.0))
-                medium_map[artist] = medium_map.get(artist, 0.0) + medium_weight
-                long_map[artist] = long_map.get(artist, 0.0) + long_weight
+            if artists:
+                short_map = self.short_artist_preferences.setdefault(user, {})
+                medium_map = self.medium_artist_preferences.setdefault(user, {})
+                long_map = self.long_artist_preferences.setdefault(user, {})
+                for artist in artists:
+                    short_map[artist] = short_map.get(artist, 0.0) + short_weight
+                    medium_weight = weight * float(np.exp(-age_days / 30.0))
+                    medium_map[artist] = medium_map.get(artist, 0.0) + medium_weight
+                    long_map[artist] = long_map.get(artist, 0.0) + long_weight
+            if weight <= 0:
+                continue
+            try:
+                mood = np.asarray(payload.get("mood_vector", []), dtype=float)
+            except (TypeError, ValueError):
+                mood = np.asarray([])
+            if mood.ndim == 1 and mood.size == 9 and np.all(np.isfinite(mood)):
+                mood_sums[user] = mood_sums.get(user, np.zeros_like(mood)) + mood * short_weight
+                mood_weights[user] = mood_weights.get(user, 0.0) + short_weight
+            try:
+                year = int(str(payload.get("year", ""))[:4])
+            except (TypeError, ValueError):
+                year = 0
+            if 1900 <= year <= 2100 and long_weight > 0:
+                decade = year // 10 * 10
+                user_eras = era_weights.setdefault(user, {})
+                user_eras[decade] = user_eras.get(decade, 0.0) + long_weight
+        self.user_mood_profiles = {
+            user: mood_sums[user] / mood_weights[user]
+            for user in mood_sums
+            if mood_weights.get(user, 0.0) > 0
+        }
+        self.user_era_profiles = era_weights
         frame = frame.sort_values(["user_id", "session_id", "created_at"] if "session_id" in frame else ["user_id", "created_at"])
 
         # Recent listening context: used for freshness and repeat avoidance.
@@ -674,6 +721,12 @@ class HybridRecommendationEngine:
                 seen_result_keys.add(result_key)
                 deduped.append(item)
         results = deduped
+        if seed:
+            seed_identity = recommendation_history_keys(seed)
+            results = [
+                item for item in results
+                if not seed_identity.intersection(recommendation_history_keys(item))
+            ]
         if not results:
             return []
         preferred = catalog[catalog["track_id"].astype(str).isin({str(x) for x in preferred_track_ids})]
@@ -717,6 +770,8 @@ class HybridRecommendationEngine:
         }
         seed_styles = seed_styles or {"neutral"}
         seed_mood = np.asarray((seed or {}).get("mood_vector", []), dtype=float)
+        listener_mood = self.user_mood_profiles.get(str(user_id), np.asarray([]))
+        listener_eras = self.user_era_profiles.get(str(user_id), {})
         seed_feature_tokens = _metadata_feature_tokens(seed or {})
         seed_confidence = float((seed or {}).get("mood_confidence", 0.0) or 0.0)
         seed_intents = _infer_candidate_intents(seed or {})
@@ -741,6 +796,29 @@ class HybridRecommendationEngine:
                     return 0.0
             denominator = float(np.linalg.norm(seed_mood) * np.linalg.norm(item_mood))
             return max(0.0, float(np.dot(seed_mood, item_mood) / denominator)) if denominator else 0.0
+
+        def listener_mood_similarity(item: dict) -> float:
+            item_mood = np.asarray(item.get("mood_vector", []), dtype=float)
+            if (
+                listener_mood.size == 0
+                or item_mood.size != listener_mood.size
+                or str(item.get("mood_source", "")) != "local_audio_catalog"
+            ):
+                return 0.0
+            denominator = float(np.linalg.norm(listener_mood) * np.linalg.norm(item_mood))
+            return (
+                max(0.0, float(np.dot(listener_mood, item_mood) / denominator))
+                if denominator else 0.0
+            )
+
+        def listener_era_similarity(year: int) -> float:
+            total_weight = sum(listener_eras.values())
+            if not year or total_weight <= 0:
+                return 0.0
+            return sum(
+                weight * float(np.exp(-((year - (decade + 5)) / 18.0) ** 2))
+                for decade, weight in listener_eras.items()
+            ) / total_weight
 
         content = []
         seed_artists = [
@@ -801,6 +879,8 @@ class HybridRecommendationEngine:
                 and seed_styles.intersection(item_styles)
             ) else 0.0
             mood_match = mood_similarity(item)
+            listener_mood_match = listener_mood_similarity(item)
+            listener_era_match = listener_era_similarity(item_year)
             # Cosine similarity is audio evidence only when both sides have
             # real catalog features. Metadata fallback vectors must not
             # masquerade as audio.
@@ -851,6 +931,8 @@ class HybridRecommendationEngine:
             item["_cluster_match"] = cluster_match
             item["_style_match"] = style_match
             item["_mood_match"] = mood_match
+            item["_listener_mood_match"] = listener_mood_match
+            item["_listener_era_match"] = listener_era_match
             item["_audio_match"] = audio_match
             item["_metadata_score"] = metadata_score
             item["_feature_tokens"] = _metadata_feature_tokens(item)
@@ -925,6 +1007,8 @@ class HybridRecommendationEngine:
                 "medium_term": item["_medium_term"],
                 "long_term": item["_long_term"],
                 "audio_confidence": float(item.get("mood_confidence", 0.0) or 0.0),
+                "listener_mood": listener_mood_match,
+                "listener_era": listener_era_match,
             }
         content = np.asarray(content, dtype=float)
         popularity = np.asarray([
@@ -963,7 +1047,9 @@ class HybridRecommendationEngine:
                 0.28 * audio_values
                 + 0.14 * metadata_values
                 + 0.07 * collaborative
-                + 0.10 * (0.60 * short_values + 0.40 * medium_values)
+                + 0.04 * (0.60 * short_values + 0.40 * medium_values)
+                + 0.03 * np.asarray([item.get("_listener_mood_match", 0.0) for item in results])
+                + 0.03 * np.asarray([item.get("_listener_era_match", 0.0) for item in results])
                 + 0.07 * transition_values
                 + 0.16 * context_values
                 + 0.06 * artist_anchor_values
@@ -1087,19 +1173,17 @@ class HybridRecommendationEngine:
                 # because both titles contain an energy keyword. Cross-
                 # language discovery remains possible through same-artist or
                 # same-album evidence, but not as an accidental fallback.
-                safe_link = (
-                    float(item.get("_album_match", 0.0)) >= 1.0
-                    or float(item.get("_cluster_match", 0.0)) >= 1.0
-                )
+                same_soundtrack = float(item.get("_album_match", 0.0)) >= 1.0
+                safe_link = same_soundtrack or float(item.get("_cluster_match", 0.0)) >= 1.0
                 if has_seed and bool(item.get("_language_conflict", False)) and not safe_link:
                     continue
-                if bool(item.get("_intent_conflict", False)) and not safe_link:
+                if bool(item.get("_intent_conflict", False)) and not same_soundtrack:
                     continue
                 candidate_intents = item_intents
                 specialized_intents = {"devotional", "ghazal", "motivational", "acoustic_indie", "energetic", "rap_hiphop"}
                 seed_specialized = seed_intents.intersection(specialized_intents)
                 candidate_specialized = candidate_intents.intersection(specialized_intents)
-                if candidate_specialized and not seed_specialized.intersection(candidate_specialized) and not safe_link:
+                if candidate_specialized and not seed_specialized.intersection(candidate_specialized) and not same_soundtrack:
                     continue
                 # A confident seed intent is a hard semantic contract. A
                 # candidate with no evidence for that intent is not allowed
@@ -1110,9 +1194,11 @@ class HybridRecommendationEngine:
                     and seed_intents
                     and not candidate_intents
                     and not (
-                        float(item.get("_seed_artist_match", 0.0))
-                        or float(item.get("_album_match", 0.0))
-                        or float(item.get("_cluster_match", 0.0))
+                        same_soundtrack
+                        or (
+                            float(item.get("_audio_match", 0.0)) >= 0.78
+                            and float(item.get("_mood_match", 0.0)) >= 0.70
+                        )
                     )
                 ):
                     continue
@@ -1189,6 +1275,8 @@ class HybridRecommendationEngine:
                 "medium_term": round(float(chosen.get("_medium_term", 0.0)), 4),
                 "long_term": round(float(chosen.get("_long_term", 0.0)), 4),
                 "audio_confidence": round(float(chosen.get("mood_confidence", 0.0) or 0.0), 4),
+                "listener_mood": round(float(chosen.get("_listener_mood_match", 0.0)), 4),
+                "listener_era": round(float(chosen.get("_listener_era_match", 0.0)), 4),
             }
             chosen["recommendation_model_version"] = HYBRID_MODEL_VERSION
             selected.append(chosen)
