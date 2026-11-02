@@ -8,10 +8,8 @@ from recommender import (
     SpotifyRecommendationEngine,
     _canonical_recording_key,
     _era_artist_discovery_queries,
-    _era_mood_discovery_queries,
     _infer_candidate_intents,
     _interleave_recommendation_contexts,
-    _prioritize_seed_soundtrack_last,
     infer_audio_intents,
     infer_same_soundtrack_audio_intents,
     _soundtrack_peer_artists,
@@ -518,17 +516,6 @@ def test_era_discovery_queries_include_seed_artists_and_only_nearby_decades():
     ]
 
 
-def test_era_mood_discovery_queries_search_neighboring_decades_without_seed_artist():
-    queries = _era_mood_discovery_queries(1968, "Hindi", {"romantic"})
-
-    assert queries == [
-        "1960s Bollywood romantic love songs",
-        "1950s Hindi romantic love songs",
-        "1970s Hindi romantic love songs",
-    ]
-    assert all("Mohammed Rafi" not in query for query in queries)
-
-
 def test_soundtrack_peer_artists_expand_era_search_without_repeating_seed_singers():
     seed = {
         "title": "Babu Samjho Ishare",
@@ -549,74 +536,6 @@ def test_soundtrack_peer_artists_expand_era_search_without_repeating_seed_singer
     assert _soundtrack_peer_artists(seed, [same_work, different_work]) == [
         "Asha Bhosle"
     ]
-
-
-def test_seed_soundtrack_tracks_are_placed_after_other_era_recommendations():
-    seed = {"album": "Brahmachari", "artists": "Mohammed Rafi"}
-    recommendations = [
-        {"song_id": "same-film", "album": "Brahmachari"},
-        {"song_id": "other-film-a", "album": "Other Film A"},
-        {"song_id": "other-film-b", "album": "Other Film B"},
-    ]
-
-    ordered = _prioritize_seed_soundtrack_last(recommendations, seed)
-
-    assert [item["song_id"] for item in ordered] == [
-        "other-film-a",
-        "other-film-b",
-        "same-film",
-    ]
-
-
-def test_radio_accepts_other_singers_with_verified_same_era_mood_before_seed_film():
-    catalog = sample_data()
-    hybrid = HybridRecommendationEngine(SpotifyRecommendationEngine(catalog))
-    mood = [0.8, 0.65, 0.7, 0.75, 0.2, 0.1, 0.08, 0.2, 0.8]
-    seed = {
-        "title": "Dil Ke Jharokhe Mein",
-        "artists": "Mohammed Rafi",
-        "album": "Brahmachari",
-        "year": 1968,
-        "language": "Hindi",
-        "mood_vector": mood,
-        "mood_label": "romantic",
-        "mood_confidence": 0.95,
-        "mood_source": "metadata_fallback",
-        "intent_labels": ["romantic"],
-    }
-    candidates = [
-        {
-            "song_id": f"other-era-film-{index}",
-            "title": f"Era track {index}",
-            "artists": f"Singer {index}",
-            "album": f"Other film {index}",
-            "year": 1964 + index % 8,
-            "language": "Hindi",
-            "mood_vector": mood,
-            "mood_label": "romantic",
-            "mood_confidence": 0.72,
-            "mood_source": "metadata_fallback",
-            "intent_labels": ["general"],
-        }
-        for index in range(1, 9)
-    ]
-    candidates.append({
-        **candidates[0],
-        "song_id": "same-film",
-        "title": "Another Brahmachari song",
-        "artists": "Suman Kalyanpur",
-        "album": "Brahmachari",
-    })
-
-    ranked = hybrid.rank_jio_results(
-        candidates, "classic-romance-user", catalog, [], seed=seed,
-    )
-
-    assert len(ranked) == len(candidates)
-    assert all(item["artists"] != "Mohammed Rafi" for item in ranked[:-1])
-    assert ranked[-1]["song_id"] == "same-film"
-    assert all(abs(int(item["year"]) - 1968) <= 15 for item in ranked)
-    assert all(item["recommendation_features"]["mood"] > 0.99 for item in ranked)
 
 
 def test_era_radio_returns_songs_from_other_films_when_soundtrack_has_few_tracks():
@@ -941,7 +860,7 @@ def test_radio_rotates_singers_while_preserving_seed_mood_and_era():
     top_eight_artists = [item["artists"] for item in ranked[:8]]
 
     assert len(set(top_eight_artists)) >= 5
-    assert top_eight_artists.count("Mukesh") <= 2
+    assert top_eight_artists.count("Mukesh") <= 3
     assert all(abs(int(item["year"]) - 1975) <= 15 for item in ranked[:8])
     assert all(item["recommendation_features"]["mood"] > 0.99 for item in ranked[:8])
 

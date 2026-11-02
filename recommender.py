@@ -5,7 +5,7 @@ import re
 import numpy as np
 import pandas as pd
 
-HYBRID_MODEL_VERSION = "hybrid-v28-era-mood-radio"
+HYBRID_MODEL_VERSION = "hybrid-v27-live-seed-era-rotation"
 
 EXCLUDED_RECOMMENDATION_TITLES = {"jo bhi kasmein"}
 MAX_RECOMMENDATION_YEAR_DISTANCE = 15
@@ -87,42 +87,6 @@ def _era_artist_discovery_queries(seed_year: object, artists: list[str]) -> list
         if len(seen_artists) >= 2:
             break
     return queries
-
-
-def _era_mood_discovery_queries(
-    seed_year: object,
-    language: str,
-    intents: set[str],
-) -> list[str]:
-    year = _release_year(seed_year)
-    if not year:
-        return []
-
-    mood_terms = {
-        "romantic": "romantic love",
-        "sad": "sad heartbreak",
-        "playful": "playful fun",
-        "energetic": "energetic",
-        "ghazal": "ghazal",
-        "devotional": "devotional",
-        "calm": "soft calm",
-        "acoustic_indie": "acoustic",
-        "motivational": "inspirational",
-        "rap_hiphop": "hip hop",
-    }
-    mood_query = " ".join(
-        dict.fromkeys(mood_terms[intent] for intent in sorted(intents) if intent in mood_terms)
-    )
-    language_query = str(language or "").strip()
-    decade = year // 10 * 10
-    queries = [
-        " ".join(part for part in (f"{decade}s", language_query, mood_query, "songs") if part),
-        " ".join(part for part in (f"{decade - 10}s", language_query, mood_query, "songs") if part),
-        " ".join(part for part in (f"{decade + 10}s", language_query, mood_query, "songs") if part),
-    ]
-    if language_query.casefold() in {"hindi", "bollywood"}:
-        queries[0] = f"{decade}s Bollywood {mood_query or 'songs'} songs"
-    return list(dict.fromkeys(query for query in queries if query))
 
 
 def _recommendation_work_key(item: dict) -> str:
@@ -246,20 +210,6 @@ def _prioritize_distinct_soundtracks(items: list[dict]) -> list[dict]:
             if work_key:
                 seen_work_keys.add(work_key)
     return unique + repeats
-
-
-def _prioritize_seed_soundtrack_last(items: list[dict], seed: dict) -> list[dict]:
-    seed_work = _recommendation_work_key(seed)
-    if not seed_work:
-        return items
-    other_work: list[dict] = []
-    same_work: list[dict] = []
-    for item in items:
-        if _recommendation_work_key(item) == seed_work:
-            same_work.append(item)
-        else:
-            other_work.append(item)
-    return other_work + same_work
 
 
 def _metadata_feature_tokens(item: dict) -> dict[str, float]:
@@ -1436,31 +1386,9 @@ class HybridRecommendationEngine:
         selected: list[dict] = []
         artist_counts: dict[str, int] = {}
         album_counts: dict[str, int] = {}
-        seed_artist_keys = _artist_credit_keys((seed or {}).get("artists", ""))
         remaining = ranked.copy()
         while remaining:
             eligible: list[tuple[int, float, float, float]] = []
-            has_same_mood_era_alternative = any(
-                not seed_artist_keys.intersection(
-                    _artist_credit_keys(candidate.get("artists", ""))
-                )
-                and (
-                    (
-                        seed_year
-                        and _release_year(candidate.get("year"))
-                        and abs(_release_year(candidate.get("year")) - seed_year)
-                        <= MAX_RECOMMENDATION_YEAR_DISTANCE
-                    )
-                    or float(candidate.get("_era_match", 0.0)) >= 0.45
-                )
-                and (
-                    float(candidate.get("_mood_match", 0.0)) >= 0.58
-                    or float(candidate.get("_audio_match", 0.0)) >= 0.62
-                )
-                and not bool(candidate.get("_intent_conflict", False))
-                and not bool(candidate.get("_language_conflict", False))
-                for _, candidate in remaining
-            )
             for index, (base_score, item) in enumerate(remaining):
                 item_id = str(item.get("song_id") or item.get("title", ""))
                 artist_keys = _artist_credit_keys(item.get("artists", ""))
@@ -1498,25 +1426,15 @@ class HybridRecommendationEngine:
                         and float(item.get("_mood_match", 0.0)) >= 0.62
                     )
                 )
-                item_year = _release_year(item.get("year"))
-                era_mood_context = (
-                    bool(seed_year and item_year)
-                    and abs(item_year - seed_year) <= MAX_RECOMMENDATION_YEAR_DISTANCE
-                    and float(item.get("_mood_match", 0.0)) >= 0.72
-                    and (
-                        str(item.get("mood_source", "")) == "local_audio_catalog"
-                        or float(item.get("mood_confidence", 0.0) or 0.0) >= 0.60
-                    )
-                    and not bool(item.get("_intent_conflict", False))
-                    and not bool(item.get("_language_conflict", False))
-                )
-                if era_mood_context:
-                    strong_context = True
                 # Live providers often omit year, language and audio features.
                 # In that case a direct shared-artist signal is still valid
                 # evidence, but only for the current seed's artist—not as a
                 # generic popularity fallback. A shared metadata token plus a
                 # compatible era/language bridge is the second safe fallback.
+                seed_artist_keys = {
+                    re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+                    for value in seed_artists if value.strip()
+                }
                 item_artist_keys = {
                     re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
                     for value in str(item.get("artists", "")).split(",") if value.strip()
@@ -1579,7 +1497,6 @@ class HybridRecommendationEngine:
                             and 0 < int(item.get("_era_delta", 0) or 0)
                             <= MAX_RECOMMENDATION_YEAR_DISTANCE
                         )
-                        or era_mood_context
                     )
                 ):
                     continue
@@ -1596,7 +1513,6 @@ class HybridRecommendationEngine:
                         or float(item.get("_mood_match", 0.0)) >= 0.58
                         or float(item.get("_intent_match", 0.0)) >= 0.5
                         or same_soundtrack
-                        or era_mood_context
                     )
                     if not relaxed_bridge:
                         continue
@@ -1621,11 +1537,6 @@ class HybridRecommendationEngine:
                     default=0,
                 )
                 adjusted -= 0.30 * repeat_count
-                if (
-                    seed_artist_keys.intersection(artist_keys)
-                    and has_same_mood_era_alternative
-                ):
-                    adjusted -= 0.20
                 # Album/soundtrack continuity is useful for the first result,
                 # but repeated items from the same album must make room for
                 # equally relevant songs from the seed's era and intent.
@@ -1693,7 +1604,6 @@ class HybridRecommendationEngine:
         # Keep year closeness and mood ahead of artist/soundtrack context.
         selected = _interleave_recommendation_contexts(selected, seed_year)
         selected = _prioritize_distinct_soundtracks(selected)
-        selected = _prioritize_seed_soundtrack_last(selected, seed or {})
         for item in selected:
             item.pop("_context_score", None)
             item.pop("_profile_score", None)

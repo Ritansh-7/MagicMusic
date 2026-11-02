@@ -19,7 +19,6 @@ from recommender import (
     HybridRecommendationEngine,
     SpotifyRecommendationEngine,
     _era_artist_discovery_queries,
-    _era_mood_discovery_queries,
     _soundtrack_peer_artists,
     infer_audio_intents,
     infer_same_soundtrack_audio_intents,
@@ -1337,11 +1336,6 @@ def build_jio_up_next(
     ]
     prioritized_queries = (
         related_queries[:3]
-        + _era_mood_discovery_queries(
-            seed_year,
-            seed_language,
-            set(seed.get("intent_labels", [])),
-        )
         + title_variants[refresh_round % len(title_variants)]
         + _era_artist_discovery_queries(seed_year, artist_names)
         + related_queries[3:]
@@ -1414,7 +1408,7 @@ def build_jio_up_next(
         [dict(item) for item in search_results if isinstance(item, dict)],
         source="seed_search_results",
     )
-    collect_queries(prioritized_queries, page_limit=30, max_queries=24, source="era_mood_and_seed_discovery")
+    collect_queries(prioritized_queries, page_limit=30, max_queries=20, source="seed_title_album_artist")
     soundtrack_peer_queries = _era_artist_discovery_queries(
         seed_year,
         _soundtrack_peer_artists(seed, collected),

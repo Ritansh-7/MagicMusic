@@ -165,8 +165,6 @@ When exposed recommendation candidates later receive feedback, the optional `ran
 
 In addition to ranking, the seed-based path rejects the seed and duplicate recordings, applies language and intent conflict checks, and requires musical-context evidence. A weak candidate cannot enter solely because it is popular. The final greedy, MMR-style reranker starts from base relevance and adjusts each pick:
 
-Live discovery also searches around the current song's release decade, language and inferred mood. Candidates from other singers can qualify when their year is within 15 years and their mood evidence is strong and compatible; artist variety is preferred over repeatedly recommending the seed singer. Relevant tracks from the seed's own film/soundtrack are retained but ordered after recommendations from other works. Sparse or conflicting metadata can still produce a shorter queue rather than unrelated filler.
-
 ```text
 adjusted_score =
     base_relevance
