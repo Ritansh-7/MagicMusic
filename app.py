@@ -1698,13 +1698,44 @@ def render_admin_dashboard() -> None:
             e3.metric("Exposure play-through", f"{recommended_plays / len(exposed_ids) * 100:.1f}%")
             e4.metric("Precision@10", f"{np.mean(precision_values) * 100:.1f}%" if precision_values else "—")
             e5.metric("NDCG@10", f"{np.mean(ndcg_values):.3f}" if ndcg_values else "—")
-        # Explainability audit: show the actual feature values that allowed
-        # the latest recommendations through the gate.
+        # Explainability audit: show diagnostics only for the latest played song.
+        latest_impression = None
+        latest_play = plays.iloc[-1] if not plays.empty else None
+        latest_play_metadata = {}
+        if latest_play is not None:
+            latest_play_index = plays.index[-1]
+            if latest_play_index < len(metadata_rows):
+                latest_play_metadata = metadata_rows[latest_play_index]
+            latest_play_track_id = str(latest_play.get("track_id") or "")
+            for event_index in range(len(metadata_rows) - 1, -1, -1):
+                event = events.iloc[event_index]
+                event_metadata = metadata_rows[event_index]
+                if (
+                    isinstance(event_metadata, dict)
+                    and event_metadata.get("items")
+                    and event["event_type"] == "recommendation_impression"
+                    and str(event_metadata.get("seed_track_id") or "") == latest_play_track_id
+                    and str(event["user_id"]) == str(latest_play["user_id"])
+                    and str(event["session_id"]) == str(latest_play["session_id"])
+                    and event["created_at"] >= latest_play["created_at"]
+                ):
+                    latest_impression = (event, event_metadata)
+                    break
+        else:
+            for event_index in range(len(metadata_rows) - 1, -1, -1):
+                event_metadata = metadata_rows[event_index]
+                if (
+                    isinstance(event_metadata, dict)
+                    and event_metadata.get("items")
+                    and events.iloc[event_index]["event_type"] == "recommendation_impression"
+                ):
+                    latest_impression = (events.iloc[event_index], event_metadata)
+                    break
+
         diagnostic_rows = []
-        for row in reversed(metadata_rows):
-            if not isinstance(row, dict) or not row.get("items"):
-                continue
-            for item in row.get("items", [])[:10]:
+        if latest_impression:
+            impression_event, impression_metadata = latest_impression
+            for item in impression_metadata.get("items", [])[:10]:
                 if not isinstance(item, dict):
                     continue
                 features = item.get("features") or {}
@@ -1724,11 +1755,32 @@ def render_admin_dashboard() -> None:
                     "transition": features.get("transition", 0.0),
                     "source": item.get("source", ""),
                 })
-            break
         if diagnostic_rows:
             st.subheader("Latest recommendation diagnostics")
-            st.caption("Feature evidence behind the latest queue; metadata-only mood is not audio proof.")
+            seed_details = " · ".join(
+                str(value).strip()
+                for value in (
+                    impression_metadata.get("seed_title"),
+                    impression_metadata.get("seed_artists"),
+                    impression_metadata.get("seed_album"),
+                    impression_metadata.get("seed_year"),
+                )
+                if str(value or "").strip()
+            )
+            st.caption(
+                f"Latest queue for {seed_details or 'the latest played song'} · "
+                f"generated: {impression_event['created_at']}"
+            )
             st.dataframe(pd.DataFrame(diagnostic_rows), width="stretch", hide_index=True)
+        elif latest_play is not None:
+            latest_play_title = (
+                latest_play_metadata.get("title")
+                or latest_play_metadata.get("track_name")
+                or latest_play.get("track_id")
+                or "Unknown song"
+            )
+            st.subheader("Latest recommendation diagnostics")
+            st.caption(f"No queue has been generated for the latest played song ({latest_play_title}) yet.")
         source_counts = metadata.get("feature_source", pd.Series(dtype=str)).fillna("unknown").value_counts()
         matched = int(source_counts.get("local_audio_catalog", 0))
         fallback = int(source_counts.get("live_metadata_fallback", 0))
@@ -2089,8 +2141,8 @@ def play_next_from_queue(mark_previous_as_skip: bool = True) -> bool:
         metadata=next_item,
     )
     next_id = str(next_item.get("song_id") or next_item.get("title", ""))
-    st.session_state["jio_queue_seed_id"] = next_id
     st.session_state["jio_queue_attempted_id"] = next_id
+    st.session_state["jio_queue_refill_attempted_id"] = ""
     return True
 
 if not search_query:
@@ -2243,10 +2295,7 @@ if jio_now and (
     except Exception:
         pass
 if jio_now:
-    current_queue_seed = str(jio_now.get("song_id") or jio_now.get("title", ""))
     current_queue = list(st.session_state.get("jio_queue", []))
-    if current_queue:
-        st.session_state["jio_queue_seed_id"] = current_queue_seed
     st.html("<div id='tune-match-player-anchor'></div>")
     st.markdown('<div class="shelf-title">TuneMatch player</div>', unsafe_allow_html=True)
     now_cols = st.columns([1, 3, 1, 1])
@@ -2292,7 +2341,10 @@ if jio_now:
         if audio_ended and play_next_from_queue(mark_previous_as_skip=False):
             st.rerun()
         existing_queue = list(st.session_state.get("jio_queue", []))
-        if (
+        queue_seed_changed = (
+            st.session_state.get("jio_queue_seed_id") != current_id
+        )
+        if queue_seed_changed or (
             len(existing_queue) <= 8
             and st.session_state.get("jio_queue_refill_attempted_id") != current_id
         ):
@@ -2305,25 +2357,28 @@ if jio_now:
                 )
                 fresh_queue = build_jio_up_next(
                     jio_now,
-                    cached_results,
+                    [*existing_queue, *cached_results],
                     jio_client,
                     hybrid_engine,
                     local_user_id,
                     data,
                     preferred_track_ids,
-                    exclude_items=[jio_now, *existing_queue],
+                    exclude_items=[jio_now] if queue_seed_changed else [jio_now, *existing_queue],
                 )
-                merged_queue = []
-                seen_recordings: set[str] = set()
-                for item in [*existing_queue, *fresh_queue]:
-                    identity_keys = _recommendation_history_keys(item)
-                    if identity_keys and not identity_keys.intersection(seen_recordings):
-                        seen_recordings.update(identity_keys)
-                        merged_queue.append(item)
-                st.session_state["jio_queue"] = merged_queue[:30]
+                if queue_seed_changed:
+                    st.session_state["jio_queue"] = fresh_queue[:30]
+                else:
+                    merged_queue = []
+                    seen_recordings: set[str] = set()
+                    for item in [*existing_queue, *fresh_queue]:
+                        identity_keys = _recommendation_history_keys(item)
+                        if identity_keys and not identity_keys.intersection(seen_recordings):
+                            seen_recordings.update(identity_keys)
+                            merged_queue.append(item)
+                    st.session_state["jio_queue"] = merged_queue[:30]
                 st.session_state["jio_queue_seed_id"] = current_id
             except Exception:
-                st.session_state["jio_queue"] = existing_queue
+                st.session_state["jio_queue"] = [] if queue_seed_changed else existing_queue
         liked_ids = set(user_store.liked_track_ids(local_user_id))
         if current_id in liked_ids:
             st.success("♥ Liked")
@@ -2444,7 +2499,6 @@ if jio_now:
                 st.session_state["jio_last_accounted_at"] = st.session_state["jio_started_at"]
                 defer_player_event("jio_play", st.session_state["jio_current_track_id"], metadata=featured)
                 current_seed_id = str(featured.get("song_id") or featured.get("title", ""))
-                st.session_state["jio_queue_seed_id"] = current_seed_id
                 st.session_state["jio_queue_attempted_id"] = current_seed_id
                 st.session_state["jio_queue_refill_attempted_id"] = ""
                 st.rerun()
@@ -2497,7 +2551,6 @@ if jio_now:
                                 metadata=item,
                             )
                             current_seed_id = str(item.get("song_id") or item.get("title", ""))
-                            st.session_state["jio_queue_seed_id"] = current_seed_id
                             st.session_state["jio_queue_attempted_id"] = current_seed_id
                             st.session_state["jio_queue_refill_attempted_id"] = ""
                             st.rerun()
