@@ -6,16 +6,13 @@ import numpy as np
 import pandas as pd
 
 ERA_COMPATIBILITY_WINDOW_YEARS = 30
-HYBRID_MODEL_VERSION = "hybrid-v21-era-taste-artist-soundtrack-order"
+HYBRID_MODEL_VERSION = "hybrid-v22-era-priority-mix"
 
 
 def _interleave_recommendation_contexts(items: list[dict], seed_year: int) -> list[dict]:
-    """Interleave era, listener taste, seed artist, and soundtrack discoveries."""
-    remaining = list(items)
-    if not remaining:
-        return []
-
+    """Prioritize the seed decade, then taste, artist, and soundtrack context."""
     seed_decade = seed_year // 10 * 10 if seed_year else 0
+    buckets: dict[int, list[tuple[int, dict]]] = {0: [], 1: [], 2: []}
 
     def candidate_decade(item: dict) -> int:
         try:
@@ -24,37 +21,55 @@ def _interleave_recommendation_contexts(items: list[dict], seed_year: int) -> li
             return 0
         return year // 10 * 10 if 1900 <= year <= 2100 else 0
 
-    def listener_taste_match(item: dict) -> bool:
-        return max(
+    for index, item in enumerate(items):
+        decade = candidate_decade(item)
+        distance = abs(decade - seed_decade) if seed_decade and decade else 30
+        bucket = 0 if distance == 0 else 1 if distance <= 10 else 2
+        buckets[bucket].append((index, item))
+
+    def context_order(entry: tuple[int, dict]) -> tuple[float, float, float, int]:
+        index, item = entry
+        taste = max(
             float(item.get("_listener_mood_match", 0.0) or 0.0),
+            float(item.get("_audio_match", 0.0) or 0.0),
+            float(item.get("_intent_match", 0.0) or 0.0),
             float(item.get("_short_term", 0.0) or 0.0),
             float(item.get("_medium_term", 0.0) or 0.0),
             float(item.get("_long_term", 0.0) or 0.0),
-        ) >= 0.35 or max(
-            float(item.get("_audio_match", 0.0) or 0.0),
-            float(item.get("_intent_match", 0.0) or 0.0),
-        ) >= 0.65
+        )
+        artist = float(item.get("_seed_artist_match", 0.0) or 0.0)
+        soundtrack = float(item.get("_album_match", 0.0) or 0.0)
+        return (-taste, -artist, -soundtrack, index)
 
-    categories = (
-        lambda item: bool(seed_decade and candidate_decade(item) == seed_decade),
-        listener_taste_match,
-        lambda item: float(item.get("_seed_artist_match", 0.0) or 0.0) > 0.0,
-        lambda item: float(item.get("_album_match", 0.0) or 0.0) >= 1.0,
-    )
+    for bucket in buckets.values():
+        bucket.sort(key=context_order)
+
+    # Keep the original ranking as the final fallback when no release decade
+    # can be recovered for the seed or a candidate.
+    if not seed_decade:
+        return [item for _, item in sorted(
+            (entry for bucket in buckets.values() for entry in bucket),
+            key=lambda entry: entry[0],
+        )]
+
+    # Roughly 70% from the seed decade, 20% from the adjacent decade, and
+    # at most 10% from other eligible decades. Empty buckets are skipped.
+    schedule = (0, 0, 0, 0, 0, 0, 0, 1, 1, 2)
     ordered: list[dict] = []
-    while remaining:
-        for matches_context in categories:
-            match_index = next(
-                (index for index, item in enumerate(remaining) if matches_context(item)),
-                None,
-            )
-            if match_index is not None:
-                ordered.append(remaining.pop(match_index))
-            if not remaining:
+    while any(buckets.values()):
+        for preferred_bucket in schedule:
+            available = [
+                bucket for bucket, entries in buckets.items() if entries
+            ]
+            if not available:
                 break
-        else:
-            ordered.extend(remaining)
-            break
+            bucket = (
+                preferred_bucket
+                if buckets[preferred_bucket]
+                else min(available, key=lambda value: abs(value - preferred_bucket))
+            )
+            _, item = buckets[bucket].pop(0)
+            ordered.append(item)
     return ordered
 
 
@@ -1340,6 +1355,6 @@ class HybridRecommendationEngine:
         for item in selected:
             item.pop("_context_score", None)
             item.pop("_profile_score", None)
-            for key in ("_seed_artist_match", "_album_match", "_language_match", "_language_conflict", "_era_match", "_cluster_match", "_style_match", "_mood_match", "_audio_match", "_metadata_score", "_collaborative_score", "_feature_tokens", "_metadata_similarity", "_intent_match", "_intent_conflict", "_era_delta", "_same_era", "_short_term", "_medium_term", "_long_term"):
+            for key in ("_seed_artist_match", "_album_match", "_language_match", "_language_conflict", "_era_match", "_cluster_match", "_style_match", "_mood_match", "_listener_mood_match", "_listener_era_match", "_audio_match", "_metadata_score", "_collaborative_score", "_feature_tokens", "_metadata_similarity", "_intent_match", "_intent_conflict", "_era_delta", "_same_era", "_short_term", "_medium_term", "_long_term"):
                 item.pop(key, None)
         return selected

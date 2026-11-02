@@ -282,27 +282,35 @@ def test_listener_mood_and_era_profiles_follow_recent_listening():
     assert ranked[0]["recommendation_features"]["listener_era"] > 0.7
 
 
-def test_recommendations_cycle_through_era_taste_artist_and_soundtrack():
+def test_recommendations_prioritize_seed_decade_with_limited_era_variety():
     candidates = [
-        {"song_id": "filler"},
-        {"song_id": "same-era", "year": 2016},
-        {"song_id": "same-taste", "_listener_mood_match": 0.8},
-        {"song_id": "same-artist", "_seed_artist_match": 1.0},
-        {"song_id": "same-film", "_album_match": 1.0},
-        {"song_id": "next-era", "year": 2019},
+        *({"song_id": f"seventies-{index}", "year": 1970 + index % 10} for index in range(14)),
+        *({"song_id": f"sixties-{index}", "year": 1960 + index} for index in range(2)),
+        *({"song_id": f"eighties-{index}", "year": 1980 + index} for index in range(2)),
+        {"song_id": "nineties", "year": 1995},
     ]
 
-    ordered = _interleave_recommendation_contexts(candidates, 2015)
+    ordered = _interleave_recommendation_contexts(candidates, 1975)
+    decades = [int(item["year"]) // 10 * 10 for item in ordered]
 
-    assert [item["song_id"] for item in ordered[:4]] == [
-        "same-era",
-        "same-taste",
-        "same-artist",
-        "same-film",
+    assert decades[:7] == [1970] * 7
+    assert decades[7:9] == [1960, 1960]
+    assert decades[9] == 1990
+    assert decades.count(1970) == 14
+    assert decades.count(1960) + decades.count(1980) == 4
+    assert decades.count(1990) == 1
+
+
+def test_context_priority_within_same_decade_is_taste_then_artist_then_film():
+    candidates = [
+        {"song_id": "film", "year": 1974, "_album_match": 1.0},
+        {"song_id": "artist", "year": 1976, "_seed_artist_match": 1.0},
+        {"song_id": "taste", "year": 1978, "_listener_mood_match": 0.8},
     ]
-    assert sorted(item["song_id"] for item in ordered) == sorted(
-        item["song_id"] for item in candidates
-    )
+
+    ordered = _interleave_recommendation_contexts(candidates, 1975)
+
+    assert [item["song_id"] for item in ordered] == ["taste", "artist", "film"]
 
 
 def test_logged_impression_schema_is_read_by_ranker():
