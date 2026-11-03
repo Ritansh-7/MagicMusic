@@ -1787,7 +1787,7 @@ class HybridRecommendationEngine:
                     is_valid, _ = double_verify_candidate(seed, item, seed_year)
                     if is_valid:
                         compatible.append(item)
-                results = compatible
+                if len(compatible) >= 10:\n                    results = compatible\n                # Fallback: never drop below 10 candidates; keep all non-excluded results\n                # sorted by era closeness when verification is too strict.\n                else:\n                    results = results
         if not results:
             return []
         preferred = catalog[catalog["track_id"].astype(str).isin({str(x) for x in preferred_track_ids})]
