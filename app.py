@@ -33,7 +33,11 @@ from recommender import (
     recommendation_title_key as _recommendation_title_key,
     infer_track_language as _infer_track_language,
 )
-from search_ranking import prioritize_title_matches, title_query_match_score
+from search_ranking import (
+    include_all_results,
+    prioritize_title_matches,
+    title_query_match_score,
+)
 from spotify_api import SpotifyOAuth, new_oauth_state, verify_oauth_state
 from user_store import UserStore
 
@@ -931,6 +935,7 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
     versions (for example ``- Tamil``) are kept, but ranked below the base
     result unless the user searched for that variant explicitly.
     """
+    all_results = list(results)
     query_key = _compact_key(query)
     if not query_key:
         return results
@@ -1153,7 +1158,7 @@ def prioritize_search_results(results: list[dict], query: str) -> list[dict]:
             continue
         seen.add(key)
         unique.append(item)
-    return unique
+    return include_all_results(unique, all_results, _visible_recording_key)
 
 
 def build_jio_up_next(

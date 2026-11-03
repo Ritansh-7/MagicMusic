@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from difflib import SequenceMatcher
+from typing import Callable
 
 
 def title_query_match_score(title: str, query: str) -> float:
@@ -52,3 +53,20 @@ def prioritize_title_matches(
     matched_ids = {id(item) for _, _, item in matching}
     remaining = [item for item in items if id(item) not in matched_ids]
     return [item for _, _, item in matching] + remaining
+
+
+def include_all_results(
+    ranked_results: list[dict],
+    all_results: list[dict],
+    identity: Callable[[dict], str],
+) -> list[dict]:
+    """Keep ranking order while appending every distinct search result."""
+    combined = list(ranked_results)
+    seen = {key for item in combined if (key := identity(item))}
+    for item in all_results:
+        key = identity(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        combined.append(item)
+    return combined

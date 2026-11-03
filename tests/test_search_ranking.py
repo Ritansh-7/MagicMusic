@@ -3,7 +3,11 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from search_ranking import prioritize_title_matches, title_query_match_score
+from search_ranking import (
+    include_all_results,
+    prioritize_title_matches,
+    title_query_match_score,
+)
 
 
 def test_title_match_accepts_small_vowel_transliteration_difference():
@@ -42,3 +46,12 @@ def test_song_title_is_prioritized_over_related_title_token_matches():
 
     assert ordered[0] is results[3]
     assert ordered[1:] == results[:3]
+
+
+def test_include_all_results_preserves_ranked_order_and_appends_unranked_items():
+    ranked = [{"title": "Exact match"}, {"title": "Related result"}]
+    all_results = [ranked[0], ranked[1], {"title": "Other result"}]
+
+    ordered = include_all_results(ranked, all_results, lambda item: item["title"])
+
+    assert ordered == [*ranked, all_results[2]]
