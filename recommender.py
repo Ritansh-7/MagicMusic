@@ -1786,7 +1786,7 @@ class HybridRecommendationEngine:
                 item for item in results
                 if not _is_excluded_recommendation_title(item.get("title", ""))
             ]
-                if seed_year:
+            if seed_year:
                     compatible: list[dict] = []
                     for item in results:
                         is_valid, _ = double_verify_candidate(seed, item, seed_year)
