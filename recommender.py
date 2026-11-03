@@ -1786,16 +1786,31 @@ class HybridRecommendationEngine:
                 item for item in results
                 if not _is_excluded_recommendation_title(item.get("title", ""))
             ]
-            if seed_year:
-                compatible: list[dict] = []
-                for item in results:
-                    is_valid, _ = double_verify_candidate(seed, item, seed_year)
-                    if is_valid:
-                        compatible.append(item)
-                if len(compatible) >= 10:
-                    results = compatible
-                else:
-                    results = results
+                if seed_year:
+                    compatible: list[dict] = []
+                    for item in results:
+                        is_valid, _ = double_verify_candidate(seed, item, seed_year)
+                        if is_valid:
+                            compatible.append(item)
+                    # Intent compatibility: when seed intent is confident, prefer
+                    # candidates with the same primary intent.
+                    try:
+                        import music_understanding as _mu
+                        seed_intent = _mu.profile(seed).get("primary_intent")
+                        seed_conf = _mu.profile(seed).get("confidence", 0.0)
+                        if seed_conf >= 0.5:
+                            intent_filtered = [
+                                it for it in compatible
+                                if _mu.profile(it).get("primary_intent") == seed_intent
+                            ]
+                            if len(intent_filtered) >= 5:
+                                compatible = intent_filtered
+                    except Exception:
+                        pass
+                    if len(compatible) >= 10:
+                        results = compatible
+                    else:
+                        results = results
         if not results:
             return []
         preferred = catalog[catalog["track_id"].astype(str).isin({str(x) for x in preferred_track_ids})]
