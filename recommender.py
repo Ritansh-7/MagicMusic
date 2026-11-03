@@ -1222,6 +1222,11 @@ class SpotifyRecommendationEngine:
         self.popularity_weight = popularity_weight
         self._prepare_data()
         self._build_features()
+        try:
+            import metadata_embeddings as _me
+            self.metadata_embeddings = _me.load_or_compute(self.data)
+        except Exception:
+            self.metadata_embeddings = None
 
     def _prepare_data(self):
         required = {"track_id", "track_name", "artists", "track_genre", "popularity"}
