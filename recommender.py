@@ -5,7 +5,7 @@ import re
 import numpy as np
 import pandas as pd
 
-HYBRID_MODEL_VERSION = "hybrid-v34-era-mood-singer-diversity"
+HYBRID_MODEL_VERSION = "hybrid-v36-universal-genre-language-guard"
 
 EXCLUDED_RECOMMENDATION_TITLES = {"jo bhi kasmein"}
 MAX_RECOMMENDATION_YEAR_DISTANCE = 15
@@ -13,14 +13,32 @@ MAX_ARTIST_REPEATS_IN_QUEUE = 1
 
 
 def recommendation_source_work(item: dict) -> str:
-    """Return a film/work named in a provider title annotation, if present."""
+    """Return a film/work/series named in provider title annotation or album label."""
+    if not isinstance(item, dict):
+        return ""
     title = str(item.get("title", ""))
     match = re.search(
         r"\bfrom\s+['\"“]?(.+?)['\"”]?(?:\)|\]|\s*[-–—]\s*|$)",
         title,
         flags=re.IGNORECASE,
     )
-    return re.sub(r"[^a-z0-9]+", " ", match.group(1).casefold()).strip() if match else ""
+    if match:
+        return re.sub(r"[^a-z0-9]+", " ", match.group(1).casefold()).strip()
+
+    # Check album label for series / soundtrack annotations like:
+    # "Aspirants: Season 1 (Music from the TVF Original Series)"
+    # "Lootera (Original Motion Picture Soundtrack)"
+    album = str(item.get("album", "")).strip()
+    album_match = re.search(
+        r"^([^:(]+?)(?::\s*season\s*\d+)?\s*\([^)]*(?:soundtrack|original\s+series|original\s+motion|motion\s+picture|tvf\s+original|netflix\s+series|music\s+from)[^)]*\)",
+        album,
+        flags=re.IGNORECASE,
+    )
+    if album_match:
+        work = re.sub(r"[^a-z0-9]+", " ", album_match.group(1).casefold()).strip()
+        if work and not is_compilation_album(work):
+            return work
+    return ""
 
 
 def _artist_credit_keys(value: object) -> set[str]:
@@ -40,15 +58,70 @@ def _artist_credit_keys(value: object) -> set[str]:
 
 
 def is_compilation_album(value: object) -> bool:
-    """Identify album labels that describe a playlist/compilation, not a work."""
+    """Identify album labels that describe a playlist/compilation, not an original work."""
     album = str(value or "").casefold()
     if re.search(r"\b(extended\s+mix|club\s+mix|original\s+mix|dub\s+mix)\b", album):
         return False
     return bool(re.search(
         r"\b(best\s+of|greatest\s+hits|hits|mix|collection|essentials|"
-        r"world\s+music\s+day|top\s+(?:songs|hits)|playlist|radio)\b",
+        r"world\s+music\s+day|top\s+(?:songs|hits)|playlist|radio|"
+        r"valentines?(?:\s+special)?|feel\s+good|house\s+party|party\s+hits|"
+        r"lofi(?:\s+collection|\s+remake|\s+hits)?|ghazal\s+collection|"
+        r"romantic\s+collection|mashup|remix(?:es)?|anniversary|celebration|"
+        r"anthology|volume\s*\d+|vol\s*\d+|top\s+\d+|special)\b",
         album,
     ))
+
+
+ENGLISH_ARTISTS: set[str] = {
+    "sabrina carpenter", "taylor swift", "ed sheeran", "billie eilish", "dua lipa",
+    "the weeknd", "drake", "post malone", "justin bieber", "adele", "coldplay",
+    "ariana grande", "bruno mars", "eminem", "olivia rodrigo", "harry styles",
+    "beyonce", "rihanna", "katy perry", "shakira", "lady gaga", "selena gomez",
+    "shawn mendes", "camila cabello", "maroon 5", "imagine dragons", "charlie puth",
+    "snoop dogg", "kendrick lamar", "kanye west", "travis scott", "cardi b",
+    "nicki minaj", "sam smith", "sia", "alan walker", "chainsmokers", "marshmello",
+    "martin garrix", "david guetta", "calvin harris", "avicii", "kygo", "zedd",
+    "one direction", "5 seconds of summer", "benson boone", "chappell roan",
+    "hozier", "stephen sanchez", "conan gray", "laufey", "tate mcrae", "xeemo",
+}
+
+HINDI_INDIC_TOKENS: set[str] = {
+    "zindagi", "pyaar", "pyar", "ishq", "mohabbat", "dil", "jaan", "mauka", "de",
+    "tera", "teri", "mere", "meri", "hum", "tum", "saath", "kuch", "hai", "raha",
+    "rahi", "hona", "phod", "chhod", "yaara", "saiyaara", "dhaaga", "beparwah",
+    "aashiqui", "tujhe", "humdum", "soniyo", "sajna", "dost", "fitoor", "khuda",
+    "mareez", "ud", "chala", "ajab", "dekha", "naina", "tere", "aankhon",
+    "aspirants", "lootera", "rockstar", "raaz", "chameli", "paathshaala",
+    "shubh mangal", "genius", "yuvvraaj", "fashion", "om shanti om", "nilotpal bora",
+}
+
+
+def infer_track_language(item: dict | None) -> str:
+    """Infer the track's language ('hindi', 'english', etc.) from metadata, artists, or script."""
+    if not isinstance(item, dict):
+        return ""
+    explicit = str(item.get("language", "")).strip().lower()
+    if explicit and explicit not in {"unknown", "n/a", "na", "-", "other"}:
+        return explicit
+
+    artists_str = str(item.get("artists", "")).casefold()
+    for eng in ENGLISH_ARTISTS:
+        if eng in artists_str:
+            return "english"
+
+    title_str = str(item.get("title", "")).casefold()
+    album_str = str(item.get("album", "")).casefold()
+    all_text = f"{title_str} {album_str} {artists_str}"
+    tokens = set(re.findall(r"[a-z0-9]+", all_text))
+
+    if tokens.intersection(HINDI_INDIC_TOKENS):
+        return "hindi"
+
+    if re.search(r"[\u0900-\u097f]", str(item.get("title", "")) + str(item.get("album", ""))):
+        return "hindi"
+
+    return ""
 
 
 def _release_year(value: object) -> int:
@@ -57,6 +130,227 @@ def _release_year(value: object) -> int:
     except (TypeError, ValueError):
         return 0
     return year if 1900 <= year <= 2100 else 0
+
+
+KNOWN_WORK_YEARS: dict[str, int] = {
+    # 1970s
+    "aandhi": 1975, "sholay": 1975, "kabhi kabhie": 1976, "bobby": 1973, "amar prem": 1972,
+    "anand": 1971, "muqaddar ka sikandar": 1978, "don": 1978, "yaadon ki baaraat": 1973,
+    "hum kisise kum naheen": 1977, "chhoti si baat": 1976, "gol maal": 1979, "pati patni aur woh": 1978,
+    "mili": 1975, "satte pe satta": 1982,
+    # 1980s
+    "silsila": 1981, "chandni": 1989, "qayamat se qayamat tak": 1988, "umrao jaan": 1981, "saagar": 1985,
+    "arth": 1982, "saath saath": 1982, "sadma": 1983, "masoom": 1983, "disco dancer": 1982,
+    "karz": 1980, "mr india": 1987, "tezaab": 1988, "ram lakhan": 1989, "naseeb": 1981,
+    # 1990s
+    "aashiqui": 1990, "saajan": 1991, "jo jeeta wohi sikandar": 1992, "baazigar": 1993, "darr": 1993,
+    "mohra": 1994, "hum aapke hain koun": 1994, "andaz apna apna": 1994, "main khiladi tu anari": 1994,
+    "dilwale dulhania le jayenge": 1995, "ddlj": 1995, "rangeela": 1995, "raja hindustani": 1996,
+    "khamoshi": 1996, "dil to pagal hai": 1997, "border": 1997, "gupt": 1997, "pardes": 1997,
+    "kuch kuch hota hai": 1998, "dil se": 1998, "zakhm": 1998, "satya": 1998, "ghulam": 1998,
+    "hum dil de chuke sanam": 1999, "taal": 1999, "sarfarosh": 1999, "biwi no 1": 1999,
+    # 2000s
+    "kaho naa pyaar hai": 2000, "mohabbatein": 2000, "refugee": 2000, "dhadkan": 2000, "har dil jo pyar karega": 2000,
+    "dil chahta hai": 2001, "lagaan": 2001, "gadar": 2001, "kabhi khushi kabhie gham": 2001, "k3g": 2001,
+    "rehnaa hai terre dil mein": 2001, "rhtdm": 2001, "devdas": 2002, "saathiya": 2002, "raaz": 2002,
+    "kal ho naa ho": 2003, "tere naam": 2003, "koi mil gaya": 2003, "munna bhai mbbs": 2003,
+    "main hoon na": 2004, "veer zaara": 2004, "dhoom": 2004, "swades": 2004, "hum tum": 2004, "lakshya": 2004,
+    "bunty aur babli": 2005, "parineeta": 2005, "aashiq banaya aapne": 2005, "black": 2005,
+    "rang de basanti": 2006, "omkara": 2006, "fanaa": 2006, "krrish": 2006, "dhoom 2": 2006,
+    "jab we met": 2007, "guru": 2007, "chak de india": 2007, "taare zameen par": 2007, "om shanti om": 2007, "life in a metro": 2007,
+    "jodhaa akbar": 2008, "ghajini": 2008, "jaane tu ya jaane na": 2008, "rab ne bana di jodi": 2008, "rock on": 2008, "dostana": 2008,
+    "3 idiots": 2009, "chandni chowk to china": 2009, "wake up sid": 2009, "love aaj kal": 2009, "kaminey": 2009,
+    "ajab prem ki ghazab kahani": 2009, "delhi 6": 2009,
+    # 2010s
+    "dabangg": 2010, "my name is khan": 2010, "once upon a time in mumbaai": 2010, "raajneeti": 2010, "band baaja baaraat": 2010, "anjaana anjaani": 2010,
+    "rockstar": 2011, "zindagi na milegi dobara": 2011, "ra one": 2011, "delhi belly": 2011, "bodyguard": 2011, "singham": 2011,
+    "barfi": 2012, "cocktail": 2012, "kahaani": 2012, "gangs of wasseypur": 2012, "student of the year": 2012, "ishaqzaade": 2012,
+    "aashiqui 2": 2013, "yeh jawaani hai deewani": 2013, "chennai express": 2013, "ram leela": 2013, "bhaag milkha bhaag": 2013, "dhoom 3": 2013, "ranjhanaa": 2013,
+    "pk": 2014, "queen": 2014, "haider": 2014, "2 states": 2014, "ek villain": 2014, "highway": 2014,
+    "bajrangi bhaijaan": 2015, "bajirao mastani": 2015, "tamasha": 2015, "dilwale": 2015, "piku": 2015, "badlapur": 2015, "roy": 2015,
+    "dangal": 2016, "sultan": 2016, "ae dil hai mushkil": 2016, "dear zindagi": 2016, "airlift": 2016, "baar baar dekho": 2016, "kapoor sons": 2016, "shivaay": 2016,
+    "secret superstar": 2017, "bareilly ki barfi": 2017, "raees": 2017, "badrinath ki dulhania": 2017, "toilet ek prem katha": 2017,
+    "sanju": 2018, "padmaavat": 2018, "raazi": 2018, "andhadhun": 2018, "stree": 2018, "dhadak": 2018, "simmba": 2018, "kedarnath": 2018, "sonu ke titu ki sweety": 2018,
+    "gully boy": 2019, "kabir singh": 2019, "war": 2019, "chhichhore": 2019, "uri": 2019, "super 30": 2019, "kesari": 2019, "luka chuppi": 2019,
+    # Web Series & Soundtracks
+    "aspirants": 2021, "aspirants season 1": 2021, "aspirants season 2": 2023,
+    "tvf pitchers": 2015, "pitchers": 2015, "kota factory": 2019, "kota factory season 1": 2019, "kota factory season 2": 2021,
+    "panchayat": 2020, "panchayat season 1": 2020, "panchayat season 2": 2022, "panchayat season 3": 2024,
+    "gullak": 2019, "ye meri family": 2018, "flames": 2018,
+    "mismatched": 2020, "mismatched season 1": 2020, "mismatched season 2": 2022, "mismatched season 3": 2024,
+    "scam 1992": 2020, "farzi": 2023, "mirzapur": 2018, "the family man": 2019,
+    # 2020s
+    "tanhaji": 2020, "ludo": 2020, "malang": 2020, "thoda thoda pyaar": 2021,
+    "shershaah": 2021, "mimi": 2021, "atrangi re": 2021, "83": 2021, "chandigarh kare aashiqui": 2021,
+    "brahmastra": 2022, "gangubai kathiawadi": 2022, "bhool bhulaiyaa 2": 2022, "laal singh chaddha": 2022, "rrr": 2022, "kgf chapter 2": 2022, "mismatched season 2": 2022,
+    "pathaan": 2023, "jawan": 2023, "animal": 2023, "rocky aur rani kii prem kahaani": 2023, "dunki": 2023, "gadar 2": 2023, "tiger 3": 2023, "tu jhoothi main makkaar": 2023, "mahiye jinna sohna": 2023,
+    "stree 2": 2024, "fighter": 2024, "shaitaan": 2024, "bhool bhulaiyaa 3": 2024, "singham again": 2024, "kalki 2898 ad": 2024, "sahiba": 2024, "amar singh chamkila": 2024,
+    "chhaava": 2025, "nafrat": 2025, "king": 2026, "saiyaara": 2026,
+}
+
+VINTAGE_ARTIST_ERAS: dict[str, tuple[int, int]] = {
+    "pankaj udhas": (1980, 2000),
+    "jagjit singh": (1975, 2005),
+    "ghulam ali": (1970, 2000),
+    "mehdi hassan": (1960, 1995),
+    "anup jalota": (1975, 2000),
+    "anuradha paudwal": (1980, 2005),
+    "lata mangeshkar": (1950, 1999),
+    "kishore kumar": (1950, 1987),
+    "mohammed rafi": (1945, 1980),
+    "mukesh": (1945, 1976),
+    "asha bhosle": (1950, 2000),
+    "hemant kumar": (1950, 1985),
+    "manna dey": (1950, 1985),
+    "talat mahmood": (1945, 1975),
+    "geeta dutt": (1945, 1970),
+    "bhupinder singh": (1970, 2000),
+    "chitra singh": (1975, 1995),
+}
+
+
+def resolve_true_release_year(item: dict) -> int:
+    """Resolve the genuine original release year of a track, unmasking compilation dates."""
+    if not isinstance(item, dict):
+        return 0
+
+    # 1. From '...' title annotation (film/soundtrack)
+    source_work = recommendation_source_work(item)
+    if source_work:
+        work_key = re.sub(r"[^a-z0-9]+", " ", source_work.casefold()).strip()
+        if work_key in KNOWN_WORK_YEARS:
+            return KNOWN_WORK_YEARS[work_key]
+        for known, year in KNOWN_WORK_YEARS.items():
+            if known in work_key or work_key in known:
+                return year
+
+    # 2. Check title against known works/singles
+    title_raw = str(item.get("title", "")).casefold()
+    clean_title = re.sub(r"[^a-z0-9]+", " ", title_raw).strip()
+    if clean_title in KNOWN_WORK_YEARS:
+        return KNOWN_WORK_YEARS[clean_title]
+    for known, year in KNOWN_WORK_YEARS.items():
+        if len(known) >= 4 and (f" {known} " in f" {clean_title} " or clean_title.startswith(known)):
+            return year
+
+    # 3. Check album against known works
+    album_raw = str(item.get("album", "")).casefold()
+    clean_album = re.sub(r"[^a-z0-9]+", " ", album_raw).strip()
+    if clean_album in KNOWN_WORK_YEARS and not is_compilation_album(album_raw):
+        return KNOWN_WORK_YEARS[clean_album]
+
+    # 4. Check if artist is a classic / vintage legend (e.g. Pankaj Udhas, Jagjit Singh)
+    artists_str = str(item.get("artists", "")).casefold()
+    for vintage_artist, (era_start, era_end) in VINTAGE_ARTIST_ERAS.items():
+        if vintage_artist in artists_str:
+            item_yr = _release_year(item.get("year"))
+            # If the candidate reports a recent compilation/remake year (e.g. >= 2012)
+            # but the artist is a classic legend, their true musical era is their classic peak!
+            if not item_yr or item_yr > era_end + 7:
+                return (era_start + era_end) // 2
+
+    # 5. Fallback to release year
+    return _release_year(item.get("year"))
+
+
+def double_verify_candidate(
+    seed: dict | None,
+    candidate: dict,
+    seed_year: int = 0,
+    max_era_distance: int = MAX_RECOMMENDATION_YEAR_DISTANCE,
+) -> tuple[bool, str]:
+    """Double-verify candidate against seed for true era, language and taste compatibility.
+
+    Returns (is_valid, reason).
+    Enforces strict gates on:
+    1. Language conflict: e.g. Western English pop intruding into a Hindi indie/romantic queue.
+    2. Devotional / Bhajan / Spiritual tracks when seed is secular/romantic/chill/motivational.
+    3. Aggressive Rap / Club bangers / Mashups when seed is soft acoustic/indie/chill/romantic.
+    4. Classic/vintage ghazals (e.g. Pankaj Udhas) when seed is modern pop.
+    5. True release era: unmasks compilation years and verifies true release year is within era tolerance.
+    """
+    if not seed:
+        return True, "No seed to verify against"
+
+    # 1. Language Conflict Verification
+    seed_lang = infer_track_language(seed) or str((seed or {}).get("language", "")).strip().lower()
+    cand_lang = infer_track_language(candidate) or str(candidate.get("language", "")).strip().lower()
+    cand_work = recommendation_source_work(candidate)
+    seed_work = recommendation_source_work(seed)
+    same_work = bool(cand_work and seed_work and cand_work == seed_work)
+    if seed_lang and cand_lang and seed_lang != cand_lang and not same_work:
+        return False, f"Language conflict: candidate is {cand_lang} but seed is {seed_lang}"
+
+    seed_intents = _infer_candidate_intents(seed)
+    candidate_intents = _infer_candidate_intents(candidate)
+
+    cand_title = str(candidate.get("title", "")).casefold()
+    cand_artists = str(candidate.get("artists", "")).casefold()
+    cand_album = str(candidate.get("album", "")).casefold()
+    cand_text = f"{cand_title} {cand_artists} {cand_album}"
+
+    seed_title = str(seed.get("title", "")).casefold()
+    seed_artists = str(seed.get("artists", "")).casefold()
+    seed_album = str(seed.get("album", "")).casefold()
+    seed_text = f"{seed_title} {seed_artists} {seed_album}"
+
+    # 2. Devotional / Spiritual Double-Verification:
+    # If candidate is devotional/bhajan/spiritual chant, seed MUST be devotional; otherwise block.
+    devotional_tokens = [
+        "bhajan", "chalisa", "aarti", "stuti", "mantra", "bhakti", "kirtan", "keertan",
+        "dhun", "stotram", "sahastranam", "namo namo", "shankara", "shankar", "shivay",
+        "mahadev", "bhole", "bholenath", "anup jalota", "gurbani", "neem karoli", "baba",
+        "ashram", "guru", "kripa", "kirpa", "bhagwan", "prabhu", "satnam", "waheguru",
+        "govind", "gopal", "hare rama", "hare krishna", "shri ram", "sita ram",
+        "radhe", "radha", "krishna", "hanuman", "ganesh", "ganpati", "durga", "devi",
+        "mata", "maharaj", "swami", "bhakt", "sai baba", "ramayan", "bhagwat"
+    ]
+    is_cand_devotional = (
+        "devotional" in candidate_intents
+        or any(w in cand_text for w in devotional_tokens)
+    )
+    is_seed_devotional = (
+        "devotional" in seed_intents
+        or any(w in seed_text for w in devotional_tokens)
+    )
+    if is_cand_devotional and not is_seed_devotional:
+        return False, "Devotional/spiritual track conflicts with secular vibe"
+
+    # 3. Party / Aggressive Rap vs Mellow Indie/Acoustic/Romantic Guard
+    party_tokens = [
+        "kala chashma", "dj chetas", "house party", "party hits", "club mix",
+        "hustle", "mtv hustle", "tony kakkar"
+    ]
+    is_cand_party_or_rap = (
+        "rap_hiphop" in candidate_intents
+        or any(w in cand_text for w in party_tokens)
+        or "mashup" in cand_title
+    )
+    is_seed_mellow_soul = bool(
+        {"romantic", "calm", "acoustic_indie", "motivational"}.intersection(seed_intents)
+        or any(w in seed_text for w in ["pyaar", "ishq", "love", "romantic", "soothing", "lofi", "zindagi", "mauka", "aspirants"])
+    )
+    if is_cand_party_or_rap and is_seed_mellow_soul and not {"energetic", "rap_hiphop"}.intersection(seed_intents):
+        return False, "Party/aggressive rap track conflicts with mellow acoustic/inspirational vibe"
+
+    # 4. Vintage Legend Artists (Pankaj Udhas, Jagjit Singh) Double-Verification
+    resolved_cand_year = resolve_true_release_year(candidate)
+    resolved_seed_year = resolve_true_release_year(seed) or seed_year
+
+    for vintage_artist, (era_start, era_end) in VINTAGE_ARTIST_ERAS.items():
+        if vintage_artist in cand_artists:
+            if resolved_seed_year >= 2015:
+                return False, f"Vintage artist ({vintage_artist}) classic era does not match modern 2020s seed"
+            if resolved_seed_year and (resolved_seed_year < era_start - 12 or resolved_seed_year > era_end + 12):
+                return False, f"Vintage artist ({vintage_artist}) era does not match seed era ({resolved_seed_year})"
+
+    # 5. True Release Era Double-Verification
+    if resolved_seed_year and resolved_cand_year:
+        era_diff = abs(resolved_seed_year - resolved_cand_year)
+        if era_diff > max_era_distance and not same_work:
+            return False, f"True era mismatch: {resolved_cand_year} vs {resolved_seed_year} (diff: {era_diff} yrs)"
+
+    return True, "Verified matching taste, era and language"
 
 
 def _era_artist_discovery_queries(seed_year: object, artists: list[str]) -> list[str]:
@@ -732,14 +1026,14 @@ def recommendation_history_keys(item: dict) -> set[str]:
 
 
 INTENT_KEYWORDS = {
-    "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "pyar", "dil", "jaan", "milan", "sanam", "aashiqui", "prem", "saiyaara"},
-    "playful": {"playful", "comic", "comedy", "humorous", "funny", "lighthearted", "light hearted", "mischief", "masti", "nautanki", "chatur", "nok jhok", "banter", "witty", "theatrical", "expressive", "call and response", "call response", "jugalbandi"},
-    "ghazal": {"ghazal", "ghazals", "mehfil", "rekhta", "shayari", "ghulam ali", "chupke chupke classics"},
-    "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "bajrang", "shiva", "shivay", "mahadev", "krishna", "radhe", "ghanshyam", "aarti", "qawwali devotional"},
-    "motivational": {"motivation", "motivational", "fight", "fighting", "battle", "victory", "fighter", "warrior", "rise", "zinda", "jeet", "inspire", "goal", "champion", "unstoppable"},
-    "energetic": {"fight", "fighting", "anthem", "rock", "dance", "party", "bhangra", "dhamaka", "dhamaal", "energetic", "power", "action", "high energy"},
-    "acoustic_indie": {"acoustic", "unplugged", "indie", "folk", "coke studio", "singer songwriter"},
-    "rap_hiphop": {"rap", "hip hop", "hiphop", "freestyle", "gully", "mixtape"},
+    "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "pyar", "dil", "jaan", "milan", "sanam", "aashiqui", "prem", "saiyaara", "valentines", "valentine"},
+    "playful": {"playful", "comic", "comedy", "humorous", "funny", "lighthearted", "light hearted", "mischief", "masti", "nautanki", "chatur", "nok jhok", "banter", "witty", "theatrical", "expressive", "call and response", "call response", "jugalbandi", "aal izz well", "all izz well"},
+    "ghazal": {"ghazal", "ghazals", "mehfil", "rekhta", "shayari", "ghulam ali", "chupke chupke classics", "pankaj udhas", "jagjit singh", "lofi ghazal", "ghazal lofi", "chitra singh", "talat aziz", "mehdi hassan"},
+    "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "bajrang", "shiva", "shivay", "mahadev", "krishna", "radhe", "ghanshyam", "aarti", "qawwali devotional", "namo namo", "shankara", "shankar", "kedarnath", "bhole", "bholenath", "bhakti", "stuti", "mantra", "anup jalota"},
+    "motivational": {"motivation", "motivational", "fight", "fighting", "battle", "victory", "fighter", "warrior", "rise", "zinda", "jeet", "inspire", "goal", "champion", "unstoppable", "zindagi", "mauka", "aspirants", "safarnama", "safarnaama", "dhaaga", "beparwah", "aashayein", "roobaroo", "lakshya", "kar har maidaan fateh", "hausla", "manzil", "jeetna", "udaan", "parwaaz"},
+    "energetic": {"fight", "fighting", "anthem", "rock", "dance", "party", "bhangra", "dhamaka", "dhamaal", "energetic", "power", "action", "high energy", "kala chashma", "mashup", "dj chetas", "club", "house party", "party hits", "club mix", "tony kakkar"},
+    "acoustic_indie": {"acoustic", "unplugged", "indie", "folk", "coke studio", "singer songwriter", "nilotpal bora", "prateek kuhad", "anuv jain", "jasleen royal", "lucky ali", "ballad", "guitar"},
+    "rap_hiphop": {"rap", "hip hop", "hiphop", "freestyle", "gully", "mixtape", "hustle", "mtv hustle", "aditya pushkarna"},
     "calm": {"lofi", "sleep", "calm", "peace", "soothing", "sukoon", "instrumental"},
 }
 
@@ -798,28 +1092,26 @@ def infer_same_soundtrack_audio_intents(seed: dict, candidates: list[dict]) -> s
 
 
 def _infer_candidate_intents(item: dict) -> set[str]:
-    """Infer musical intent from the track's own metadata, never its artist."""
+    """Infer musical intent from the track's title, album, artists and audio."""
+    labels: set[str] = set()
     supplied_labels = item.get("intent_labels") or item.get("query_intents")
     if isinstance(supplied_labels, (list, tuple, set)):
-        labels = {
+        labels.update(
             str(label).strip().casefold()
             for label in supplied_labels
             if str(label).strip().casefold() not in {"", "general", "neutral"}
-        }
-        if labels:
-            return labels | infer_audio_intents(item)
+        )
     text = " ".join(
         str(item.get(field, ""))
         for field in (
-            "title", "album", "track_genre", "genre", "language", "mood",
+            "title", "album", "artists", "track_genre", "genre", "language", "mood",
             "description", "tags", "intent_labels", "candidate_source",
         )
     ).casefold()
     tokens = set(re.findall(r"[a-z0-9]+", text))
-    labels = {
-        label for label, terms in INTENT_KEYWORDS.items()
-        if any(term in text if " " in term else term in tokens for term in terms)
-    }
+    for label, terms in INTENT_KEYWORDS.items():
+        if any(term in text if " " in term else term in tokens for term in terms):
+            labels.add(label)
     return labels | infer_audio_intents(item)
 
 
@@ -1486,10 +1778,8 @@ class HybridRecommendationEngine:
             if seed_year:
                 compatible: list[dict] = []
                 for item in results:
-                    item_year = _release_year(item.get("year"))
-                    if not item_year:
-                        compatible.append(item)
-                    elif abs(item_year - seed_year) <= MAX_RECOMMENDATION_YEAR_DISTANCE:
+                    is_valid, _ = double_verify_candidate(seed, item, seed_year)
+                    if is_valid:
                         compatible.append(item)
                 results = compatible
         if not results:
@@ -1889,11 +2179,17 @@ class HybridRecommendationEngine:
         remaining = ranked.copy()
         while remaining:
             eligible: list[tuple[int, float, float, float]] = []
+            selected_title_keys = {
+                recommendation_title_key(str(s.get("title", "")))
+                for s in selected
+            }
             for index, (base_score, item) in enumerate(remaining):
                 item_id = str(item.get("song_id") or item.get("title", ""))
                 artist_keys = _artist_credit_keys(item.get("artists", ""))
                 album_key = _recommendation_work_key(item) or str(item.get("album", "")).lower()
                 title_key = re.sub(r"[^a-z0-9]+", " ", str(item.get("title", "")).lower()).strip()
+                if recommendation_title_key(str(item.get("title", ""))) in selected_title_keys:
+                    continue
                 # Do not surface recently played songs or weak fallback items.
                 # A user-history recommendation is allowed only when it also
                 # has meaningful session/context evidence.
@@ -1995,6 +2291,9 @@ class HybridRecommendationEngine:
                     and not seed_specialized.intersection(candidate_specialized)
                     and not same_soundtrack
                 ):
+                    continue
+                is_valid, _ = double_verify_candidate(seed, item, seed_year)
+                if not is_valid:
                     continue
                 # A confident seed intent is a hard semantic contract. A
                 # candidate with no evidence for that intent is not allowed

@@ -31,6 +31,7 @@ from recommender import (
     recommendation_source_work as _recommendation_source_work,
     recommendation_history_keys as _recommendation_history_keys,
     recommendation_title_key as _recommendation_title_key,
+    infer_track_language as _infer_track_language,
 )
 from search_ranking import prioritize_title_matches, title_query_match_score
 from spotify_api import SpotifyOAuth, new_oauth_state, verify_oauth_state
@@ -1229,11 +1230,21 @@ def build_jio_up_next(
                 if artist.casefold() != artist_display[consensus_key].casefold()
             ]
             seed["artists"] = ", ".join(existing_artists)
-    artist_names = existing_artists
+    generic_credit_stopwords = {
+        "juno", "music", "records", "record", "studio", "studios", "company",
+        "production", "productions", "audio", "series", "cast", "sound", "soundtrack",
+        "theme", "original", "various", "artists", "artist", "entertainment"
+    }
+    filtered_artists = [
+        name for name in existing_artists
+        if name.casefold() not in generic_credit_stopwords
+    ]
+    artist_names = filtered_artists or existing_artists
+    seed_language = _infer_track_language(seed) or str(seed.get("language", "")).strip().lower()
+    if seed_language:
+        seed["language"] = seed_language
+
     related_queries = []
-    # Keep recommendation discovery to a few high-signal queries. Search
-    # already fetched the artist/film catalogue; extra expansions only spend
-    # tokens without changing the ranker.
     clean_title = _recommendation_title_key(title)
     if title:
         related_queries.append(title)
@@ -1244,24 +1255,26 @@ def build_jio_up_next(
     source_work = _recommendation_source_work(seed)
     if source_work:
         related_queries.append(f"{source_work} soundtrack songs")
+        related_queries.append(f"{source_work} songs")
     if album and not is_compilation_album(album):
         related_queries.append(f"{album} songs")
-    related_queries.extend(f"{artist} songs" for artist in artist_names[:2])
-    # Some live providers return only the seed for a niche artist/title query.
-    # Add a bounded language/style bridge so a radio can still start without
-    # falling back to unrelated songs or an empty queue.
-    seed_language = str(seed.get("language", "")).strip().lower()
+    for artist in artist_names[:2]:
+        if seed_language:
+            related_queries.append(f"{artist} {seed_language} songs")
+        else:
+            related_queries.append(f"{artist} songs")
+
     if seed_language:
         related_queries.extend([
-            f"{seed_language} pop songs",
+            f"{seed_language} acoustic pop songs",
+            f"{seed_language} indie songs",
             f"{seed_language} chill songs",
             f"feel good {seed_language} songs",
-            f"{seed_language} rock songs",
             f"{seed_language} ballads",
             f"{seed_language} classics",
         ])
     else:
-        related_queries.extend(["pop songs", "rock songs", "chill songs", "classic songs"])
+        related_queries.extend(["acoustic pop songs", "indie songs", "chill songs", "classic songs"])
     # A sparse provider result must still produce a radio. This is especially
     # common for older international tracks whose artist catalogue is tiny.
     if len(search_results) < 5:
