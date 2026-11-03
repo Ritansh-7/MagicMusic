@@ -1796,15 +1796,26 @@ class HybridRecommendationEngine:
                     # candidates with the same primary intent.
                     try:
                         import music_understanding as _mu
-                        seed_intent = _mu.profile(seed).get("primary_intent")
-                        seed_conf = _mu.profile(seed).get("confidence", 0.0)
+                        seed_p = _mu.profile(seed)
+                        seed_intent = seed_p.get("primary_intent")
+                        seed_conf = seed_p.get("intent_confidence", 0.0)
                         if seed_conf >= 0.5:
-                            intent_filtered = [
-                                it for it in compatible
-                                if _mu.profile(it).get("primary_intent") == seed_intent
-                            ]
-                            if len(intent_filtered) >= 5:
-                                compatible = intent_filtered
+                            def _compat(it):
+                                p = _mu.profile(it)
+                                score = 0.0
+                                if p.get("primary_intent") == seed_intent:
+                                    score += 0.4
+                                if p.get("mood") == seed_p.get("mood"):
+                                    score += 0.2
+                                if p.get("genre") == seed_p.get("genre"):
+                                    score += 0.2
+                                if p.get("theme") == seed_p.get("theme"):
+                                    score += 0.2
+                                return score
+                            scored = sorted(compatible, key=_compat, reverse=True)
+                            # keep top 80% by compatibility, min 5
+                            cutoff = max(5, int(len(scored) * 0.8))
+                            compatible = scored[:cutoff] if len(scored) >= 5 else scored
                     except Exception:
                         pass
                     if len(compatible) >= 10:
