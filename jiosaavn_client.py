@@ -219,11 +219,11 @@ class JioSaavnClient:
         query_tokens = set(normalized_query.split())
         devotional_query = any(
             token in normalized_query
-            for token in ("bajrang", "bajran", "bajrangbali", "hanuman", "anjaney")
+            for token in ("bajrang", "bajran", "bajrangbali", "hanuman", "anjaney", "bhola", "bhandari", "shiva", "shiv", "shankar", "bhajan", "chalisa", "mata", "devi", "rani", "aarti", "prabhu", "mahadev", "bholenath")
         )
         collected: list[dict[str, Any]] = []
         seen: set[str] = set()
-        page_size = max(limit, 40)
+        page_size = max(limit, 80)
 
         def add_items(raw_items: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> None:
             for item in raw_items or []:
@@ -235,6 +235,13 @@ class JioSaavnClient:
 
         def finalize() -> list[dict[str, Any]]:
             finalized = self._recover_album_artists(collected)
+            finalized.sort(
+                key=lambda item: (
+                    1 if re.sub(r"[^a-z0-9]+", " ", str(item.get("title", "")).casefold()).strip() == normalized_query else 0,
+                    int(item.get("quality_score") or 0),
+                ),
+                reverse=True,
+            )
             if entity_search:
                 matching = []
                 for item in finalized:
@@ -281,7 +288,7 @@ class JioSaavnClient:
         entity_search = (artist_hits >= 1 or album_hits >= 1 or cast_hits >= 1) and not exact_title
 
         if devotional_query:
-            extra_queries = (f"{query} bhajan", "Hanuman bhajan")
+            extra_queries = (f"{query} bhajan", "Shiv bhajan", "Shankar bhajan", "Hindu bhajan")
         elif entity_search:
             extra_queries = (f"{query} songs", f"{query} hits", f"{query} top songs")
         elif len(collected) < min(8, limit):

@@ -1109,7 +1109,7 @@ def _infer_candidate_intents(item: dict) -> set[str]:
     text = " ".join(
         str(item.get(field, ""))
         for field in (
-            "title", "album", "artists", "track_genre", "genre", "language", "mood",
+            "title", "album", "track_genre", "genre", "language", "mood",
             "description", "tags", "intent_labels", "candidate_source",
         )
     ).casefold()
@@ -1227,6 +1227,11 @@ class SpotifyRecommendationEngine:
             self.metadata_embeddings = _me.load_or_compute(self.data)
         except Exception:
             self.metadata_embeddings = None
+        try:
+            import collaborative_filtering as _cf
+            self.cf_model = _cf.train()
+        except Exception:
+            self.cf_model = None
 
     def _prepare_data(self):
         required = {"track_id", "track_name", "artists", "track_genre", "popularity"}
@@ -1811,17 +1816,34 @@ class HybridRecommendationEngine:
                                     score += 0.2
                                 if p.get("theme") == seed_p.get("theme"):
                                     score += 0.2
+                                # Hard conflict: different religions.
+                                seed_religion = seed_p.get("religion")
+                                item_religion = p.get("religion")
+                                if (
+                                    seed_religion
+                                    and item_religion
+                                    and seed_religion != "generic"
+                                    and item_religion != "generic"
+                                    and seed_religion != item_religion
+                                ):
+                                    return -1.0
                                 return score
                             scored = sorted(compatible, key=_compat, reverse=True)
                             # keep top 80% by compatibility, min 5
+                            cutoff = max(5, int(len(scored) * 0.8))
+                            # Hard-exclude clearly conflicting intents for confident seeds.
+                            if seed_conf >= 0.5:
+                                aligned = [item for item in scored if _compat(item) >= 0.4]
+                                if aligned:
+                                    scored = aligned
                             cutoff = max(5, int(len(scored) * 0.8))
                             compatible = scored[:cutoff] if len(scored) >= 5 else scored
                     except Exception:
                         pass
                     if len(compatible) >= 10:
                         results = compatible
-                    else:
-                        results = results
+                    elif compatible:
+                        results = compatible
         if not results:
             return []
         preferred = catalog[catalog["track_id"].astype(str).isin({str(x) for x in preferred_track_ids})]

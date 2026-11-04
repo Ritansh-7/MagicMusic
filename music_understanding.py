@@ -28,8 +28,16 @@ GENRE_KEYWORDS = {
     "folk": {"folk", "lok", "bhojpuri"},
 }
 
+RELIGION_KEYWORDS = {
+    "hindu": {"hanuman", "ram", "krishna", "shiva", "mata", "devi", "rani", "bhajan", "aarti", "guru", "sai", "om", "chalisa", "bajrang", "sankatmochan"},
+    "christian": {"yeshu", "jesus", "christ", "hallelujah", "amen", "church", "prabhu", "cross"},
+    "muslim": {"allah", "sufi", "qawwali", "nabi", "rasool", "khuda", "maula", "peer", "dargah", "naat"},
+    "sikh": {"guru", "gurbani", "waheguru", "khalsa", "panj", "sahib"},
+    "generic": set(),
+}
 THEME_KEYWORDS = {
-    "god_goddess": {"mata", "rani", "devi", "deva", "shiva", "ram", "krishna", "hanuman", "allah", "prabhu", "guru", "sai"},
+    "hindu_devotional": {"mata", "rani", "devi", "deva", "shiva", "ram", "krishna", "hanuman", "guru", "sai", "bulawa", "bulava", "aarti", "prabhu", "bhajan"},
+    "christian_devotional": {"yeshu", "jesus", "christ", "raja", "rani", "cross", "hallelujah", "amen"},
     "love": {"love", "ishq", "pyaar", "pyar", "dil", "jaan", "saajan", "sanam", "mohabbat", "tujhe"},
     "separation": {"judai", "viraha", "tanha", "bewafa", "khamoshi"},
     "nation": {"desh", "bharat", "india", "watan", "tiranga", "soldier"},
@@ -50,15 +58,34 @@ def _classify_dim(text, kw_map, default):
     return best, conf, scores
 
 def classify(text):
-    intent, iconf, iscores = _classify_dim(text, INTENT_KEYWORDS, "romantic")
-    mood, mconf, mscores = _classify_dim(text, MOOD_KEYWORDS, "tender")
-    genre, gconf, gscores = _classify_dim(text, GENRE_KEYWORDS, "filmi")
-    theme, tconf, tscores = _classify_dim(text, THEME_KEYWORDS, "love")
-    return intent, iconf, iscores, mood, mconf, mscores, genre, gconf, gscores, theme, tconf, tscores
+    intent, iconf, iscores = _classify_dim(text, INTENT_KEYWORDS, "unknown")
+    mood, mconf, mscores = _classify_dim(text, MOOD_KEYWORDS, "unknown")
+    genre, gconf, gscores = _classify_dim(text, GENRE_KEYWORDS, "unknown")
+    theme, tconf, tscores = _classify_dim(text, THEME_KEYWORDS, "unknown")
+    religion, rconf, rscores = _classify_dim(text, RELIGION_KEYWORDS, "unknown")
+    return intent, iconf, iscores, mood, mconf, mscores, genre, gconf, gscores, theme, tconf, tscores, religion, rconf, rscores
 
 def profile(item):
     text = " ".join(str(item.get(f, "")) for f in ("title", "artists", "album", "track_genre", "language"))
-    intent, iconf, iscores, mood, mconf, mscores, genre, gconf, gscores, theme, tconf, tscores = classify(text)
+    try:
+        import llm_classifier as _lc
+        llm = _lc.classify_text(text)
+        if llm:
+            return {
+                "primary_intent": llm.get("intent", "romantic"),
+                "intent_confidence": 0.75,
+                "mood": llm.get("mood", "unknown"),
+                "mood_confidence": 0.75,
+                "genre": llm.get("genre", "unknown"),
+                "genre_confidence": 0.75,
+                "theme": llm.get("theme", "unknown"),
+                "theme_confidence": 0.75,
+                "religion": llm.get("religion", "unknown"),
+                "religion_confidence": 0.75,
+            }
+    except Exception:
+        pass
+    intent, iconf, iscores, mood, mconf, mscores, genre, gconf, gscores, theme, tconf, tscores, religion, rconf, rscores = classify(text)
     return {
         "primary_intent": intent,
         "intent_confidence": iconf,
@@ -68,4 +95,6 @@ def profile(item):
         "genre_confidence": gconf,
         "theme": theme,
         "theme_confidence": tconf,
+        "religion": religion,
+        "religion_confidence": rconf,
     }
