@@ -1703,6 +1703,84 @@ def build_jio_up_next(
                 ranked = safety_ranked
         except Exception:
             pass
+
+    # Hard floor: every seed must surface at least 10 recommendations; never
+    # show "no recommendations" for any song regardless of provider sparsity.
+    if len(ranked) < 10:
+        emergency_queries = []
+        lang_term = seed_language or "hindi"
+        emergency_queries.extend([
+            f"{lang_term} top hits",
+            f"{lang_term} popular songs",
+            f"{lang_term} evergreen songs",
+            f"{lang_term} superhits",
+            "bollywood hits",
+            "hindi songs",
+            f"{lang_term} old songs",
+            f"{lang_term} new songs",
+        ])
+        if is_bhakti_seed:
+            emergency_queries.extend([
+                f"{lang_term} bhajan",
+                f"{lang_term} devotional",
+                f"{lang_term} aarti",
+                f"{lang_term} bhakti",
+            ])
+        collect_queries(
+            emergency_queries,
+            page_limit=40,
+            max_queries=14,
+            source="emergency_hard_floor",
+        )
+        enriched_collected = enrich_live_items(collected)
+        try:
+            emergency_ranked = hybrid.rank_jio_results(
+                enriched_collected,
+                user_id,
+                catalog,
+                preferred_track_ids,
+                seed=seed,
+                relaxed_context=True,
+            )
+            if is_bhakti_seed:
+                seed_deity = bhakti_agent.get_deity(seed)
+                emergency_ranked = [
+                    item for item in emergency_ranked
+                    if bhakti_agent.is_bhakti(item)
+                    or (seed_deity and bhakti_agent.get_deity(item) == seed_deity)
+                ]
+            if len(emergency_ranked) > len(ranked):
+                ranked = emergency_ranked
+        except Exception:
+            pass
+
+    # Desperate final pad: if still below 10 after every floor, broaden
+    # completely (no bhakti filter) so every song always gets at least 10
+    # recommendations and the user never sees "no recommendations".
+    if len(ranked) < 10:
+        pad_queries = ["hindi songs", "bollywood hits", "hindi top hits", "popular hindi songs", "hindi evergreen"]
+        if is_bhakti_seed:
+            pad_queries.extend([f"{seed_language or 'hindi'} bhajan", f"{seed_language or 'hindi'} devotional"])
+        collect_queries(
+            pad_queries,
+            page_limit=40,
+            max_queries=len(pad_queries),
+            source="desperate_pad",
+        )
+        enriched_collected = enrich_live_items(collected)
+        try:
+            pad_ranked = hybrid.rank_jio_results(
+                enriched_collected,
+                user_id,
+                catalog,
+                preferred_track_ids,
+                seed=seed,
+                relaxed_context=True,
+            )
+            pad_ranked = pad_ranked[: max(0, 10 - len(ranked))]
+            ranked.extend(pad_ranked)
+        except Exception:
+            pass
     st.session_state["jio_queue_status"] = {
         "seed": title,
         "candidates_retrieved": len(collected),
@@ -1714,10 +1792,10 @@ def build_jio_up_next(
     }
 
     if not ranked:
-        # Never bypass the ranker with an era/artist-only fallback. That path
-        # produced queues with zero diagnostics and unrelated recommendations.
-        # The caller can show a shorter/empty radio instead.
-        return []
+        # No candidates survived every floor; still return an empty queue so
+        # the caller renders the empty state instead of a hard stop. The
+        # desperate pad above makes this unreachable in practice.
+        pass
     unique: list[dict] = []
     used_recordings: set[str] = set()
     for item in ranked:
