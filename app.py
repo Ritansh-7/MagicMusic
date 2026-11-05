@@ -1548,7 +1548,7 @@ def build_jio_up_next(
         ranked = []
     # A strict pass is preferred, but sparse live metadata should not leave
     # the player with an empty queue when a language/era/style bridge exists.
-    if len(ranked) < 15 and enriched_collected:
+    if len(ranked) < 25 and enriched_collected:
         try:
             if is_bhakti_seed:
                 # Relaxed bhakti pass: lower min_score to surface more devotional candidates
@@ -1573,9 +1573,9 @@ def build_jio_up_next(
             pass
 
     # Guarantee queue contains 10-35 songs matching seed's mood + era with diverse singers:
-    # If the initial queries yield < 15 relevant songs, fire an intensive expansion wave
+    # If the initial queries yield < 25 relevant songs, fire an intensive expansion wave
     # targeting other singers from that exact era doing the same mood + iconic era films.
-    if len(ranked) < 15:
+    if len(ranked) < 25:
         era_term = f"{(seed_year // 10) * 10}s" if seed_year else ""
         lang_term = seed_language or "hindi"
         seed_mood_labels = [l for l in seed.get("intent_labels", []) if l not in {"general", "neutral"}]
@@ -1629,6 +1629,17 @@ def build_jio_up_next(
                 f"top {lang_term} {mood_str} songs",
                 f"{lang_term} superhits",
             ])
+        if is_bhakti_seed:
+            expansion_queries.extend([
+                f"{lang_term} bhajan songs",
+                f"{lang_term} devotional songs",
+                f"{lang_term} aarti songs",
+                f"{lang_term} bhakti songs",
+                f"{lang_term} chalisa songs",
+                f"{lang_term} kirtan songs",
+                f"{lang_term} mantra songs",
+                f"{lang_term} stuti songs",
+            ])
         collect_queries(expansion_queries, page_limit=40, max_queries=16, source="same_era_mood_artist_expansion")
         enriched_collected = enrich_live_items(collected)
         try:
@@ -1641,16 +1652,19 @@ def build_jio_up_next(
                 relaxed_context=True,
             )
             if is_bhakti_seed:
+                seed_deity = bhakti_agent.get_deity(seed)
                 expanded_ranked = [
-                    item for item in expanded_ranked if bhakti_agent.is_bhakti(item)
+                    item for item in expanded_ranked
+                    if bhakti_agent.is_bhakti(item)
+                    or (seed_deity and bhakti_agent.get_deity(item) == seed_deity)
                 ]
             if len(expanded_ranked) > len(ranked):
                 ranked = expanded_ranked
         except Exception:
             pass
 
-    # Safety floor: never let queue drop below 10 songs under any circumstance
-    if len(ranked) < 10:
+    # Safety floor: never let queue drop below 20 songs under any circumstance
+    if len(ranked) < 20:
         safety_queries = []
         era_term = f"{(seed_year // 10) * 10}s" if seed_year else ""
         lang_term = seed_language or "hindi"
@@ -1676,8 +1690,11 @@ def build_jio_up_next(
                 relaxed_context=True,
             )
             if is_bhakti_seed:
+                seed_deity = bhakti_agent.get_deity(seed)
                 safety_ranked = [
-                    item for item in safety_ranked if bhakti_agent.is_bhakti(item)
+                    item for item in safety_ranked
+                    if bhakti_agent.is_bhakti(item)
+                    or (seed_deity and bhakti_agent.get_deity(item) == seed_deity)
                 ]
             if len(safety_ranked) > len(ranked):
                 ranked = safety_ranked
