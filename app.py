@@ -1803,6 +1803,48 @@ def build_jio_up_next(
         if identity_keys and not identity_keys.intersection(used_recordings):
             used_recordings.update(identity_keys)
             unique.append(item)
+    # Final near-duplicate dedup: same song released on different albums often
+    # has slightly different title spellings (e.g. "Sunate" vs "Sunaate",
+    # "Dhaam" vs "Dham"). Collapse them by core title tokens and substring
+    # overlap so one song never repeats in a queue.
+    def _core_title_key(item: dict) -> str:
+        title = recommendation_title_key(item.get("title", ""))
+        return " ".join(title.split()[:6])
+
+    seen_core: set[str] = set()
+    deduped: list[dict] = []
+    for item in unique:
+        item_title = recommendation_title_key(item.get("title", ""))
+        core = _core_title_key(item)
+        if core and core in seen_core:
+            continue
+        is_subset = False
+        for existing in deduped:
+            existing_title = recommendation_title_key(existing.get("title", ""))
+            if not existing_title or not item_title:
+                continue
+            shorter, longer = (
+                (existing_title, item_title)
+                if len(existing_title) <= len(item_title)
+                else (item_title, existing_title)
+            )
+            if shorter and shorter in longer:
+                is_subset = True
+                break
+        if is_subset:
+            continue
+        if core:
+            seen_core.add(core)
+        deduped.append(item)
+    unique = deduped
+    # Bhakti gate on the final queue: devotional seeds never surface Bollywood
+    # romantic/pop/energetic leaks, even if they survived upstream ranking.
+    if is_bhakti_seed:
+        bhakti_unique = [
+            item for item in unique if bhakti_agent.is_bhakti(item)
+        ]
+        if bhakti_unique:
+            unique = bhakti_unique
     queue = unique[:limit]
     seen_recommendation_keys.update(
         identity_key
