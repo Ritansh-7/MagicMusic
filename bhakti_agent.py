@@ -30,6 +30,13 @@ class BhaktiAgent:
         for item in candidates:
             if self._same_recording(seed, item):
                 continue
+            # Devotional seeds surface devotional-only candidates: block Bollywood
+            # romantic/party/energetic leaks and require a devotional signal.
+            if self._seed_is_devotional(seed, seed_profile):
+                if self._is_romantic_item(item):
+                    continue
+                if not self._is_devotional_item(item):
+                    continue
             score = self._score_candidate(item, seed, seed_profile)
             if score >= min_score:
                 item = dict(item)
@@ -67,6 +74,39 @@ class BhaktiAgent:
     def get_deity(self, item):
         return resolve_deity(item)
 
+    _ROMANTIC_TERMS = {
+        "love", "pyaar", "pyar", "ishq", "mohabbat", "jaan", "sanam", "sajan",
+        "saiyaara", "milan", "romantic", "yaar", "dilwale", "saajan", "sajna",
+        "dil to", "pagal hai", "chura ke dil", "tumse milne", "mere khwabon",
+        "ho gaya hai tujhko", "pehli pehli bar", "dekha hai pehli", "tujhe dekha to",
+        "mera dil", "tera dil", "dil hai", "dil ne", "dil se", "dil ki",
+    }
+
+    def _is_romantic_item(self, item: dict) -> bool:
+        text = " ".join(
+            str(item.get(field, "")) for field in ("title", "album", "artists", "intent_labels")
+        ).casefold()
+        tokens = set(re.findall(r"[a-z0-9]+", text))
+        if self._ROMANTIC_TERMS & tokens:
+            return True
+        return any(term in text for term in self._ROMANTIC_TERMS if " " in term)
+
+    def _seed_is_devotional(self, seed: dict, seed_profile: dict) -> bool:
+        if seed_profile.get("primary_intent") == "devotional":
+            return True
+        return is_bhakti_skill_match(seed)
+
+    def _is_devotional_item(self, item: dict) -> bool:
+        if is_bhakti_skill_match(item):
+            return True
+        if self.llm_enabled and self.llm:
+            profile = self._classify_item(item)
+            if profile.get("primary_intent") == "devotional":
+                return True
+            if profile.get("religion") in {"hindu", "sikh", "jain", "buddhist"}:
+                return True
+        return False
+
     def _score_candidate(self, item, seed, seed_profile):
         score = bhakti_score(item, seed)
         if self.llm_enabled and self.llm:
@@ -86,7 +126,7 @@ class BhaktiAgent:
             ):
                 score = min(1.0, score + 0.15)
             if seed_intent == "devotional" and item_intent in {"romantic", "party", "energetic"}:
-                score *= 0.30
+                return 0.0
         item_mood, item_conf = infer_bhakti_mood(item)
         seed_mood, seed_conf = infer_bhakti_mood(seed)
         if (
