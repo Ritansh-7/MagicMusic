@@ -2790,6 +2790,7 @@ if jio_now:
                 )
                 if queue_seed_changed:
                     st.session_state["jio_queue"] = fresh_queue[:30]
+                    st.session_state["jio_queue_status"]["post_build_queue_size"] = len(fresh_queue)
                 else:
                     merged_queue = []
                     seen_recordings: set[str] = set()
@@ -2801,6 +2802,7 @@ if jio_now:
                             seen_recordings.update(identity_keys)
                             merged_queue.append(item)
                     st.session_state["jio_queue"] = merged_queue[:30]
+                    st.session_state["jio_queue_status"]["post_build_queue_size"] = len(merged_queue)
                 st.session_state["jio_queue_seed_id"] = current_id
             except Exception:
                 st.session_state["jio_queue"] = [] if queue_seed_changed else existing_queue
@@ -2868,17 +2870,21 @@ if jio_now:
     with now_cols[3]:
         st.toggle("Loop", key="jio_loop")
     raw_up_next = st.session_state.get("jio_queue", [])
+    st.session_state["jio_queue_status"]["render_input_queue_size"] = len(raw_up_next)
     up_next = []
     seen_up_next_recordings: set[str] = set()
+    dedup_dropped = 0
     for item in raw_up_next:
         identity_keys = _recommendation_history_keys(item)
         if not identity_keys:
-            # No stable identity (missing title/artists): still show the item
-            # rather than dropping the whole queue.
             up_next.append(item)
         elif not identity_keys.intersection(seen_up_next_recordings):
             seen_up_next_recordings.update(identity_keys)
             up_next.append(item)
+        else:
+            dedup_dropped += 1
+    st.session_state["jio_queue_status"]["render_output_queue_size"] = len(up_next)
+    st.session_state["jio_queue_status"]["render_dedup_dropped"] = dedup_dropped
     st.session_state["jio_queue"] = up_next
     if up_next:
         feedback_left, feedback_right = st.columns([3, 1], vertical_alignment="center")
