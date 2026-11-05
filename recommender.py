@@ -1012,7 +1012,17 @@ def recommendation_title_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", title).strip()
 
 
-def _is_excluded_recommendation_title(value: str) -> bool:
+def _is_bhakti_title(value: str) -> bool:
+    """Return True if a title is clearly devotional/bhakti (dhun, narayan, hari, ram, etc.)."""
+    text = recommendation_title_key(value)
+    bhakti_tokens = (
+        "bhajan", "aarti", "chalisa", "kirtan", "stuti", "mantra",
+        "dhun", "narayan", "hari", "ram", "krishna", "shiva", "shree",
+        "om", "jai", "namah", "stotram", "stotra", "hare", "durga",
+        "ganesha", "lakshmi", "saraswati", "vishnu", "mahadev",
+        "shankar", "bholenath", "sai", "bhakti", "bhakt",
+    )
+    return any(tok in text for tok in bhakti_tokens)
     title = recommendation_title_key(value)
     return any(
         title == excluded or title.startswith(f"{excluded} ")
@@ -1030,17 +1040,13 @@ def recommendation_history_keys(item: dict) -> set[str]:
     return keys
 
 
-INTENT_KEYWORDS = {
-    "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "pyar", "dil", "jaan", "milan", "sanam", "aashiqui", "prem", "saiyaara", "valentines", "valentine"},
-    "playful": {"playful", "comic", "comedy", "humorous", "funny", "lighthearted", "light hearted", "mischief", "masti", "nautanki", "chatur", "nok jhok", "banter", "witty", "theatrical", "expressive", "call and response", "call response", "jugalbandi", "aal izz well", "all izz well"},
-    "ghazal": {"ghazal", "ghazals", "mehfil", "rekhta", "shayari", "ghulam ali", "chupke chupke classics", "pankaj udhas", "jagjit singh", "lofi ghazal", "ghazal lofi", "chitra singh", "talat aziz", "mehdi hassan"},
-    "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "bajrang", "shiva", "shivay", "mahadev", "krishna", "radhe", "ghanshyam", "aarti", "qawwali devotional", "namo namo", "shankara", "shankar", "kedarnath", "bhole", "bholenath", "bhakti", "stuti", "mantra", "anup jalota"},
-    "motivational": {"motivation", "motivational", "fight", "fighting", "battle", "victory", "fighter", "warrior", "rise", "zinda", "jeet", "inspire", "goal", "champion", "unstoppable", "zindagi", "mauka", "aspirants", "safarnama", "safarnaama", "dhaaga", "beparwah", "aashayein", "roobaroo", "lakshya", "kar har maidaan fateh", "hausla", "manzil", "jeetna", "udaan", "parwaaz"},
-    "energetic": {"fight", "fighting", "anthem", "rock", "dance", "party", "bhangra", "dhamaka", "dhamaal", "energetic", "power", "action", "high energy", "kala chashma", "mashup", "dj chetas", "club", "house party", "party hits", "club mix", "tony kakkar", "dhaakad", "jugnu", "banger", "josh high", "energy"},
-    "acoustic_indie": {"acoustic", "unplugged", "indie", "folk", "coke studio", "singer songwriter", "nilotpal bora", "prateek kuhad", "anuv jain", "jasleen royal", "lucky ali", "ballad", "guitar", "hussain haidry", "tripling"},
-    "rap_hiphop": {"rap", "hip hop", "hiphop", "freestyle", "gully", "mixtape", "hustle", "mtv hustle", "aditya pushkarna", "divine", "raftaar", "badshah", "naezy", "mc stan", "gully boy", "apna time aayega", "azadi", "mere gully mein", "emiway", "krsna", "seedhe maut", "ikka"},
-    "calm": {"lofi", "sleep", "calm", "peace", "soothing", "sukoon", "instrumental"},
-}
+def _seed_title_token_overlap(seed: dict | None, candidate: dict) -> bool:
+    """Return True if seed and candidate share any title token (avoid near-duplicates)."""
+    seed_title = recommendation_title_key((seed or {}).get("title", ""))
+    cand_title = recommendation_title_key(candidate.get("title", ""))
+    seed_tokens = set(seed_title.split())
+    cand_tokens = set(cand_title.split())
+    return bool(seed_tokens and cand_tokens and seed_tokens & cand_tokens)
 
 
 def infer_audio_intents(item: dict) -> set[str]:
@@ -1106,78 +1112,21 @@ def _infer_candidate_intents(item: dict) -> set[str]:
             for label in supplied_labels
             if str(label).strip().casefold() not in {"", "general", "neutral"}
         )
-    text = " ".join(
-        str(item.get(field, ""))
-        for field in (
-            "title", "album", "track_genre", "genre", "language", "mood",
-            "description", "tags", "intent_labels", "candidate_source",
-        )
-    ).casefold()
-    text = re.sub(r"[-_/]+", " ", text)
-    tokens = set(re.findall(r"[a-z0-9]+", text))
-    for label, terms in INTENT_KEYWORDS.items():
-        if any(term in text if " " in term else term in tokens for term in terms):
-            labels.add(label)
     return labels | infer_audio_intents(item)
 
 
 def infer_metadata_mood_labels(item: dict) -> set[str]:
-    """Infer low-confidence mood labels without using artist names as evidence."""
-    text = " ".join(
-        str(item.get(field, ""))
-        for field in (
-            "title", "album", "language", "mood", "description", "tags",
-            "track_genre", "genre",
-        )
-    ).casefold()
-    tokens = set(re.findall(r"[a-z0-9]+", text))
-    groups = {
-        "playful": {
-            "playful", "comic", "comedy", "humorous", "funny", "lighthearted",
-            "light hearted", "mischief", "masti", "nautanki", "chatur",
-            "nok jhok", "banter", "witty", "theatrical", "expressive",
-            "call and response", "call response", "jugalbandi", "natkhat",
-            "shararat", "pagal", "chhedkhani", "mast", "jhume",
-        },
-        "energetic": {
-            "fight", "anthem", "rock", "zinda", "sultan", "power", "action",
-            "dance", "party", "bhangra", "bang", "fire", "dhamaka", "warrior",
-            "bhaag", "milkha", "singham", "chaiyya", "ramta", "appadipodu",
-            "mappillai", "dhoom", "jalwa", "toofan", "dum", "hungama", "jashn",
-        },
-        "romantic": {
-            "love", "romantic", "ishq", "mohabbat", "pyaar", "pyar", "dil",
-            "jaan", "saiyaara", "deewana", "deewani", "sanam", "saajna",
-            "humsafar", "baatein", "dhadkan", "chaha", "humdum", "haseen",
-            "kasam", "pehla nasha", "tum",
-        },
-        "sad": {
-            "sad", "heartbreak", "alone", "broken", "dard", "udaas", "tanha",
-            "judai", "judaai", "bewafa", "gam", "gham", "aansu", "alvida",
-            "rootha", "khoya",
-        },
-        "instrumental": {
-            "theme", "score", "background", "instrumental", "bgm", "soundtrack",
-        },
-        "acoustic_indie": {
-            "acoustic", "unplugged", "indie", "folk", "singer songwriter",
-            "singer-songwriter", "coke studio", "lofi", "slowed", "reverb",
-        },
-        "ghazal": {
-            "ghazal", "ghazals", "shayar", "shayari", "mehfil", "rekhta",
-            "ghulam ali", "ghulam ali classics", "ustad bade ghulam ali",
-            "ghulam ali khan", "chupke chupke classics",
-        },
-        "rap_hiphop": {
-            "rap", "rapper", "hip hop", "hiphop", "gully", "freestyle",
-            "mixtape",
-        },
-    }
-    return {
-        label
-        for label, words in groups.items()
-        if any(word in text if " " in word else word in tokens for word in words)
-    }
+    """Infer low-confidence mood labels using LLM only. No hardcoded keywords."""
+    try:
+        import llm_classifier as _lc_local
+        result = _lc_local.classify_item(item) if _lc_local else {}
+        if result:
+            mood = result.get("mood", "unknown")
+            if mood and mood != "unknown":
+                return {mood}
+    except Exception:
+        pass
+    return set()
 import re
 from scipy.sparse import hstack, csr_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -1780,6 +1729,7 @@ class HybridRecommendationEngine:
                 seen_result_keys.add(result_key)
                 deduped.append(item)
         results = deduped
+        _original_results = list(results)
         seed_year = recommendation_seed_year(seed or {}, results) if seed else 0
         if seed:
             seed_identity = recommendation_history_keys(seed)
@@ -1789,63 +1739,123 @@ class HybridRecommendationEngine:
             ]
             results = [
                 item for item in results
-                if not _is_excluded_recommendation_title(item.get("title", ""))
+                if not _seed_title_token_overlap(seed, item)
             ]
+            if seed and _is_bhakti_title(seed.get("title", "")):
+                romantic_terms = {"love", "pyaar", "ishq", "dil", "romantic", "yaar", "saajan", "sajna", "tum", "mera", "tera"}
+                results = [
+                    item for item in results
+                    if not any(t in recommendation_title_key(item.get("title", "")) for t in romantic_terms)
+                ]
             if seed_year:
                     compatible: list[dict] = []
                     for item in results:
                         is_valid, _ = double_verify_candidate(seed, item, seed_year)
                         if is_valid:
                             compatible.append(item)
-                    # Intent compatibility: when seed intent is confident, prefer
-                    # candidates with the same primary intent.
+                    # Intent compatibility: a confident seed intent is a hard
+                    # semantic contract. Devotional seeds only surface
+                    # devotional candidates (same religion family), and
+                    # secular seeds never surface devotional candidates.
+                    # Gate triggers when the LLM/keyword profile is confident
+                    # (>= 0.50), or when the seed's intent_labels already
+                    # contain "devotional" (set by enrich_live_items via LLM).
                     try:
                         import music_understanding as _mu
+                        import llm_classifier as _llc
                         seed_p = _mu.profile(seed)
+                        seed_intents = set(seed_p.get("intent_labels", []) or [])
                         seed_intent = seed_p.get("primary_intent")
-                        seed_conf = seed_p.get("intent_confidence", 0.0)
-                        if seed_conf >= 0.5:
-                            def _compat(it):
-                                p = _mu.profile(it)
-                                score = 0.0
-                                if p.get("primary_intent") == seed_intent:
-                                    score += 0.4
-                                if p.get("mood") == seed_p.get("mood"):
-                                    score += 0.2
-                                if p.get("genre") == seed_p.get("genre"):
-                                    score += 0.2
-                                if p.get("theme") == seed_p.get("theme"):
-                                    score += 0.2
-                                # Hard conflict: different religions.
-                                seed_religion = seed_p.get("religion")
-                                item_religion = p.get("religion")
-                                if (
-                                    seed_religion
-                                    and item_religion
-                                    and seed_religion != "generic"
-                                    and item_religion != "generic"
-                                    and seed_religion != item_religion
-                                ):
-                                    return -1.0
-                                return score
-                            scored = sorted(compatible, key=_compat, reverse=True)
-                            # keep top 80% by compatibility, min 5
-                            cutoff = max(5, int(len(scored) * 0.8))
-                            # Hard-exclude clearly conflicting intents for confident seeds.
-                            if seed_conf >= 0.5:
-                                aligned = [item for item in scored if _compat(item) >= 0.4]
-                                if aligned:
-                                    scored = aligned
-                            cutoff = max(5, int(len(scored) * 0.8))
-                            compatible = scored[:cutoff] if len(scored) >= 5 else scored
+                        seed_conf = float(seed_p.get("intent_confidence", 0.0) or 0.0)
+                        if _is_bhakti_title(seed.get("title", "")):
+                            seed_intent = "devotional"
+                            seed_conf = 1.0
+                            seed_religion = seed_religion or "hindu"
+                        if (
+                            seed_intent
+                            and (
+                                seed_conf >= 0.30
+                                or "devotional" in seed_intents
+                            )
+                        ):
+                            if seed_intent == "devotional" and _is_bhakti_title(seed.get("title", "")):
+                                # Fast path: seed is known devotional (bhakti title). Filter candidates
+                                # by bhakti title terms instead of expensive LLM classification.
+                                bhakti_filter_terms = {
+                                    "bhajan", "aarti", "chalisa", "kirtan", "stuti", "mantra",
+                                    "dhun", "stotram", "stotra", "namah", "jai", "om", "hare",
+                                    "ram", "krishna", "shiva", "hanuman", "durga", "ganesha",
+                                    "lakshmi", "saraswati", "vishnu", "narayan", "mahadev",
+                                    "shankar", "bholenath", "sai", "bhakti", "bhakt",
+                                }
+                                kept = [
+                                    item for item in compatible
+                                    if any(
+                                        t in recommendation_title_key(item.get("title", ""))
+                                        for t in bhakti_filter_terms
+                                    )
+                                ]
+                            else:
+                                cand_profiles = _llc.classify_items(compatible)
+                                kept: list[dict] = []
+                                for item in compatible:
+                                    cand_p = cand_profiles.get(_llc.cache_key(item)) or _mu.profile(item)
+                                    cand_intent = cand_p.get("primary_intent")
+                                    cand_religion = cand_p.get("religion")
+                                    blocked = False
+                                    if seed_intent == "devotional":
+                                        if cand_intent != "devotional":
+                                            blocked = True
+                                        elif (
+                                            cand_religion
+                                            and seed_religion
+                                            and seed_religion not in {"generic", "unknown"}
+                                            and cand_religion not in {"generic", "unknown"}
+                                            and cand_religion != seed_religion
+                                        ):
+                                            blocked = True
+                                    elif cand_intent == "devotional":
+                                        blocked = True
+                                    if not blocked:
+                                        kept.append(item)
+                                compatible = kept
                     except Exception:
                         pass
-                    if len(compatible) >= 10:
-                        results = compatible
-                    elif compatible:
-                        results = compatible
-        if not results:
-            return []
+                    if seed and (
+                        _is_bhakti_title(seed.get("title", ""))
+                        or "devotional" in seed.get("intent_labels", [])
+                    ):
+                        bhakti_terms = {
+                            "bhajan", "aarti", "chalisa", "kirtan", "stuti", "mantra",
+                            "dhun", "stotram", "stotra", "namah", "jai", "om", "hare",
+                            "ram", "krishna", "shiva", "hanuman", "durga", "ganesha",
+                            "lakshmi", "saraswati", "vishnu", "narayan", "mahadev",
+                            "shankar", "bholenath", "sai", "bhakti", "bhakt",
+                        }
+                        # Intent-gated compatible set is already devotional-only.
+                        # Refine it with bhakti title terms for precision.
+                        filtered = [
+                            item for item in compatible
+                            if any(t in recommendation_title_key(item.get("title", "")) for t in bhakti_terms)
+                        ]
+                        if filtered:
+                            results = filtered
+                        elif compatible:
+                            results = compatible
+                        else:
+                            # Relaxed fallback: no devotional candidates passed the
+                            # strict intent gate. Allow bhakti-title matches from the
+                            # pre-gate pool so the queue isn't empty.
+                            relaxed = [
+                                item for item in results
+                                if any(t in recommendation_title_key(item.get("title", "")) for t in bhakti_terms)
+                            ]
+                            if relaxed:
+                                results = relaxed
+                            elif results:
+                                results = results
+                            else:
+                                results = []
         preferred = catalog[catalog["track_id"].astype(str).isin({str(x) for x in preferred_track_ids})]
         preferred_artists = [str(x).lower() for x in preferred.get("artists", pd.Series(dtype=str)).tolist()]
         preferred_titles = [str(x).lower() for x in preferred.get("track_name", pd.Series(dtype=str)).tolist()]
@@ -1876,7 +1886,7 @@ class HybridRecommendationEngine:
             "high_energy": {"fight", "anthem", "rock", "zinda", "sultan", "brother", "run", "power", "action", "dance", "party", "bhangra", "bang", "fire", "dhamaka", "dhamaal", "warrior", "sher", "bhaag", "milkha", "singham", "chaiyya", "ramta", "appadipodu", "mappillai"},
             "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "dil", "jaan", "saiyaara"},
             "sad": {"sad", "heartbreak", "alone", "broken", "dard", "udaas"},
-            "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "shiva", "ram"},
+            "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "shiva", "ram", "durga", "maa", "kali", "lakshmi", "saraswati", "parvati", "gouri", "shakti", "bhagwati", "jagdamba", "bhairava", "beta", "bulaye", "mandir", "pooja", "mandar", "dham", "dhaam", "ashram", "satsang", "kirtan", "lakha", "lakkha", "chanchal", "narendra", "anup", "jalota", "bhajan samrat", "bhakt", "prarthana", "vandana", "aaradhana", "stuti", "namaskar", "namo", "bhole", "bholenath", "shankar", "shankara", "mahadev", "kailash", "kailasha", "kailashpati", "trishul", "damru", "rudra", "ganga", "yamuna", "gayatri", "mantra", "japa", "yagna", "havan", "deep", "deepak", "diya", "tilak", "sindoor", "mangal", "pooja thali", "prasad", "bhog", "bhandara", "langar", "gurdwara", "mandir", "temple", "ashram", "math", "peeth", "peetham"},
             "acoustic_indie": {"lofi", "acoustic", "unplugged", "instrumental", "slowed", "reverb", "indie", "folk", "coke studio", "singer songwriter"},
             "rap_hiphop": {"rap", "rapper", "hip hop", "hiphop", "gully", "freestyle", "mixtape"},
         }
@@ -2083,6 +2093,13 @@ class HybridRecommendationEngine:
                 item["recommendation_reason"] = "Same soundtrack and similar audio profile"
             elif album_match:
                 item["recommendation_reason"] = "Same film or soundtrack"
+            elif (
+                seed_intents
+                and item_intents
+                and "devotional" in seed_intents
+                and "devotional" in item_intents
+            ):
+                item["recommendation_reason"] = "Same devotional style"
             elif audio_verified and mood_match >= 0.78 and same_era:
                 item["recommendation_reason"] = "Similar mood, era and sound"
             elif audio_verified and mood_match >= 0.78 and era_delta:
@@ -2215,6 +2232,18 @@ class HybridRecommendationEngine:
 
         # A learned layer is intentionally a small final correction. It only
         # activates after impression/play labels pass its data threshold.
+        # Penalty for romantic tracks in bhakti context.
+        if seed and _is_bhakti_title(seed.get("title", "")):
+            romantic_terms = {"love", "pyaar", "ishq", "dil", "romantic", "yaar", "saajan", "sajna"}
+            for item in results:
+                if any(t in recommendation_title_key(item.get("title", "")) for t in romantic_terms):
+                    item["_romantic_penalty"] = 0.3
+                else:
+                    item["_romantic_penalty"] = 1.0
+        else:
+            for item in results:
+                item["_romantic_penalty"] = 1.0
+        hybrid = hybrid * np.array([item.get("_romantic_penalty", 1.0) for item in results])
         for item, score in zip(results, hybrid):
             item["recommendation_score"] = float(score)
         learned = self.learned_ranker.predict(results)

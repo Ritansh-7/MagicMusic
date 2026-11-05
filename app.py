@@ -33,6 +33,7 @@ from recommender import (
     recommendation_title_key as _recommendation_title_key,
     infer_track_language as _infer_track_language,
 )
+import llm_classifier as _llc
 from search_ranking import (
     include_all_results,
     prioritize_title_matches,
@@ -40,6 +41,7 @@ from search_ranking import (
 )
 from spotify_api import SpotifyOAuth, new_oauth_state, verify_oauth_state
 from user_store import UserStore
+from bhakti_agent import BhaktiAgent, quick_bhakti_recommend, is_devotional
 
 ERA_COMPATIBILITY_WINDOW_YEARS = 30
 
@@ -307,7 +309,7 @@ INTENT_TERMS = {
     "energetic": {"fight", "anthem", "rock", "power", "action", "dance", "party", "bhangra", "bang", "fire", "dhamaka", "dhamaal", "high", "energy"},
     "rap_hiphop": {"rap", "rapper", "hip hop", "hiphop", "gully", "desi hip hop", "freestyle", "mixtape"},
     "sad": {"sad", "heartbreak", "alone", "broken", "dard", "udaas", "tanha", "judai"},
-    "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "bajrang", "bajrangbali", "bajranbali", "anjaney", "aarti", "kirtan", "mantra", "om namah shivay", "krishna", "ghanshyam", "allah", "khuda"},
+    "devotional": {"bhajan", "chalisa", "gurbani", "hanuman", "bajrang", "bajrangbali", "bajranbali", "anjaney", "aarti", "kirtan", "mantra", "om namah shivay", "krishna", "ghanshyam", "allah", "khuda", "dhun", "narayan", "hari", "shree", "jai", "namah", "ram", "stotram", "stotra", "hare", "durga", "ganesha", "lakshmi", "saraswati", "vishnu", "mahadev", "shankar", "bholenath", "sai", "bhakti", "bhakt"},
     "calm": {"acoustic", "unplugged", "lofi", "sleep", "calm", "peace", "sukoon", "soothing", "instrumental"},
     "acoustic_indie": {"acoustic", "unplugged", "indie", "folk", "singer songwriter", "singer-songwriter", "coke studio", "soul"},
 }
@@ -463,6 +465,10 @@ def build_live_title_lookup(data: pd.DataFrame) -> list[dict]:
 
 def enrich_live_items(items: list[dict]) -> list[dict]:
     """Attach local audio features while preserving fuzzy-match provenance."""
+    # Classify every live item once via the LLM (cached, no network without a
+    # key) so intent/religion labels are accurate for downstream ranking and
+    # the strict intent gate in rank_jio_results.
+    llm_profiles = _llc.classify_items(items)
     for item in items:
         title = _compact_key(item.get("title", ""))
         artist_names = str(item.get("artists", "")).split(",")
@@ -508,6 +514,22 @@ def enrich_live_items(items: list[dict]) -> list[dict]:
             item.setdefault("feature_source", "live_metadata_fallback")
             item.update({key: value for key, value in infer_metadata_mood(item).items() if key not in item})
         item["intent_labels"] = infer_music_intents(item)
+        llm_p = llm_profiles.get(_llc.cache_key(item), {}) or {}
+        if llm_p:
+            item["llm_intent"] = llm_p.get("primary_intent")
+            item["llm_religion"] = llm_p.get("religion")
+            item["llm_sub_genre"] = llm_p.get("sub_genre")
+            llm_intent = llm_p.get("primary_intent")
+            llm_conf = float(llm_p.get("intent_confidence", 0.0) or 0.0)
+            if (
+                llm_intent
+                and llm_intent not in {"unknown", "general", "neutral"}
+                and llm_conf >= 0.60
+                and llm_intent not in item["intent_labels"]
+            ):
+                item["intent_labels"] = sorted(
+                    set(item["intent_labels"]) | {llm_intent}
+                )
     return items
 
 
@@ -1481,14 +1503,27 @@ def build_jio_up_next(
             | soundtrack_intents
         )
         seed["intent_source"] = "same_soundtrack_audio_proxy"
+    # Bhakti agent: use dedicated devotional recommender when seed is bhakti/devotional
+    bhakti_agent = BhaktiAgent(llm_classifier=_llc if _llc else None, llm_enabled=_llc is not None)
+    is_bhakti_seed = bhakti_agent.is_bhakti(seed)
     try:
-        ranked = hybrid.rank_jio_results(
-            enriched_collected,
-            user_id,
-            catalog,
-            preferred_track_ids,
-            seed=seed,
-        )
+        if is_bhakti_seed:
+            # Use dedicated BhaktiAgent for devotional seeds - ensures devotional
+            # recommendations instead of romantic/popular fallbacks.
+            ranked = bhakti_agent.recommend(
+                seed,
+                enriched_collected,
+                top_n=35,
+                min_score=0.30,
+            )
+        else:
+            ranked = hybrid.rank_jio_results(
+                enriched_collected,
+                user_id,
+                catalog,
+                preferred_track_ids,
+                seed=seed,
+            )
     except Exception as exc:
         ranking_error = type(exc).__name__
         ranking_error_detail = str(exc)
@@ -1497,14 +1532,23 @@ def build_jio_up_next(
     # the player with an empty queue when a language/era/style bridge exists.
     if len(ranked) < 15 and enriched_collected:
         try:
-            relaxed_ranked = hybrid.rank_jio_results(
-                enriched_collected,
-                user_id,
-                catalog,
-                preferred_track_ids,
-                seed=seed,
-                relaxed_context=True,
-            )
+            if is_bhakti_seed:
+                # Relaxed bhakti pass: lower min_score to surface more devotional candidates
+                relaxed_ranked = bhakti_agent.recommend(
+                    seed,
+                    enriched_collected,
+                    top_n=35,
+                    min_score=0.15,
+                )
+            else:
+                relaxed_ranked = hybrid.rank_jio_results(
+                    enriched_collected,
+                    user_id,
+                    catalog,
+                    preferred_track_ids,
+                    seed=seed,
+                    relaxed_context=True,
+                )
             if len(relaxed_ranked) > len(ranked):
                 ranked = relaxed_ranked
         except Exception:
@@ -2238,7 +2282,7 @@ def render_dashboard_shelf(language: str, tracks: pd.DataFrame) -> None:
                 album = str(row.get("album_name", ""))
                 artwork = str(row.get("image_url", "")) or posters.get(str(row.get("track_id", "")), {}).get("image_url", "")
                 if artwork:
-                    st.image(artwork, width="stretch", alt=f"Artwork for {title}")
+                    st.image(artwork, width="stretch")
                 st.caption(f"{start + row_start + column_index + 1:02d}")
                 st.markdown(f"**{title}**")
                 st.caption(f"{artist}{f' · {album}' if album else ''}")
