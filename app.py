@@ -1513,7 +1513,11 @@ def build_jio_up_next(
             max_queries=8,
             source="seed_inferred_era_mood",
         )
-    enriched_collected = enrich_live_items(collected)
+    enriched_collected = []
+    try:
+        enriched_collected = enrich_live_items(collected)
+    except Exception:
+        enriched_collected = list(collected)
     soundtrack_intents = infer_same_soundtrack_audio_intents(
         seed,
         enriched_collected,
