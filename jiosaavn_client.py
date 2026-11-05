@@ -235,6 +235,32 @@ class JioSaavnClient:
 
         def finalize() -> list[dict[str, Any]]:
             finalized = self._recover_album_artists(collected)
+            exact_title = any(
+                re.sub(r"[^a-z0-9]+", " ", str(item.get("title", "")).casefold()).strip()
+                == normalized_query
+                for item in finalized
+            )
+            # When the provider returns loose substring matches (e.g. searching
+            # "meri vinti yahi hai" returns songs that merely contain "hai"),
+            # drop results that do not meaningfully overlap the query tokens.
+            if not exact_title:
+                relevant = []
+                for item in finalized:
+                    fields_text = " ".join(
+                        str(item.get(field, ""))
+                        for field in ("title", "artists", "album", "starring")
+                    ).casefold()
+                    field_tokens = set(
+                        re.sub(r"[^a-z0-9]+", " ", fields_text).split()
+                    )
+                    matched = len(query_tokens & field_tokens)
+                    if (
+                        normalized_query in fields_text
+                        or matched >= max(1, len(query_tokens) // 2)
+                    ):
+                        relevant.append(item)
+                if relevant:
+                    finalized = relevant
             finalized.sort(
                 key=lambda item: (
                     1 if re.sub(r"[^a-z0-9]+", " ", str(item.get("title", "")).casefold()).strip() == normalized_query else 0,
