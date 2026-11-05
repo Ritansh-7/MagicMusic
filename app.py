@@ -468,7 +468,16 @@ def enrich_live_items(items: list[dict]) -> list[dict]:
     # Classify every live item once via the LLM (cached, no network without a
     # key) so intent/religion labels are accurate for downstream ranking and
     # the strict intent gate in rank_jio_results.
-    llm_profiles = _llc.classify_items(items)
+    try:
+        llm_profiles = _llc.classify_items(items)
+    except AttributeError:
+        # Fallback: classify items one by one if batch method is unavailable
+        llm_profiles = {}
+        for item in items:
+            key = _llc.cache_key(item)
+            profile = _llc.classify_item(item)
+            if profile:
+                llm_profiles[key] = profile
     for item in items:
         title = _compact_key(item.get("title", ""))
         artist_names = str(item.get("artists", "")).split(",")
