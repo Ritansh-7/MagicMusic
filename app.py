@@ -1813,7 +1813,9 @@ def build_jio_up_next(
     used_recordings: set[str] = set()
     for item in ranked:
         identity_keys = _recommendation_history_keys(item)
-        if identity_keys and not identity_keys.intersection(used_recordings):
+        if not identity_keys:
+            unique.append(item)
+        elif not identity_keys.intersection(used_recordings):
             used_recordings.update(identity_keys)
             unique.append(item)
     # Final near-duplicate dedup: same song released on different albums often
@@ -2793,7 +2795,9 @@ if jio_now:
                     seen_recordings: set[str] = set()
                     for item in [*existing_queue, *fresh_queue]:
                         identity_keys = _recommendation_history_keys(item)
-                        if identity_keys and not identity_keys.intersection(seen_recordings):
+                        if not identity_keys:
+                            merged_queue.append(item)
+                        elif not identity_keys.intersection(seen_recordings):
                             seen_recordings.update(identity_keys)
                             merged_queue.append(item)
                     st.session_state["jio_queue"] = merged_queue[:30]
@@ -2868,7 +2872,11 @@ if jio_now:
     seen_up_next_recordings: set[str] = set()
     for item in raw_up_next:
         identity_keys = _recommendation_history_keys(item)
-        if identity_keys and not identity_keys.intersection(seen_up_next_recordings):
+        if not identity_keys:
+            # No stable identity (missing title/artists): still show the item
+            # rather than dropping the whole queue.
+            up_next.append(item)
+        elif not identity_keys.intersection(seen_up_next_recordings):
             seen_up_next_recordings.update(identity_keys)
             up_next.append(item)
     st.session_state["jio_queue"] = up_next
