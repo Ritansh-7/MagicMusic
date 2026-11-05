@@ -1218,7 +1218,10 @@ def build_jio_up_next(
     """Build a separate recommendation queue; never reuse search results."""
     # Ensure the playing seed has the same mood representation as candidates,
     # including when it came from the player refresh path rather than search.
-    seed = enrich_live_items([seed])[0]
+    try:
+        seed = enrich_live_items([seed])[0]
+    except Exception:
+        pass
     title = str(seed.get("title", "")).strip()
     artists = str(seed.get("artists", "")).strip()
     album = str(seed.get("album", "")).strip()
