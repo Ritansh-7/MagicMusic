@@ -1640,6 +1640,10 @@ def build_jio_up_next(
                 seed=seed,
                 relaxed_context=True,
             )
+            if is_bhakti_seed:
+                expanded_ranked = [
+                    item for item in expanded_ranked if bhakti_agent.is_bhakti(item)
+                ]
             if len(expanded_ranked) > len(ranked):
                 ranked = expanded_ranked
         except Exception:
@@ -1671,6 +1675,10 @@ def build_jio_up_next(
                 seed=seed,
                 relaxed_context=True,
             )
+            if is_bhakti_seed:
+                safety_ranked = [
+                    item for item in safety_ranked if bhakti_agent.is_bhakti(item)
+                ]
             if len(safety_ranked) > len(ranked):
                 ranked = safety_ranked
         except Exception:
