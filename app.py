@@ -588,6 +588,9 @@ def play_dashboard_live_item(item: dict) -> None:
     st.session_state["jio_now_playing"] = item
     st.session_state["scroll_to_player"] = True
     st.session_state["jio_queue"] = []
+    # Clear per-session recommendation history so the new seed gets fresh
+    # candidates instead of being blocked by songs already shown for prior seeds.
+    st.session_state["jio_recommendation_history"] = set()
     st.session_state.pop("jio_queue_seed_id", None)
     st.session_state.pop("jio_queue_attempted_id", None)
     st.session_state.pop("jio_queue_refill_attempted_id", None)
@@ -2505,6 +2508,9 @@ else:
                             st.session_state["jio_now_playing"] = item
                             st.session_state["scroll_to_player"] = True
                             st.session_state["jio_queue"] = []
+                            # Fresh seed: clear history so new candidates aren't
+                            # blocked by songs shown for previous seeds.
+                            st.session_state["jio_recommendation_history"] = set()
                             st.session_state.pop("jio_queue_seed_id", None)
                             st.session_state.pop("jio_queue_attempted_id", None)
                             st.session_state.pop("jio_queue_refill_attempted_id", None)
@@ -2771,6 +2777,9 @@ if jio_now:
             if st.button("▶ Play next", key=f"featured_play_{featured.get('song_id') or featured.get('title')}", width="stretch"):
                 st.session_state["jio_now_playing"] = featured
                 st.session_state["scroll_to_player"] = True
+                # Fresh seed: clear history so new candidates aren't blocked by
+                # songs shown for previous seeds.
+                st.session_state["jio_recommendation_history"] = set()
                 selected_keys = _recommendation_history_keys(featured)
                 st.session_state["jio_queue"] = [
                     queued for queued in up_next
@@ -2816,6 +2825,9 @@ if jio_now:
                             # waits for another provider discovery wave.
                             st.session_state["jio_now_playing"] = item
                             st.session_state["scroll_to_player"] = True
+                            # Fresh seed: clear history so new candidates aren't
+                            # blocked by songs shown for previous seeds.
+                            st.session_state["jio_recommendation_history"] = set()
                             old_queue = list(up_next)
                             selected_keys = _recommendation_history_keys(item)
                             st.session_state["jio_queue"] = [
