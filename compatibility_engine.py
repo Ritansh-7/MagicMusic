@@ -16,5 +16,3 @@ def compatibility(seed_profile: dict, candidate_profile: dict) -> float:
         elif seed_val == "unknown" or cand_val == "unknown":
             score += weight * 0.25
     return round(score, 4)
-EOF
-python -m py_compile compatibility_engine.py; if ($?) { echo "compile_ok" }

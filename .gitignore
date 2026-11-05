@@ -1,5 +1,6 @@
 .streamlit/secrets.toml
 tune_match_events.sqlite3
+intent_cache.sqlite3
 __pycache__/
 *.pyc
 streamlit.out.log

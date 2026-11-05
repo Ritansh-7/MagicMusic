@@ -1,100 +1,93 @@
 import re
+from typing import Optional
 
-INTENT_KEYWORDS = {
-    "devotional": {"bhajan", "mata", "rani", "devi", "deva", "darshan", "bhakti", "jai", "om", "shiva", "ram", "krishna", "hanuman", "guru", "sai", "allah", "bulawa", "bulava", "aarti", "prabhu"},
-    "romantic": {"love", "ishq", "pyaar", "pyar", "dil", "jaan", "saajan", "sanam", "mohabbat", "romantic", "tujhe", "tu", "mere", "saiyaara", "saathiya", "jaane", "jaanu"},
-    "sad": {"sad", "dard", "udaas", "heartbreak", "alone", "broken", "rona", "tears", "judai", "viraha", "khamoshi", "tanha", "bewafa"},
-    "motivational": {"zinda", "jeet", "sultan", "brother", "run", "power", "action", "bhaag", "milkha", "singham", "fighter", "zindagi", "kadam", "jeene", "jeena"},
-    "party": {"party", "dance", "disco", "bhangra", "dhamaal", "dhamaka", "chaiyya", "ramta", "kajra", "lat", "lag", "gaye", "nach", "nachna"},
-    "comedy": {"comedy", "funny", "hasna", "masti", "chatur", "naar", "phir", "hera", "pheri", "golmaal", "housefull"},
-    "patriotic": {"desh", "bharat", "india", "sande", "aate", "hain", "vande", "mataram", "soldier", "army", "tiranga", "watan"},
-}
+try:
+    import llm_classifier as _lc
+except Exception:  # pragma: no cover
+    _lc = None
 
-MOOD_KEYWORDS = {
-    "uplifting": {"jai", "bulawa", "zinda", "jeet", "hope", "asha", "ummeed"},
-    "reverent": {"mata", "rani", "devi", "bhajan", "aarti", "prabhu", "om"},
-    "tender": {"dil", "jaan", "saajan", "tujhe", "mere", "pyaar", "ishq"},
-    "energetic": {"dance", "party", "disco", "bhangra", "dhamaal", "zinda", "run"},
-    "melancholic": {"dard", "udaas", "judai", "viraha", "tanha", "bewafa", "rona"},
-    "playful": {"chatur", "masti", "kajra", "lat", "gaye", "nach", "funny"},
-}
 
-GENRE_KEYWORDS = {
-    "bhajan": {"bhajan", "mata", "rani", "devi", "aarti", "bhakti"},
-    "qawwali": {"qawwali", "allah", "sufi", "ishq"},
-    "ghazal": {"ghazal", "shayari"},
-    "filmi": {"film", "soundtrack", "from"},
-    "disco": {"disco", "party", "dance"},
-    "folk": {"folk", "lok", "bhojpuri"},
-}
-
-RELIGION_KEYWORDS = {
-    "hindu": {"hanuman", "ram", "krishna", "shiva", "mata", "devi", "rani", "bhajan", "aarti", "guru", "sai", "om", "chalisa", "bajrang", "sankatmochan"},
-    "christian": {"yeshu", "jesus", "christ", "hallelujah", "amen", "church", "prabhu", "cross"},
-    "muslim": {"allah", "sufi", "qawwali", "nabi", "rasool", "khuda", "maula", "peer", "dargah", "naat"},
-    "sikh": {"guru", "gurbani", "waheguru", "khalsa", "panj", "sahib"},
-    "generic": set(),
-}
-THEME_KEYWORDS = {
-    "hindu_devotional": {"mata", "rani", "devi", "deva", "shiva", "ram", "krishna", "hanuman", "guru", "sai", "bulawa", "bulava", "aarti", "prabhu", "bhajan"},
-    "christian_devotional": {"yeshu", "jesus", "christ", "raja", "rani", "cross", "hallelujah", "amen"},
-    "love": {"love", "ishq", "pyaar", "pyar", "dil", "jaan", "saajan", "sanam", "mohabbat", "tujhe"},
-    "separation": {"judai", "viraha", "tanha", "bewafa", "khamoshi"},
-    "nation": {"desh", "bharat", "india", "watan", "tiranga", "soldier"},
-    "celebration": {"party", "dance", "nach", "shaadi", "wedding", "celebration"},
-    "success": {"zinda", "jeet", "success", "fighter", "struggle"},
-}
-
-def _tokens(text):
+def _tokens(text: str) -> set[str]:
     return set(re.findall(r"[a-z0-9]+", str(text).lower()))
 
-def _classify_dim(text, kw_map, default):
-    toks = _tokens(text)
-    scores = {k: len(v & toks) for k, v in kw_map.items()}
-    best = max(scores, key=lambda k: scores[k])
-    if scores[best] == 0:
-        return default, 0.3, scores
-    conf = min(1.0, scores[best] / 2.0)
-    return best, conf, scores
 
-def classify(text):
-    intent, iconf, iscores = _classify_dim(text, INTENT_KEYWORDS, "unknown")
-    mood, mconf, mscores = _classify_dim(text, MOOD_KEYWORDS, "unknown")
-    genre, gconf, gscores = _classify_dim(text, GENRE_KEYWORDS, "unknown")
-    theme, tconf, tscores = _classify_dim(text, THEME_KEYWORDS, "unknown")
-    religion, rconf, rscores = _classify_dim(text, RELIGION_KEYWORDS, "unknown")
-    return intent, iconf, iscores, mood, mconf, mscores, genre, gconf, gscores, theme, tconf, tscores, religion, rconf, rscores
+def _classify_dim_llm(text: str, dimension: str, allowed: tuple[str, ...]) -> tuple[str, float]:
+    """Classify one dimension using the LLM only. No hardcoded keywords."""
+    if _lc is None:
+        return "unknown", 0.0
+    try:
+        result = _lc.classify_text(text)
+        if not result:
+            return "unknown", 0.0
+        label = str(result.get(dimension, "unknown") or "unknown").strip().casefold()
+        confidence = float(result.get("intent_confidence", 0.0) or 0.0)
+        if label not in allowed:
+            label = "unknown"
+        return label, confidence
+    except Exception:
+        return "unknown", 0.0
+
+
+def classify(text: str) -> tuple:
+    """Classify text using the LLM only. No hardcoded keyword lists."""
+    intent, iconf = _classify_dim_llm(text, "intent", _lc._INTENTS if _lc else ())
+    mood, mconf = _classify_dim_llm(text, "mood", _lc._MOODS if _lc else ())
+    genre, gconf = _classify_dim_llm(text, "genre", _lc._SUB_GENRES if _lc else ())
+    theme, tconf = _classify_dim_llm(text, "theme", _lc._THEMES if _lc else ())
+    religion, rconf = _classify_dim_llm(text, "religion", _lc._RELIGIONS if _lc else ())
+    return (
+        intent, iconf, {},
+        mood, mconf, {},
+        genre, gconf, {},
+        theme, tconf, {},
+        religion, rconf, {},
+    )
 
 def profile(item):
-    text = " ".join(str(item.get(f, "")) for f in ("title", "artists", "album", "track_genre", "language"))
     try:
         import llm_classifier as _lc
-        llm = _lc.classify_text(text)
+        r = _lc.classify_item(item) if hasattr(_lc, "classify_item") else {}
+        if r and r.get("primary_intent") not in (None, "unknown"):
+            return r
+    except Exception:
+        pass
+    return {"primary_intent": "unknown", "intent_confidence": 0.0, "mood": "unknown", "mood_confidence": 0.0, "genre": "unknown", "genre_confidence": 0.0, "theme": "unknown", "theme_confidence": 0.0, "religion": "unknown", "religion_confidence": 0.0, "sub_genre": "unknown", "intent_source": "none"}
+    """Classify a track dict using the LLM as the primary source.
+
+    Falls back to "unknown" with low confidence when the LLM is unavailable.
+    No hardcoded keyword lists are used.
+    """
+    text = " ".join(str(item.get(f, "")) for f in ("title", "artists", "album", "track_genre", "language"))
+    try:
+        llm = _lc.classify_text(text) if _lc else {}
         if llm:
             return {
-                "primary_intent": llm.get("intent", "romantic"),
-                "intent_confidence": 0.75,
+                "primary_intent": llm.get("intent", "unknown"),
+                "intent_confidence": float(llm.get("intent_confidence", 0.0) or 0.0),
                 "mood": llm.get("mood", "unknown"),
-                "mood_confidence": 0.75,
-                "genre": llm.get("genre", "unknown"),
-                "genre_confidence": 0.75,
+                "mood_confidence": float(llm.get("intent_confidence", 0.0) or 0.0),
+                "genre": llm.get("sub_genre", "unknown"),
+                "genre_confidence": float(llm.get("intent_confidence", 0.0) or 0.0),
                 "theme": llm.get("theme", "unknown"),
-                "theme_confidence": 0.75,
+                "theme_confidence": float(llm.get("intent_confidence", 0.0) or 0.0),
                 "religion": llm.get("religion", "unknown"),
-                "religion_confidence": 0.75,
+                "religion_confidence": float(llm.get("intent_confidence", 0.0) or 0.0),
+                "sub_genre": llm.get("sub_genre", "unknown"),
+                "intent_source": "llm",
             }
     except Exception:
         pass
-    intent, iconf, iscores, mood, mconf, mscores, genre, gconf, gscores, theme, tconf, tscores, religion, rconf, rscores = classify(text)
     return {
-        "primary_intent": intent,
-        "intent_confidence": iconf,
-        "mood": mood,
-        "mood_confidence": mconf,
-        "genre": genre,
-        "genre_confidence": gconf,
-        "theme": theme,
-        "theme_confidence": tconf,
-        "religion": religion,
-        "religion_confidence": rconf,
+        "primary_intent": "unknown",
+        "intent_confidence": 0.0,
+        "mood": "unknown",
+        "mood_confidence": 0.0,
+        "genre": "unknown",
+        "genre_confidence": 0.0,
+        "theme": "unknown",
+        "theme_confidence": 0.0,
+        "religion": "unknown",
+        "religion_confidence": 0.0,
+        "sub_genre": "unknown",
+        "intent_source": "none",
     }

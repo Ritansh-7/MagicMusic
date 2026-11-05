@@ -15,5 +15,3 @@ def generate_search_concepts(profile: dict) -> list[str]:
     if era and era != "unknown":
         concepts.append(" ".join(x for x in [language, theme, "from", era] if x and x != "unknown").strip())
     return [c for c in dict.fromkeys(concepts) if c]
-EOF
-python -m py_compile candidate_generator.py; if ($?) { echo "compile_ok" }

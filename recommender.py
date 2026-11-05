@@ -1799,7 +1799,12 @@ class HybridRecommendationEngine:
                                 cand_profiles = _llc.classify_items(compatible)
                                 kept: list[dict] = []
                                 for item in compatible:
-                                    cand_p = cand_profiles.get(_llc.cache_key(item)) or _mu.profile(item)
+                                    _ck = re.sub(
+                                        r"[^a-z0-9]+",
+                                        " ",
+                                        f"{item.get('title', '')} {item.get('artists', '')} {item.get('album', '')}",
+                                    ).casefold().strip()
+                                    cand_p = cand_profiles.get(_ck) or _mu.profile(item)
                                     cand_intent = cand_p.get("primary_intent")
                                     cand_religion = cand_p.get("religion")
                                     blocked = False

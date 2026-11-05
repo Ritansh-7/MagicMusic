@@ -1283,3 +1283,119 @@ def test_logged_impression_schema_is_read_by_ranker():
     assert row[3] == 0.7
     assert row[7] == 0.4
     assert row[-1] == 2 / 70
+
+
+def test_devotional_seed_excludes_secular_film_songs():
+    """A Hanuman Chalisa seed must surface devotional tracks only, never
+    Bollywood film songs, even when they share language and era."""
+    catalog = sample_data()
+    hybrid = HybridRecommendationEngine(SpotifyRecommendationEngine(catalog))
+    seed = {
+        "title": "Shree Hanuman Chalisa",
+        "artists": "Hariharan, Lalit Sen, Chander, Traditional",
+        "album": "Shree Hanuman Chalisa (Hanuman Ashtak)",
+        "language": "hindi",
+        "year": 1992,
+        "intent_labels": ["devotional"],
+        "mood_label": "devotional",
+        "mood_confidence": 0.9,
+    }
+    candidates = [
+        {"song_id": "bajrang_baan", "title": "Bajrang Baan", "artists": "Hariharan",
+         "album": "Shree Hanuman Chalisa (Hanuman Ashtak)", "language": "hindi",
+         "year": 1992, "intent_labels": ["devotional"]},
+        {"song_id": "mera_wali_re", "title": "Merawali Re", "artists": "Bansi Tiwari",
+         "album": "Chal Mann Vaishno Dham (Mata Bhajan)", "language": "hindi",
+         "year": 1994, "intent_labels": ["devotional"]},
+        {"song_id": "humko_humare_baba_se", "title": "Humko Humare Baba Se",
+         "artists": "Sadhana Sargam", "album": "Devotional-09", "language": "hindi",
+         "year": 1998, "intent_labels": ["devotional"]},
+        {"song_id": "kuch_kuch_hota_hai", "title": "Kuch Kuch Hota Hai",
+         "artists": "Jatin-Lalit, Udit Narayan, Alka Yagnik",
+         "album": "Kuch Kuch Hota Hai", "language": "hindi", "year": 1998,
+         "intent_labels": ["romantic"]},
+        {"song_id": "tip_tip_barsa_paani", "title": "Tip Tip Barsa Paani",
+         "artists": "Alka Yagnik, Udit Narayan", "album": "Mohra",
+         "language": "hindi", "year": 1994, "intent_labels": ["romantic"]},
+    ]
+    ranked = hybrid.rank_jio_results(
+        candidates, "user-chalisa", catalog, [], seed=seed,
+    )
+    ranked_ids = {item["song_id"] for item in ranked}
+    assert "bajrang_baan" in ranked_ids
+    assert "mera_wali_re" in ranked_ids
+    assert "humko_humare_baba_se" in ranked_ids
+    assert "kuch_kuch_hota_hai" not in ranked_ids, \
+        "Bollywood film song leaked into devotional queue!"
+    assert "tip_tip_barsa_paani" not in ranked_ids, \
+        "Bollywood film song leaked into devotional queue!"
+
+
+def test_devotional_seed_excludes_other_religion_devotional():
+    """A Hindu Hanuman seed must exclude devotional tracks from a different
+    religion (e.g. Christian Yeshu songs), while keeping Hindu devotional."""
+    catalog = sample_data()
+    hybrid = HybridRecommendationEngine(SpotifyRecommendationEngine(catalog))
+    seed = {
+        "title": "Shree Hanuman Chalisa",
+        "artists": "Hariharan",
+        "album": "Shree Hanuman Chalisa (Hanuman Ashtak)",
+        "language": "hindi",
+        "year": 1992,
+        "intent_labels": ["devotional"],
+        "mood_label": "devotional",
+        "mood_confidence": 0.9,
+    }
+    candidates = [
+        {"song_id": "shiv_bhajan", "title": "Shiv Bhajan",
+         "artists": "Hariharan", "album": "Shiv Bhajans",
+         "language": "hindi", "year": 1992, "intent_labels": ["devotional"]},
+        {"song_id": "yeshu_raja", "title": "Raja - Raja Yeshu Raja",
+         "artists": "Kumar Sanu",
+         "album": "Raja Raja Yeshu Raja(Christian Devotional)",
+         "language": "hindi", "year": 1997, "intent_labels": ["devotional"]},
+    ]
+    ranked = hybrid.rank_jio_results(
+        candidates, "user-chalisa-hindu", catalog, [], seed=seed,
+    )
+    ranked_ids = {item["song_id"] for item in ranked}
+    assert "shiv_bhajan" in ranked_ids
+    assert "yeshu_raja" not in ranked_ids, \
+        "Christian devotional track leaked into Hindu devotional queue!"
+
+
+def test_secular_seed_excludes_devotional_candidates():
+    """A romantic seed must exclude devotional bhajans/chalisa candidates."""
+    catalog = sample_data()
+    hybrid = HybridRecommendationEngine(SpotifyRecommendationEngine(catalog))
+    seed = {
+        "title": "Tum Hi Ho",
+        "artists": "Arijit Singh",
+        "album": "Aashiqui 2",
+        "language": "hindi",
+        "year": 2013,
+        "intent_labels": ["romantic"],
+        "mood_label": "romantic",
+        "mood_confidence": 0.9,
+    }
+    candidates = [
+        {"song_id": "dil_se", "title": "Dil Se", "artists": "A.R. Rahman",
+         "album": "Dil Se", "language": "hindi", "year": 1998,
+         "intent_labels": ["romantic"]},
+        {"song_id": "hanuman_chalisa", "title": "Shree Hanuman Chalisa",
+         "artists": "Hariharan", "album": "Shree Hanuman Chalisa (Hanuman Ashtak)",
+         "language": "hindi", "year": 1992, "intent_labels": ["devotional"]},
+        {"song_id": "bajrang_baan", "title": "Bajrang Baan", "artists": "Hariharan",
+         "album": "Shree Hanuman Chalisa (Hanuman Ashtak)", "language": "hindi",
+         "year": 1992, "intent_labels": ["devotional"]},
+    ]
+    ranked = hybrid.rank_jio_results(
+        candidates, "user-romantic", catalog, [], seed=seed,
+    )
+    ranked_ids = {item["song_id"] for item in ranked}
+    assert "dil_se" in ranked_ids
+    assert "hanuman_chalisa" not in ranked_ids, \
+        "Devotional track leaked into romantic queue!"
+    assert "bajrang_baan" not in ranked_ids, \
+        "Devotional track leaked into romantic queue!"
+

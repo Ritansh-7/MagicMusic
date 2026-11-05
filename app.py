@@ -474,7 +474,11 @@ def enrich_live_items(items: list[dict]) -> list[dict]:
         # Fallback: classify items one by one if batch method is unavailable
         llm_profiles = {}
         for item in items:
-            key = _llc.cache_key(item)
+            key = re.sub(
+                r"[^a-z0-9]+",
+                " ",
+                f"{item.get('title', '')} {item.get('artists', '')} {item.get('album', '')}",
+            ).casefold().strip()
             profile = _llc.classify_item(item)
             if profile:
                 llm_profiles[key] = profile
@@ -523,7 +527,12 @@ def enrich_live_items(items: list[dict]) -> list[dict]:
             item.setdefault("feature_source", "live_metadata_fallback")
             item.update({key: value for key, value in infer_metadata_mood(item).items() if key not in item})
         item["intent_labels"] = infer_music_intents(item)
-        llm_p = llm_profiles.get(_llc.cache_key(item), {}) or {}
+        _cache_key_val = re.sub(
+            r"[^a-z0-9]+",
+            " ",
+            f"{item.get('title', '')} {item.get('artists', '')} {item.get('album', '')}",
+        ).casefold().strip()
+        llm_p = llm_profiles.get(_cache_key_val, {}) or {}
         if llm_p:
             item["llm_intent"] = llm_p.get("primary_intent")
             item["llm_religion"] = llm_p.get("religion")
