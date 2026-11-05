@@ -1518,10 +1518,13 @@ def build_jio_up_next(
         enriched_collected = enrich_live_items(collected)
     except Exception:
         enriched_collected = list(collected)
-    soundtrack_intents = infer_same_soundtrack_audio_intents(
-        seed,
-        enriched_collected,
-    )
+    try:
+        soundtrack_intents = infer_same_soundtrack_audio_intents(
+            seed,
+            enriched_collected,
+        )
+    except Exception:
+        soundtrack_intents = set()
     if soundtrack_intents:
         seed["intent_labels"] = sorted(
             (set(seed.get("intent_labels", [])) - {"general", "neutral"})
@@ -1530,7 +1533,10 @@ def build_jio_up_next(
         seed["intent_source"] = "same_soundtrack_audio_proxy"
     # Bhakti agent: use dedicated devotional recommender when seed is bhakti/devotional
     bhakti_agent = BhaktiAgent(llm_classifier=_llc if _llc else None, llm_enabled=_llc is not None)
-    is_bhakti_seed = bhakti_agent.is_bhakti(seed)
+    try:
+        is_bhakti_seed = bhakti_agent.is_bhakti(seed)
+    except Exception:
+        is_bhakti_seed = False
     try:
         if is_bhakti_seed:
             # Use dedicated BhaktiAgent for devotional seeds - ensures devotional
