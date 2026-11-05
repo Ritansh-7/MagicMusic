@@ -2775,9 +2775,13 @@ if jio_now:
             st.session_state["jio_queue_refill_attempted_id"] = current_id
             try:
                 refresh_hybrid_model()
-                cached_results = st.session_state.get("jio_search_cache_v4", {}).get(
-                    search_query.strip().lower(), []
-                )
+            except Exception:
+                pass
+            cached_results = st.session_state.get("jio_search_cache_v4", {}).get(
+                search_query.strip().lower() if search_query else "", []
+            )
+            fresh_queue = []
+            try:
                 fresh_queue = build_jio_up_next(
                     jio_now,
                     [*existing_queue, *cached_results],
@@ -2788,24 +2792,25 @@ if jio_now:
                     preferred_track_ids,
                     exclude_items=[jio_now] if queue_seed_changed else [jio_now, *existing_queue],
                 )
-                if queue_seed_changed:
-                    st.session_state["jio_queue"] = fresh_queue[:30]
-                    st.session_state.setdefault("jio_queue_status", {})["post_build_queue_size"] = len(fresh_queue)
-                else:
-                    merged_queue = []
-                    seen_recordings: set[str] = set()
-                    for item in [*existing_queue, *fresh_queue]:
-                        identity_keys = _recommendation_history_keys(item)
-                        if not identity_keys:
-                            merged_queue.append(item)
-                        elif not identity_keys.intersection(seen_recordings):
-                            seen_recordings.update(identity_keys)
-                            merged_queue.append(item)
-                    st.session_state["jio_queue"] = merged_queue[:30]
-                    st.session_state.setdefault("jio_queue_status", {})["post_build_queue_size"] = len(merged_queue)
-                st.session_state["jio_queue_seed_id"] = current_id
-            except Exception:
-                st.session_state["jio_queue"] = [] if queue_seed_changed else existing_queue
+            except Exception as exc:
+                st.session_state.setdefault("jio_queue_status", {})["build_error"] = type(exc).__name__
+                fresh_queue = []
+            if queue_seed_changed:
+                st.session_state["jio_queue"] = fresh_queue[:30]
+                st.session_state.setdefault("jio_queue_status", {})["post_build_queue_size"] = len(fresh_queue)
+            else:
+                merged_queue = []
+                seen_recordings: set[str] = set()
+                for item in [*existing_queue, *fresh_queue]:
+                    identity_keys = _recommendation_history_keys(item)
+                    if not identity_keys:
+                        merged_queue.append(item)
+                    elif not identity_keys.intersection(seen_recordings):
+                        seen_recordings.update(identity_keys)
+                        merged_queue.append(item)
+                st.session_state["jio_queue"] = merged_queue[:30]
+                st.session_state.setdefault("jio_queue_status", {})["post_build_queue_size"] = len(merged_queue)
+            st.session_state["jio_queue_seed_id"] = current_id
         liked_ids = set(user_store.liked_track_ids(local_user_id))
         if current_id in liked_ids:
             st.success("♥ Liked")
@@ -2832,7 +2837,7 @@ if jio_now:
                     try:
                         st.session_state["jio_queue"] = build_jio_up_next(
                             jio_now,
-                            st.session_state.get("jio_search_cache_v4", {}).get(search_query.strip().lower(), []),
+                            st.session_state.get("jio_search_cache_v4", {}).get(search_query.strip().lower() if search_query else "", []),
                             jio_client,
                             hybrid_engine,
                             local_user_id,
@@ -2841,10 +2846,10 @@ if jio_now:
                             exclude_items=[jio_now],
                         )
                     except Exception:
-                        st.session_state["jio_queue"] = existing_queue
+                        pass  # keep existing_queue untouched
                 st.session_state["jio_queue_seed_id"] = current_id
             else:
-                cached_results = st.session_state.get("jio_search_cache_v4", {}).get(search_query.strip().lower(), [])
+                cached_results = st.session_state.get("jio_search_cache_v4", {}).get(search_query.strip().lower() if search_query else "", [])
                 try:
                     st.session_state["jio_queue"] = build_jio_up_next(
                         jio_now,
@@ -2858,7 +2863,7 @@ if jio_now:
                     )
                     st.session_state["jio_queue_seed_id"] = current_id
                 except Exception:
-                    st.session_state["jio_queue"] = []
+                    pass  # leave queue as-is rather than wiping it
             st.toast("Added to your likes and taste profile")
             st.rerun()
     with now_cols[2]:
