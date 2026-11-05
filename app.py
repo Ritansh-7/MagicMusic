@@ -2892,183 +2892,185 @@ if jio_now:
         st.session_state["jio_queue_refill_attempted_id"] = ""
         st.rerun()
 
-with st.expander("Your listening analytics", expanded=True):
-    activity = cached_user_summary(
-        local_user_id,
-        session_id=st.session_state["local_session_id"],
-    )
-    st.caption("Your account only · choose a period to explore listening habits and recommendation feedback.")
-    a, b, c, d = st.columns(4)
-    a.metric("Events", activity["events"])
-    b.metric("Tracks played", activity["tracks_played"])
-    c.metric("Likes", activity["likes"])
-    live_ms = activity["listening_ms"]
-    if st.session_state.get("jio_started_at"):
-        live_ms += int(
-            max(0.0, time.time() - float(
-                st.session_state.get("jio_last_accounted_at", st.session_state["jio_started_at"])
-            )) * 1000
+if st.session_state.get("local_is_admin", False):
+    with st.expander("Your listening analytics", expanded=True):
+        activity = cached_user_summary(
+            local_user_id,
+            session_id=st.session_state["local_session_id"],
         )
-    d.metric("Listening time", f"{live_ms / 60000:.1f} min")
-    st.subheader("Listening trends")
-
-    analytics_events = pd.DataFrame(cached_user_events(local_user_id))
-    if analytics_events.empty:
-        st.info("Your charts will appear after you play or interact with a few tracks.")
-    else:
-        analytics_events["created_at"] = pd.to_datetime(
-            analytics_events["created_at"], errors="coerce", utc=True
-        )
-        analytics_events["event_type"] = analytics_events["event_type"].fillna("").astype(str)
-        analytics_events["duration_ms"] = pd.to_numeric(
-            analytics_events.get("duration_ms", 0), errors="coerce"
-        ).fillna(0)
-        analytics_events["duration_min"] = analytics_events["duration_ms"].where(
-            analytics_events["event_type"] == "listen_progress", 0
-        ) / 60000
-
-        period = st.selectbox(
-            "Time range",
-            ["Last 7 days", "Last 30 days", "Last 90 days", "All time"],
-            index=1,
-            key="listener_analytics_period",
-        )
-        period_days = {
-            "Last 7 days": 7,
-            "Last 30 days": 30,
-            "Last 90 days": 90,
-        }.get(period)
-        if period_days:
-            cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=period_days)
-            analytics_events = analytics_events[
-                analytics_events["created_at"] >= cutoff
-            ].copy()
-
-        play_types = {"jio_play", "play_start"}
-        like_types = {"jio_like", "like"}
-        skip_types = {"jio_skip", "skip"}
-        plays = analytics_events[analytics_events["event_type"].isin(play_types)]
-        likes = analytics_events[analytics_events["event_type"].isin(like_types)]
-        skips = analytics_events[analytics_events["event_type"].isin(skip_types)]
-        unique_tracks = int(plays["track_id"].nunique()) if "track_id" in plays else 0
-        play_count = len(plays)
-        like_count = len(likes)
-        skip_count = len(skips)
-        listening_minutes = float(analytics_events["duration_min"].sum())
-
-        kpis = st.columns(5)
-        kpis[0].metric("Play starts", f"{play_count:,}")
-        kpis[1].metric("Unique tracks", f"{unique_tracks:,}")
-        kpis[2].metric("Likes", f"{like_count:,}")
-        kpis[3].metric("Skips", f"{skip_count:,}")
-        kpis[4].metric("Listening time", f"{listening_minutes:.1f} min")
-
-        def parse_event_metadata(value: object) -> dict:
-            if isinstance(value, dict):
-                return value
-            try:
-                parsed = json.loads(str(value or "{}"))
-            except (TypeError, ValueError):
-                return {}
-            return parsed if isinstance(parsed, dict) else {}
-
-        analytics_events["metadata"] = analytics_events["metadata_json"].map(
-            parse_event_metadata
-        )
-        analytics_events["date"] = analytics_events["created_at"].dt.strftime("%Y-%m-%d")
-        daily = analytics_events.dropna(subset=["created_at"]).groupby("date").agg(
-            plays=("event_type", lambda values: values.isin(play_types).sum()),
-            likes=("event_type", lambda values: values.isin(like_types).sum()),
-            skips=("event_type", lambda values: values.isin(skip_types).sum()),
-            minutes=("duration_min", "sum"),
-        )
-
-        chart_left, chart_right = st.columns(2)
-        with chart_left:
-            if not daily.empty:
-                st.markdown("**Daily plays, likes and skips**")
-                st.line_chart(
-                    daily[["plays", "likes", "skips"]],
-                    height=240,
-                    alt="Daily play, like and skip counts",
-                )
-            else:
-                st.info("No dated activity in this period.")
-        with chart_right:
-            if not daily.empty:
-                st.markdown("**Listening time by day**")
-                st.area_chart(
-                    daily[["minutes"]],
-                    height=240,
-                    alt="Listening minutes per day",
-                )
-            event_mix = analytics_events["event_type"].value_counts()
-            if not event_mix.empty:
-                st.markdown("**Activity mix**")
-                st.bar_chart(
-                    event_mix.rename("events"),
-                    horizontal=True,
-                    height=220,
-                    alt="Counts of each listener event type",
-                )
-
-        def metadata_names(value: object) -> list[str]:
-            if isinstance(value, list):
-                values = [
-                    str(item.get("name", "") if isinstance(item, dict) else item).strip()
-                    for item in value
-                ]
-            else:
-                values = str(value or "").split(",")
-            return [
-                name for name in values
-                if name and name.casefold() not in {"unknown", "n/a", "na", "-"}
-            ]
-
-        artist_values: list[str] = []
-        track_values: list[str] = []
-        mood_values: list[str] = []
-        era_values: list[str] = []
-        language_values: list[str] = []
-        for event in plays.to_dict("records"):
-            metadata = event.get("metadata", {})
-            if not isinstance(metadata, dict):
-                metadata = {}
-            artist_values.extend(metadata_names(
-                metadata.get("artists") or metadata.get("artist") or metadata.get("singers")
-            ))
-            track_values.append(
-                str(metadata.get("title") or metadata.get("track_name") or event.get("track_id") or "Unknown track")
+        st.caption("Your account only · choose a period to explore listening habits and recommendation feedback.")
+        a, b, c, d = st.columns(4)
+        a.metric("Events", activity["events"])
+        b.metric("Tracks played", activity["tracks_played"])
+        c.metric("Likes", activity["likes"])
+        live_ms = activity["listening_ms"]
+        if st.session_state.get("jio_started_at"):
+            live_ms += int(
+                max(0.0, time.time() - float(
+                    st.session_state.get("jio_last_accounted_at", st.session_state["jio_started_at"])
+                )) * 1000
             )
-            mood = metadata.get("mood_label") or metadata.get("mood")
-            mood_values.extend(metadata_names(mood))
-            year = str(metadata.get("year") or "")[:4]
-            if year.isdigit() and 1900 <= int(year) <= 2100:
-                era_values.append(f"{int(year) // 10 * 10}s")
-            language = str(metadata.get("language") or "").strip()
-            if language:
-                language_values.append(language)
-
-        def show_top_counts(title: str, values: list[str], label: str) -> None:
-            counts = pd.Series(values, dtype="string").dropna().value_counts().head(10)
-            counts = counts[counts.index.astype(str).str.strip() != ""]
-            if not counts.empty:
-                st.markdown(f"**{title}**")
-                st.bar_chart(
-                    counts.rename(label),
-                    horizontal=True,
-                    height=260,
-                    alt=title,
+        d.metric("Listening time", f"{live_ms / 60000:.1f} min")
+        st.subheader("Listening trends")
+    
+        analytics_events = pd.DataFrame(cached_user_events(local_user_id))
+        if analytics_events.empty:
+            st.info("Your charts will appear after you play or interact with a few tracks.")
+        else:
+            analytics_events["created_at"] = pd.to_datetime(
+                analytics_events["created_at"], errors="coerce", utc=True
+            )
+            analytics_events["event_type"] = analytics_events["event_type"].fillna("").astype(str)
+            analytics_events["duration_ms"] = pd.to_numeric(
+                analytics_events.get("duration_ms", 0), errors="coerce"
+            ).fillna(0)
+            analytics_events["duration_min"] = analytics_events["duration_ms"].where(
+                analytics_events["event_type"] == "listen_progress", 0
+            ) / 60000
+    
+            period = st.selectbox(
+                "Time range",
+                ["Last 7 days", "Last 30 days", "Last 90 days", "All time"],
+                index=1,
+                key="listener_analytics_period",
+            )
+            period_days = {
+                "Last 7 days": 7,
+                "Last 30 days": 30,
+                "Last 90 days": 90,
+            }.get(period)
+            if period_days:
+                cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=period_days)
+                analytics_events = analytics_events[
+                    analytics_events["created_at"] >= cutoff
+                ].copy()
+    
+            play_types = {"jio_play", "play_start"}
+            like_types = {"jio_like", "like"}
+            skip_types = {"jio_skip", "skip"}
+            plays = analytics_events[analytics_events["event_type"].isin(play_types)]
+            likes = analytics_events[analytics_events["event_type"].isin(like_types)]
+            skips = analytics_events[analytics_events["event_type"].isin(skip_types)]
+            unique_tracks = int(plays["track_id"].nunique()) if "track_id" in plays else 0
+            play_count = len(plays)
+            like_count = len(likes)
+            skip_count = len(skips)
+            listening_minutes = float(analytics_events["duration_min"].sum())
+    
+            kpis = st.columns(5)
+            kpis[0].metric("Play starts", f"{play_count:,}")
+            kpis[1].metric("Unique tracks", f"{unique_tracks:,}")
+            kpis[2].metric("Likes", f"{like_count:,}")
+            kpis[3].metric("Skips", f"{skip_count:,}")
+            kpis[4].metric("Listening time", f"{listening_minutes:.1f} min")
+    
+            def parse_event_metadata(value: object) -> dict:
+                if isinstance(value, dict):
+                    return value
+                try:
+                    parsed = json.loads(str(value or "{}"))
+                except (TypeError, ValueError):
+                    return {}
+                return parsed if isinstance(parsed, dict) else {}
+    
+            analytics_events["metadata"] = analytics_events["metadata_json"].map(
+                parse_event_metadata
+            )
+            analytics_events["date"] = analytics_events["created_at"].dt.strftime("%Y-%m-%d")
+            daily = analytics_events.dropna(subset=["created_at"]).groupby("date").agg(
+                plays=("event_type", lambda values: values.isin(play_types).sum()),
+                likes=("event_type", lambda values: values.isin(like_types).sum()),
+                skips=("event_type", lambda values: values.isin(skip_types).sum()),
+                minutes=("duration_min", "sum"),
+            )
+    
+            chart_left, chart_right = st.columns(2)
+            with chart_left:
+                if not daily.empty:
+                    st.markdown("**Daily plays, likes and skips**")
+                    st.line_chart(
+                        daily[["plays", "likes", "skips"]],
+                        height=240,
+                        alt="Daily play, like and skip counts",
+                    )
+                else:
+                    st.info("No dated activity in this period.")
+            with chart_right:
+                if not daily.empty:
+                    st.markdown("**Listening time by day**")
+                    st.area_chart(
+                        daily[["minutes"]],
+                        height=240,
+                        alt="Listening minutes per day",
+                    )
+                event_mix = analytics_events["event_type"].value_counts()
+                if not event_mix.empty:
+                    st.markdown("**Activity mix**")
+                    st.bar_chart(
+                        event_mix.rename("events"),
+                        horizontal=True,
+                        height=220,
+                        alt="Counts of each listener event type",
+                    )
+    
+            def metadata_names(value: object) -> list[str]:
+                if isinstance(value, list):
+                    values = [
+                        str(item.get("name", "") if isinstance(item, dict) else item).strip()
+                        for item in value
+                    ]
+                else:
+                    values = str(value or "").split(",")
+                return [
+                    name for name in values
+                    if name and name.casefold() not in {"unknown", "n/a", "na", "-"}
+                ]
+    
+            artist_values: list[str] = []
+            track_values: list[str] = []
+            mood_values: list[str] = []
+            era_values: list[str] = []
+            language_values: list[str] = []
+            for event in plays.to_dict("records"):
+                metadata = event.get("metadata", {})
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                artist_values.extend(metadata_names(
+                    metadata.get("artists") or metadata.get("artist") or metadata.get("singers")
+                ))
+                track_values.append(
+                    str(metadata.get("title") or metadata.get("track_name") or event.get("track_id") or "Unknown track")
                 )
+                mood = metadata.get("mood_label") or metadata.get("mood")
+                mood_values.extend(metadata_names(mood))
+                year = str(metadata.get("year") or "")[:4]
+                if year.isdigit() and 1900 <= int(year) <= 2100:
+                    era_values.append(f"{int(year) // 10 * 10}s")
+                language = str(metadata.get("language") or "").strip()
+                if language:
+                    language_values.append(language)
+    
+            def show_top_counts(title: str, values: list[str], label: str) -> None:
+                counts = pd.Series(values, dtype="string").dropna().value_counts().head(10)
+                counts = counts[counts.index.astype(str).str.strip() != ""]
+                if not counts.empty:
+                    st.markdown(f"**{title}**")
+                    st.bar_chart(
+                        counts.rename(label),
+                        horizontal=True,
+                        height=260,
+                        alt=title,
+                    )
+    
+            insight_left, insight_right = st.columns(2)
+            with insight_left:
+                show_top_counts("Most played artists", artist_values, "plays")
+                show_top_counts("Most played tracks", track_values, "plays")
+            with insight_right:
+                show_top_counts("Mood mix", mood_values, "plays")
+                show_top_counts("Listening by release era", era_values, "plays")
+                show_top_counts("Listening by language", language_values, "plays")
 
-        insight_left, insight_right = st.columns(2)
-        with insight_left:
-            show_top_counts("Most played artists", artist_values, "plays")
-            show_top_counts("Most played tracks", track_values, "plays")
-        with insight_right:
-            show_top_counts("Mood mix", mood_values, "plays")
-            show_top_counts("Listening by release era", era_values, "plays")
-            show_top_counts("Listening by language", language_values, "plays")
 
 with st.expander("How this recommender works"):
     st.markdown("""
