@@ -23,6 +23,14 @@ Streamlit app: research, model evaluation, admin analytics, internal prototype
 
 ## Windows development without Docker
 
+One-command startup:
+
+```powershell
+.\start_cozybeats.ps1
+```
+
+This starts the API, Streamlit research app, and Next.js frontend if they are not already running, then opens the frontend. Logs are written to `api.log`, `streamlit.log`, and `frontend/frontend.log`.
+
 Terminal 1:
 
 ```powershell
