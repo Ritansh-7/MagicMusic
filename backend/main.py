@@ -151,6 +151,7 @@ def _catalog_fallback(seed: dict[str, Any], existing: list[dict], limit: int) ->
             "artists": artists,
             "album": str(row.get("album_name", "")),
             "track_genre": str(row.get("track_genre", "")),
+            "image_url": str(row.get("image_url", "")),
             "stream_url": "",
             "recommendation_reason": "Same genre/artist context from the local catalog",
         }
@@ -189,6 +190,7 @@ def _catalog_shelf_fallback(query: str, existing: list[dict], limit: int) -> lis
             "artists": str(row.get("artists", "")),
             "album": str(row.get("album_name", "")),
             "track_genre": str(row.get("track_genre", "")),
+            "image_url": str(row.get("image_url", "")),
             "stream_url": "",
             "recommendation_reason": "Curated from the CozyBeats catalog",
         }
@@ -253,6 +255,34 @@ async def login(request: AuthIn):
 @app.get("/v1/auth/me")
 async def me(user: dict[str, str] = Depends(current_user)):
     return {"user": user}
+
+
+@app.get("/v1/history")
+async def history(user: dict[str, str] = Depends(current_user)):
+    """Return the listener's recent playable tracks for every client layout."""
+    events = await run_in_threadpool(user_store.user_events, user["user_id"])
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for event in reversed(events):
+        if event.get("event_type") not in {"play", "play_start", "jio_play"}:
+            continue
+        try:
+            payload = json.loads(event.get("metadata_json") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        item = dict(payload)
+        item.setdefault("song_id", event.get("track_id", ""))
+        item.setdefault("title", item.get("song") or "Recently played song")
+        identity = str(item.get("song_id") or item.get("title", "")).casefold()
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        items.append(item)
+        if len(items) >= 20:
+            break
+    return {"items": items}
 
 
 @app.get("/v1/home")
