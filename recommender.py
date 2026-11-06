@@ -1195,6 +1195,122 @@ AUDIO_FEATURES = [
     "loudness", "duration_ms", "key", "mode", "time_signature"
 ]
 
+REAL_AUDIO_FIELDS = ("energy", "valence", "danceability", "tempo", "acousticness")
+_SEMANTIC_LIVE_CACHE: dict[str, np.ndarray] = {}
+_SEMANTIC_LIVE_CACHE_LIMIT = 4096
+
+
+def _real_audio_cosine(seed: dict, candidate: dict) -> float:
+    """Compare real numeric audio features when both records contain them.
+
+    Missing provider metadata is never converted to zero here. That keeps a
+    sparse live result from looking falsely similar to every other song.
+    """
+    if not all(seed.get(field) is not None and candidate.get(field) is not None for field in REAL_AUDIO_FIELDS):
+        return 0.0
+    try:
+        left = np.asarray([
+            float(seed["energy"]), float(seed["valence"]),
+            float(seed["danceability"]), float(seed["tempo"]) / 200.0,
+            float(seed["acousticness"]),
+        ], dtype=float)
+        right = np.asarray([
+            float(candidate["energy"]), float(candidate["valence"]),
+            float(candidate["danceability"]), float(candidate["tempo"]) / 200.0,
+            float(candidate["acousticness"]),
+        ], dtype=float)
+    except (TypeError, ValueError):
+        return 0.0
+    denominator = float(np.linalg.norm(left) * np.linalg.norm(right))
+    return max(0.0, float(np.dot(left, right) / denominator)) if denominator else 0.0
+
+
+def _semantic_embedding_scores(
+    content_engine: "SpotifyRecommendationEngine",
+    seed: dict,
+    candidates: list[dict],
+) -> np.ndarray:
+    """Return multilingual catalog/live semantic similarities.
+
+    Local catalog tracks reuse the precomputed embedding matrix. Unknown live
+    tracks are encoded in one batch, so a new title or artist does not need a
+    new hardcoded rule. If the optional model is unavailable, callers simply
+    receive zeros and the existing TF-IDF/audio layers continue to work.
+    """
+    try:
+        import metadata_embeddings as _me
+        local = np.asarray(content_engine.metadata_embeddings)
+        data = content_engine.data
+        if local.ndim != 2 or len(local) != len(data):
+            return np.zeros(len(candidates), dtype=float)
+
+        def key(item: dict) -> str:
+            return "|".join(
+                str(item.get(field, item.get("track_" + field, ""))).strip().casefold()
+                for field in ("title", "artists", "album", "track_genre")
+            )
+
+        local_keys: dict[str, int] = {}
+        for index, row in data.iterrows():
+            local_keys.setdefault(key({
+                "title": row.get("track_name", ""),
+                "artists": row.get("artists", ""),
+                "album": row.get("album_name", ""),
+                "track_genre": row.get("track_genre", ""),
+            }), int(index))
+
+        seed_key = key(seed)
+        seed_vector = local[local_keys[seed_key]] if seed_key in local_keys else None
+        unknown_items: list[dict] = []
+        candidate_vectors: list[np.ndarray | None] = []
+        for item in candidates:
+            index = local_keys.get(key(item))
+            if index is None:
+                unknown_items.append(item)
+                candidate_vectors.append(None)
+            else:
+                candidate_vectors.append(local[index])
+        seed_text = _me.build_track_text({
+                "track_name": seed.get("title", ""),
+                "artists": seed.get("artists", ""),
+                "album_name": seed.get("album", ""),
+                "track_genre": seed.get("track_genre", seed.get("genre", "")),
+            })
+        unknown_texts = [_me.build_track_text({
+                    "track_name": item.get("title", ""),
+                    "artists": item.get("artists", ""),
+                    "album_name": item.get("album", ""),
+                    "track_genre": item.get("track_genre", item.get("genre", "")),
+                }) for item in unknown_items]
+        requested_texts = [seed_text, *unknown_texts] if (seed_vector is None or unknown_items) else []
+        missing_texts = list(dict.fromkeys(text for text in requested_texts if text not in _SEMANTIC_LIVE_CACHE))
+        if missing_texts:
+            model = _me.get_model()
+            encoded = np.asarray(model.encode(missing_texts, normalize_embeddings=True, show_progress_bar=False))
+            for text, vector in zip(missing_texts, encoded):
+                _SEMANTIC_LIVE_CACHE[text] = np.asarray(vector, dtype=float)
+            while len(_SEMANTIC_LIVE_CACHE) > _SEMANTIC_LIVE_CACHE_LIMIT:
+                _SEMANTIC_LIVE_CACHE.pop(next(iter(_SEMANTIC_LIVE_CACHE)))
+        if seed_vector is None:
+            seed_vector = _SEMANTIC_LIVE_CACHE.get(seed_text)
+        if unknown_items:
+            unknown_iter = iter(unknown_texts)
+            for index, vector in enumerate(candidate_vectors):
+                if vector is None:
+                    candidate_vectors[index] = _SEMANTIC_LIVE_CACHE.get(next(unknown_iter))
+        if seed_vector is None:
+            return np.zeros(len(candidates), dtype=float)
+        seed_vector = np.asarray(seed_vector, dtype=float)
+        scores = []
+        for vector in candidate_vectors:
+            if vector is None:
+                scores.append(0.0)
+                continue
+            scores.append(float(np.clip(np.dot(seed_vector, np.asarray(vector, dtype=float)), 0.0, 1.0)))
+        return np.asarray(scores, dtype=float)
+    except Exception:
+        return np.zeros(len(candidates), dtype=float)
+
 
 class SpotifyRecommendationEngine:
     """
@@ -1993,6 +2109,11 @@ class HybridRecommendationEngine:
         seed_feature_tokens = _semantic_metadata_tokens(seed or {})
         seed_confidence = float((seed or {}).get("mood_confidence", 0.0) or 0.0)
         seed_intents = _infer_candidate_intents(seed or {})
+        # Semantic embeddings are the generalisation layer for new titles,
+        # artists and genres that have never appeared in a keyword rule.
+        semantic_embedding_scores = _semantic_embedding_scores(
+            self.content_engine, seed or {}, results
+        )
 
         def mood_similarity(item: dict) -> float:
             item_mood = np.asarray(item.get("mood_vector", []), dtype=float)
@@ -2045,7 +2166,7 @@ class HybridRecommendationEngine:
             if value.strip()
         ]
         seed_album = str((seed or {}).get("album", "")).strip().lower()
-        for item in results:
+        for item_index, item in enumerate(results):
             artist = str(item.get("artists", "")).lower()
             title = str(item.get("title", "")).lower()
             language = str(item.get("language", "")).lower()
@@ -2103,6 +2224,11 @@ class HybridRecommendationEngine:
                 and language_match
             ):
                 era_language_fallback = True
+            # A compilation label is not soundtrack evidence by itself. Do
+            # not let a same-artist record from that generic compilation pass
+            # solely on language/year; it needs real audio or a named work.
+            if compilation_context and seed_artist_match and not item_source_work:
+                era_language_fallback = False
             seed_cluster = (seed or {}).get("cluster_id")
             item_cluster = item.get("cluster_id")
             cluster_match = (
@@ -2128,6 +2254,7 @@ class HybridRecommendationEngine:
             mood_match = mood_similarity(item)
             listener_mood_match = listener_mood_similarity(item)
             listener_era_match = listener_era_similarity(item_year)
+            real_audio_match = _real_audio_cosine(seed or {}, item)
             # Cosine similarity is audio evidence only when both sides have
             # real catalog features. Metadata fallback vectors must not
             # masquerade as audio.
@@ -2135,8 +2262,20 @@ class HybridRecommendationEngine:
                 str((seed or {}).get("mood_source", "")) == "local_audio_catalog"
                 and str(item.get("mood_source", "")) == "local_audio_catalog"
             ) else 0.0
+            audio_match = max(audio_match, real_audio_match)
             metadata_similarity = _sparse_cosine(
                 seed_feature_tokens, _semantic_metadata_tokens(item)
+            )
+            semantic_embedding_match = float(
+                semantic_embedding_scores[item_index]
+                if item_index < len(semantic_embedding_scores)
+                else 0.0
+            )
+            # Semantic embeddings are general-purpose evidence; keep the
+            # sparse metadata signal too because it is more interpretable.
+            metadata_similarity = max(
+                metadata_similarity,
+                0.70 * semantic_embedding_match + 0.30 * metadata_similarity,
             )
             intent_match = (
                 len(seed_intents.intersection(item_intents)) / max(len(seed_intents), 1)
@@ -2182,6 +2321,8 @@ class HybridRecommendationEngine:
             item["_listener_mood_match"] = listener_mood_match
             item["_listener_era_match"] = listener_era_match
             item["_audio_match"] = audio_match
+            item["_real_audio_match"] = real_audio_match
+            item["_semantic_embedding_match"] = semantic_embedding_match
             item["_metadata_score"] = metadata_score
             item["_feature_tokens"] = _metadata_feature_tokens(item)
             item["_metadata_similarity"] = metadata_similarity
@@ -2202,6 +2343,8 @@ class HybridRecommendationEngine:
                 and "devotional" in item_intents
             ):
                 item["recommendation_reason"] = "Same devotional style"
+            elif real_audio_match >= 0.86 and semantic_embedding_match >= 0.70:
+                item["recommendation_reason"] = "Similar real audio profile and semantic context"
             elif audio_verified and mood_match >= 0.78 and same_era:
                 item["recommendation_reason"] = "Similar mood, era and sound"
             elif audio_verified and mood_match >= 0.78 and era_delta:
@@ -2413,11 +2556,13 @@ class HybridRecommendationEngine:
                         <= MAX_RECOMMENDATION_YEAR_DISTANCE
                         and float(item.get("_language_match", 0.0)) >= 1.0
                         and not seed_intents
+                        and not (compilation_context and float(item.get("_seed_artist_match", 0.0)) >= 1.0 and not item.get("_album_match", 0.0))
                     )
                     or (
                         float(item.get("_seed_artist_match", 0.0)) >= 1.0
                         and year_compatible
                         and not bool(item.get("_intent_conflict", False))
+                        and not (compilation_context and not item_source_work)
                     )
                     or (
                         float(item.get("_metadata_score", 0.0)) >= 0.55
@@ -2461,7 +2606,10 @@ class HybridRecommendationEngine:
                 )
                 if low_confidence_seed and (
                     (direct_artist_evidence and mood_evidence)
-                    or sparse_metadata_bridge
+                    or (
+                        sparse_metadata_bridge
+                        and not (compilation_context and direct_artist_evidence and not item_source_work)
+                    )
                 ):
                     strong_context = True
                 # Do not recommend a known different-language track merely
@@ -2617,6 +2765,8 @@ class HybridRecommendationEngine:
                 "collaborative": round(float(chosen.get("_collaborative_score", 0.0)), 4),
                 "mood": round(float(chosen.get("_mood_match", 0.0)), 4),
                 "audio": round(float(chosen.get("_audio_match", 0.0)), 4),
+                "real_audio": round(float(chosen.get("_real_audio_match", 0.0)), 4),
+                "semantic_embedding": round(float(chosen.get("_semantic_embedding_match", 0.0)), 4),
                 "intent": round(float(chosen.get("_intent_match", 0.0)), 4),
                 "metadata": round(float(chosen.get("_metadata_score", 0.0)), 4),
                 "era": round(float(chosen.get("_era_match", 0.0)), 4),
@@ -2648,6 +2798,6 @@ class HybridRecommendationEngine:
         for item in selected:
             item.pop("_context_score", None)
             item.pop("_profile_score", None)
-            for key in ("_seed_artist_match", "_album_match", "_language_match", "_language_conflict", "_era_match", "_cluster_match", "_style_match", "_mood_match", "_listener_mood_match", "_listener_era_match", "_audio_match", "_metadata_score", "_collaborative_score", "_feature_tokens", "_metadata_similarity", "_intent_match", "_intent_conflict", "_era_delta", "_same_era", "_short_term", "_medium_term", "_long_term"):
+        for key in ("_seed_artist_match", "_album_match", "_language_match", "_language_conflict", "_era_match", "_cluster_match", "_style_match", "_mood_match", "_listener_mood_match", "_listener_era_match", "_audio_match", "_real_audio_match", "_semantic_embedding_match", "_metadata_score", "_collaborative_score", "_feature_tokens", "_metadata_similarity", "_intent_match", "_intent_conflict", "_era_delta", "_same_era", "_short_term", "_medium_term", "_long_term"):
                 item.pop(key, None)
         return selected
