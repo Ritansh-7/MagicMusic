@@ -71,6 +71,60 @@ def _compact_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
 
 
+# Genre/form words that describe the devotional FORM of the music. A
+# Bollywood film song can mention a deity name ("bhagwan", "shiva", "ram")
+# without being devotional music, so a single generic deity token must never
+# by itself classify a seed as bhakti. These words, by contrast, describe
+# the musical form (bhajan, chalisa, aarti, stotram, mantra, dhun, ...).
+BHAKTI_GENRE_TOKENS: set[str] = {
+    "bhajan", "aarti", "chalisa", "kirtan", "stuti", "mantra", "dhun",
+    "stotram", "stotra", "namaskar", "namo", "ashtak", "sahstranam",
+    "sahastranam", "kavach", "pooja", "archana", "deepa", "deep", "diya",
+    "tilak", "sindoor", "mangal", "prasad", "bhog", "bhandara", "langar",
+    "gurdwara", "mandir", "temple", "ashram", "math", "peeth", "peetham",
+    "satsang", "gayatri", "japa", "yagna", "havan", "deepak", "ganga",
+    "yamuna", "kailash", "trishul", "damru", "rudra", "shivay", "bhole",
+    "gopal", "govind", "hare", "krishna", "ram", "shree", "sita", "radhe",
+    "radha",
+}
+
+
+def is_strong_bhakti_seed(item: dict[str, Any]) -> bool:
+    """Decide whether a SEED track is genuinely devotional music.
+
+    ``is_bhakti_skill_match`` is intentionally lenient: it is used to surface
+    devotional *candidates* from a broad pool, where missing a real bhajan
+    is worse than a false positive.  A seed is different — classifying a
+    secular film song as a bhakti seed wipes out the whole recommendation
+    queue, because the bhakti gate then demands devotional-only candidates.
+
+    A seed is only considered bhakti when it shows a strong form signal:
+      1. a genre/form token in the title (bhajan, chalisa, aarti, ...), or
+      2. two or more bhakti tokens in the title, or
+      3. a genre token in the album plus at least one bhakti token in the
+         title (covers albums like "Shiva Stotram" with varied track titles).
+
+    A single generic deity token ("bhagwan", "shiva", "ram") in a film song
+    title is explicitly NOT enough.
+    """
+    title_key = _compact_key(item.get("title", ""))
+    album_key = _compact_key(item.get("album", ""))
+    title_tokens = _tokens(item.get("title", ""))
+    album_tokens = _tokens(item.get("album", ""))
+
+    title_genre = title_tokens & BHAKTI_GENRE_TOKENS
+    album_genre = album_tokens & BHAKTI_GENRE_TOKENS
+    title_bhakti = title_tokens & BHAKTI_SKILL["bhakti_tokens"]
+
+    if title_genre:
+        return True
+    if len(title_bhakti) >= 2:
+        return True
+    if album_genre and title_bhakti:
+        return True
+    return False
+
+
 def is_bhakti_skill_match(item: dict[str, Any]) -> bool:
     text_parts = [
         str(item.get("title", "")),

@@ -12,6 +12,7 @@ from bhakti_skill import (
     bhakti_score,
     infer_bhakti_mood,
     is_bhakti_skill_match,
+    is_strong_bhakti_seed,
     resolve_deity,
 )
 
@@ -58,6 +59,9 @@ class BhaktiAgent:
         return results
 
     def is_bhakti(self, item):
+        # Lenient by design: used to surface devotional CANDIDATES from a
+        # broad pool, where missing a real bhajan is worse than a false
+        # positive. Seed classification uses is_strong_bhakti_seed instead.
         if is_bhakti_skill_match(item):
             return True
         if self.llm_enabled and self.llm:
@@ -94,7 +98,12 @@ class BhaktiAgent:
     def _seed_is_devotional(self, seed: dict, seed_profile: dict) -> bool:
         if seed_profile.get("primary_intent") == "devotional":
             return True
-        return is_bhakti_skill_match(seed)
+        # is_strong_bhakti_seed (not is_bhakti_skill_match) is used here:
+        # a single generic deity token in a Bollywood film title ("Ye Toh
+        # Sach Hai Ke Bhagwan") must not classify the seed as devotional,
+        # because the bhakti gate would then demand devotional-only
+        # candidates and wipe out the whole queue.
+        return is_strong_bhakti_seed(seed)
 
     def _is_devotional_item(self, item: dict) -> bool:
         if is_bhakti_skill_match(item):

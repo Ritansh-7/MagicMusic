@@ -42,11 +42,48 @@ from search_ranking import (
 from spotify_api import SpotifyOAuth, new_oauth_state, verify_oauth_state
 from user_store import UserStore
 from bhakti_agent import BhaktiAgent, quick_bhakti_recommend, is_devotional
+from bhakti_skill import is_strong_bhakti_seed
 
 ERA_COMPATIBILITY_WINDOW_YEARS = 30
 
 st.set_page_config(page_title="CozyBeats | NextGen Recommender", page_icon="🎧", layout="wide")
 
+# Initialize recommendation queue in session state if not present
+# This ensures recommendations persist across Streamlit reruns
+if "jio_queue" not in st.session_state:
+    st.session_state["jio_queue"] = []
+if "jio_now_playing" not in st.session_state:
+    st.session_state["jio_now_playing"] = None
+if "jio_current_track_id" not in st.session_state:
+    st.session_state["jio_current_track_id"] = None
+if "jio_queue_seed_id" not in st.session_state:
+    st.session_state["jio_queue_seed_id"] = None
+if "jio_loop" not in st.session_state:
+    st.session_state["jio_loop"] = False
+if "jio_recommendation_history" not in st.session_state:
+    st.session_state["jio_recommendation_history"] = set()
+if "jio_queue_refill_attempted_id" not in st.session_state:
+    st.session_state["jio_queue_refill_attempted_id"] = None
+if "jio_queue_attempted_id" not in st.session_state:
+    st.session_state["jio_queue_attempted_id"] = None
+if "jio_started_at" not in st.session_state:
+    st.session_state["jio_started_at"] = time.time()
+if "jio_last_accounted_at" not in st.session_state:
+    st.session_state["jio_last_accounted_at"] = time.time()
+if "jio_queue_status" not in st.session_state:
+    st.session_state["jio_queue_status"] = {
+        "seed": "",
+        "candidates_retrieved": 0,
+        "relevant_candidates": 0,
+        "provider_failures": 0,
+        "ranking_error": "none",
+        "error_detail": "none",
+        "candidate_sources": [],
+        "post_build_queue_size": 0,
+        "render_input_queue_size": 0,
+        "render_output_queue_size": 0,
+        "render_dedup_dropped": 0,
+    }
 # A small bidirectional Streamlit component is used for the player because
 # st.audio does not expose the browser's `ended` event to Python. The event
 # lets the server advance the already-ranked queue without requiring a click.
@@ -463,25 +500,29 @@ def build_live_title_lookup(data: pd.DataFrame) -> list[dict]:
     return lookup
 
 
-def enrich_live_items(items: list[dict]) -> list[dict]:
-    """Attach local audio features while preserving fuzzy-match provenance."""
-    # Classify every live item once via the LLM (cached, no network without a
-    # key) so intent/religion labels are accurate for downstream ranking and
-    # the strict intent gate in rank_jio_results.
-    try:
-        llm_profiles = _llc.classify_items(items)
-    except AttributeError:
-        # Fallback: classify items one by one if batch method is unavailable
-        llm_profiles = {}
-        for item in items:
-            key = re.sub(
-                r"[^a-z0-9]+",
-                " ",
-                f"{item.get('title', '')} {item.get('artists', '')} {item.get('album', '')}",
-            ).casefold().strip()
-            profile = _llc.classify_item(item)
-            if profile:
-                llm_profiles[key] = profile
+def enrich_live_items(items: list[dict], *, classify_with_llm: bool = False) -> list[dict]:
+    """Attach local audio features while preserving fuzzy-match provenance.
+
+    Live search/recommendation requests stay on the fast local metadata path by
+    default. Calling an LLM once per uncached provider row made a 40-candidate
+    queue wait for many request timeouts before the already-ranked results could
+    render. LLM enrichment remains opt-in for offline/admin workflows.
+    """
+    llm_profiles: dict[str, dict] = {}
+    if classify_with_llm:
+        try:
+            llm_profiles = _llc.classify_items(items)
+        except AttributeError:
+            # Fallback: classify items one by one if batch method is unavailable
+            for item in items:
+                key = re.sub(
+                    r"[^a-z0-9]+",
+                    " ",
+                    f"{item.get('title', '')} {item.get('artists', '')} {item.get('album', '')}",
+                ).casefold().strip()
+                profile = _llc.classify_item(item)
+                if profile:
+                    llm_profiles[key] = profile
     for item in items:
         title = _compact_key(item.get("title", ""))
         artist_names = str(item.get("artists", "")).split(",")
@@ -1218,6 +1259,12 @@ def build_jio_up_next(
     """Build a separate recommendation queue; never reuse search results."""
     # Ensure the playing seed has the same mood representation as candidates,
     # including when it came from the player refresh path rather than search.
+    # Defensive: ensure seed is a dict; if list passed, convert or use empty seed
+    if isinstance(seed, list):
+        # If seed is a list (e.g. from cached results), use the first item or empty dict
+        seed = seed[0] if seed else {}
+    elif not isinstance(seed, dict):
+        seed = {}
     try:
         seed = enrich_live_items([seed])[0]
     except Exception:
@@ -1423,6 +1470,9 @@ def build_jio_up_next(
     # Exclude only the current seed and explicit old-queue items; excluding the
     # entire search shelf was the reason small searches produced empty queues.
     search_ids: set[str] = set()
+    # Session-level recommendation history is used as a hard freshness
+    # constraint: songs already recommended for a different seed this
+    # session are not resurrected by broad repeat-term queries.
     seen_recommendation_keys = st.session_state.setdefault(
         "jio_recommendation_history", set()
     )
@@ -1434,7 +1484,34 @@ def build_jio_up_next(
     search_titles = {_recommendation_title_key(seed.get("title", ""))}
     for item in [seed, *(exclude_items or [])]:
         search_ids.add(str(item.get("song_id") or item.get("title", "")))
+    # Shared state is threaded through every stage (initial discovery,
+    # expansion wave, safety floor, desperate pad, emergency hard floor) so
+    # that the same generic evergreen songs are never re-fetched under
+    # different candidate_source tags. This is the root cause of the
+    # "again same recommendations" loop: broad repeat terms like
+    # "bollywood hits" / "hindi songs" each had their own local `seen`
+    # set, so the same top songs were added repeatedly and then ranked
+    # identically on every refresh.
+    shared_state = {
+        "seen": seen,
+        "search_ids": search_ids,
+        "collected": collected,
+    }
+    seen.update(_recommendation_history_keys(seed))
+    if exclude_items:
+        for excluded_item in exclude_items:
+            if isinstance(excluded_item, dict):
+                seen.update(_recommendation_history_keys(excluded_item))
     def collect_items(items: list[dict], source: str = "metadata_discovery") -> None:
+        # Block items already in the current pipeline's `seen` set
+        # (collected items), the current search shelf (`search_ids`),
+        # and the current seed's title. Do NOT use the session-level
+        # `jio_recommendation_history` here: it is global across seeds,
+        # and for same-seed refreshes the good candidate songs (which were
+        # already recommended for this seed) must remain available to the
+        # ranker so it can re-rank them with updated diversity scoring.
+        # Cross-seed blocking is handled by `exclude_items`, which is added
+        # to `search_ids` above.
         for item in items:
             key = str(item.get("song_id") or item.get("title", ""))
             title_key = _recommendation_title_key(item.get("title", ""))
@@ -1443,22 +1520,23 @@ def build_jio_up_next(
                 not key
                 or not title_key
                 or not identity_keys
-                or key in seen
-                or identity_keys.intersection(seen_recommendation_keys)
-                or identity_keys.intersection(seen)
-                or key in search_ids
+                or key in shared_state["seen"]
+                or identity_keys.intersection(shared_state["seen"])
+                or key in shared_state["search_ids"]
                 or title_key in search_titles
             ):
                 continue
-            seen.add(key)
-            seen.update(identity_keys)
+            shared_state["seen"].add(key)
+            shared_state["seen"].update(identity_keys)
             item.setdefault("candidate_source", source)
-            collected.append(item)
+            shared_state["collected"].append(item)
 
     def collect_queries(queries: list[str], page_limit: int = 12, max_queries: int = 16, source: str = "metadata_discovery") -> None:
         # One bounded concurrent wave is faster than sequential batches. The
         # upstream client is cached, so repeated songs do not cause repeated
-        # network work across Streamlit reruns.
+        # network work across Streamlit reruns. All stages share `shared_state`
+        # so duplicates across stages are blocked before any request is
+        # issued, not silently appended after the fact.
         queries = list(dict.fromkeys(query for query in queries if query))[:max_queries]
         if not queries:
             return
@@ -1478,15 +1556,15 @@ def build_jio_up_next(
         [dict(item) for item in search_results if isinstance(item, dict)],
         source="seed_search_results",
     )
-    collect_queries(prioritized_queries, page_limit=30, max_queries=20, source="seed_title_album_artist")
+    collect_queries(prioritized_queries, page_limit=20, max_queries=8, source="seed_title_album_artist")
     soundtrack_peer_queries = _era_artist_discovery_queries(
         seed_year,
         _soundtrack_peer_artists(seed, collected),
     )
     collect_queries(
         soundtrack_peer_queries,
-        page_limit=30,
-        max_queries=6,
+        page_limit=20,
+        max_queries=4,
         source="soundtrack_peer_era",
     )
     # Artist radio needs the provider's expanded catalogue endpoint. The
@@ -1512,8 +1590,8 @@ def build_jio_up_next(
                 set(seed.get("intent_labels", [])),
             )
             + _era_artist_discovery_queries(seed_year, artist_names),
-            page_limit=30,
-            max_queries=8,
+            page_limit=20,
+            max_queries=4,
             source="seed_inferred_era_mood",
         )
     enriched_collected = []
@@ -1537,7 +1615,13 @@ def build_jio_up_next(
     # Bhakti agent: use dedicated devotional recommender when seed is bhakti/devotional
     bhakti_agent = BhaktiAgent(llm_classifier=_llc if _llc else None, llm_enabled=_llc is not None)
     try:
-        is_bhakti_seed = bhakti_agent.is_bhakti(seed)
+        # is_strong_bhakti_seed (not is_bhakti_skill_match): a single generic
+        # deity token in a Bollywood film title ("Ye Toh Sach Hai Ke Bhagwan")
+        # must not classify the seed as devotional, because the bhakti gate
+        # would then demand devotional-only candidates and wipe the queue.
+        is_bhakti_seed = is_strong_bhakti_seed(seed) or bool(
+            _llc and _llc.classify_item(seed).get("primary_intent") == "devotional"
+        )
     except Exception:
         is_bhakti_seed = False
     try:
@@ -1610,7 +1694,7 @@ def build_jio_up_next(
                 seed_language,
                 seed_intents_set,
                 artist_names,
-                max_singers=8,
+                max_singers=4,
             )
         )
         # Iconic era film soundtrack queries (e.g. Sultan/Bhaag Milkha Bhaag for 2010s motivational)
@@ -1619,7 +1703,7 @@ def build_jio_up_next(
                 seed_year,
                 seed_language,
                 seed_intents_set,
-                max_films=6,
+                max_films=3,
             )
         )
         if era_term:
@@ -1803,6 +1887,9 @@ def build_jio_up_next(
         "ranking_error_detail": ranking_error_detail,
         "candidate_sources": sorted({str(item.get("candidate_source", "unknown")) for item in collected}),
     }
+    # Provider/ranker adapters should return dictionaries, but one malformed
+    # row must not abort queue construction after ranking has succeeded.
+    ranked = [item for item in ranked if isinstance(item, dict)]
 
     if not ranked:
         # No candidates survived every floor; still return an empty queue so
@@ -1823,19 +1910,19 @@ def build_jio_up_next(
     # "Dhaam" vs "Dham"). Collapse them by core title tokens and substring
     # overlap so one song never repeats in a queue.
     def _core_title_key(item: dict) -> str:
-        title = recommendation_title_key(item.get("title", ""))
+        title = _recommendation_title_key(item.get("title", ""))
         return " ".join(title.split()[:6])
 
     seen_core: set[str] = set()
     deduped: list[dict] = []
     for item in unique:
-        item_title = recommendation_title_key(item.get("title", ""))
+        item_title = _recommendation_title_key(item.get("title", ""))
         core = _core_title_key(item)
         if core and core in seen_core:
             continue
         is_subset = False
         for existing in deduped:
-            existing_title = recommendation_title_key(existing.get("title", ""))
+            existing_title = _recommendation_title_key(existing.get("title", ""))
             if not existing_title or not item_title:
                 continue
             shorter, longer = (
@@ -1860,7 +1947,27 @@ def build_jio_up_next(
         ]
         if bhakti_unique:
             unique = bhakti_unique
-    queue = unique[:limit]
+    # Never allow a falsey/invalid limit to turn a successful ranking into an
+    # empty queue. Some rerun paths can carry an old zero-like widget value.
+    try:
+        effective_limit = max(1, int(limit or 0))
+    except (TypeError, ValueError):
+        effective_limit = 35
+    queue = unique[:effective_limit]
+    # A non-empty ranking must never become an empty UI queue because of an
+    # over-aggressive identity/near-duplicate pass. This can happen when a
+    # provider returns incomplete metadata or multiple releases collapse to
+    # the same canonical key. Keep the ranked order as the last-resort
+    # displayable result; the player still excludes the seed upstream.
+    dedup_fallback_used = bool(ranked and not queue)
+    if dedup_fallback_used:
+        queue = list(ranked[:effective_limit])
+    queue_status = st.session_state.setdefault("jio_queue_status", {})
+    queue_status["post_dedup_queue_size"] = len(queue)
+    queue_status["ranked_queue_size"] = len(ranked)
+    queue_status["unique_queue_size"] = len(unique)
+    queue_status["effective_limit"] = effective_limit
+    queue_status["dedup_fallback_used"] = dedup_fallback_used
     seen_recommendation_keys.update(
         identity_key
         for item in queue
@@ -2640,6 +2747,9 @@ else:
                         if st.button("▶ Play", key=f"jio_play_{i}_{song_id or title}", width="stretch"):
                             # Set the selected song first; recommendation
                             # fetching must never make the player disappear.
+                            # Recommendations are generated on the next render
+                            # via the refill block (queue_seed_changed = True
+                            # because jio_queue_seed_id is popped below).
                             st.session_state["jio_now_playing"] = item
                             st.session_state["scroll_to_player"] = True
                             st.session_state["jio_queue"] = []
@@ -2793,8 +2903,19 @@ if jio_now:
                     exclude_items=[jio_now] if queue_seed_changed else [jio_now, *existing_queue],
                 )
             except Exception as exc:
-                st.session_state.setdefault("jio_queue_status", {})["build_error"] = type(exc).__name__
-                fresh_queue = []
+                queue_status = st.session_state.setdefault("jio_queue_status", {})
+                queue_status["build_error"] = type(exc).__name__
+                queue_status["build_error_detail"] = str(exc)
+                # Ranking already retrieved valid provider rows. If the final
+                # queue shaping step fails on malformed metadata, keep those
+                # rows visible instead of replacing them with an empty queue.
+                fallback_pool = [*existing_queue, *cached_results]
+                fresh_queue = [
+                    dict(item)
+                    for item in fallback_pool
+                    if isinstance(item, dict)
+                    and str(item.get("song_id") or item.get("title", "")) != current_id
+                ][:30]
             if queue_seed_changed:
                 st.session_state["jio_queue"] = fresh_queue[:30]
                 st.session_state.setdefault("jio_queue_status", {})["post_build_queue_size"] = len(fresh_queue)
@@ -2888,6 +3009,13 @@ if jio_now:
             up_next.append(item)
         else:
             dedup_dropped += 1
+    # Keep the generated queue visible if all entries share incomplete or
+    # provider-collided identity metadata. The recommendation engine already
+    # ranked this list; hiding it would incorrectly report "fresh picks"
+    # despite successful retrieval and ranking.
+    if raw_up_next and not up_next:
+        up_next = list(raw_up_next)
+        st.session_state.setdefault("jio_queue_status", {})["render_dedup_fallback_used"] = True
     st.session_state.setdefault("jio_queue_status", {})["render_output_queue_size"] = len(up_next)
     st.session_state.setdefault("jio_queue_status", {})["render_dedup_dropped"] = dedup_dropped
     st.session_state["jio_queue"] = up_next
@@ -3023,6 +3151,19 @@ if jio_now:
                     "Provider failures": status.get("provider_query_failures", 0),
                     "Ranking error": status.get("ranking_error") or "none",
                     "Error detail": status.get("ranking_error_detail") or "none",
+                    "Queue after build": status.get("post_build_queue_size", 0),
+                    "Queue after dedup": status.get("post_dedup_queue_size", 0),
+                    "Ranked queue size": status.get("ranked_queue_size", 0),
+                    "Unique queue size": status.get("unique_queue_size", 0),
+                    "Effective queue limit": status.get("effective_limit", 0),
+                    "Queue at render": status.get("render_input_queue_size", 0),
+                    "Queue shown": status.get("render_output_queue_size", 0),
+                    "Build error": status.get("build_error", "none"),
+                    "Build error detail": status.get("build_error_detail", "none"),
+                    "Dedup fallback used": bool(
+                        status.get("dedup_fallback_used")
+                        or status.get("render_dedup_fallback_used")
+                    ),
                     "Candidate sources": status.get("candidate_sources", []),
                 })
     if st.session_state.pop("scroll_to_player", False):
