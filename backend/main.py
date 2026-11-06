@@ -289,17 +289,18 @@ async def history(user: dict[str, str] = Depends(current_user)):
 async def home(user: dict[str, str] = Depends(current_user)):
     categories = {
         "Hindi picks": "hindi songs",
-        "English / global": "english pop hits",
-        "Romantic": "hindi romantic songs",
-        "Classics": "hindi evergreen classics",
-        "Chill": "chill acoustic songs",
-        "Trending": "latest popular songs",
+        "Bollywood romance": "hindi romantic bollywood songs",
+        "Hindi classics": "hindi evergreen classic songs",
+        "Punjabi hits": "punjabi hit songs",
+        "English pop": "english pop hits",
+        "English chill": "english chill acoustic songs",
+        "Global trending": "latest english popular songs",
         "Motivation": "motivational workout songs",
         "Devotional": "hindi devotional bhajan songs",
     }
     # Home shelves are curated by category, so share them across users. User-specific
     # ranking stays in /v1/recommendations; this prevents one provider fan-out per user.
-    cache_key = _key("home", "catalog-v3-160")
+    cache_key = _key("home", "catalog-v4-bilingual-160")
     cached = cache.get_json(cache_key)
     if cached is not None:
         return {"shelves": cached, "cached": True}
