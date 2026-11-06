@@ -22,6 +22,12 @@ nav .nav-active, nav button:hover { background: #1d2b3d; color: var(--text); }
 .eyebrow { color: var(--green); font-size: 12px; letter-spacing: 2px; text-transform: uppercase; margin: 0 0 8px; }
 .topbar h1 { font-size: 36px; margin: 0; }
 .profile { background: #293455; border: 1px solid #53618c; border-radius: 50%; padding: 12px 10px; font-size: 13px; }
+.profile-wrap { position: relative; }
+.profile { cursor: pointer; color: var(--text); }
+.account-menu { position: absolute; z-index: 10; top: calc(100% + 10px); right: 0; width: 220px; padding: 14px; display: grid; gap: 8px; border: 1px solid #3b4866; border-radius: 14px; background: rgba(16, 23, 40, .98); box-shadow: 0 18px 40px #0008; }
+.account-menu span { color: var(--muted); font-size: 11px; }
+.account-menu b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-menu button { border: 1px solid #3b4866; border-radius: 9px; padding: 9px; color: var(--text); background: #18223a; cursor: pointer; }
 .searchbar { display: flex; gap: 10px; margin: 32px 0; }
 .searchbar input, .auth-card input { flex: 1; min-width: 0; background: #131c31; border: 1px solid #35425e; color: var(--text); border-radius: 12px; padding: 15px 18px; font-size: 15px; outline: none; }
 .searchbar button, .play, .primary-action { background: var(--green); border: 0; color: #08120f; border-radius: 10px; padding: 0 22px; font-weight: 800; cursor: pointer; }
@@ -38,6 +44,7 @@ nav .nav-active, nav button:hover { background: #1d2b3d; color: var(--text); }
 .card { min-width: 0; cursor: pointer; }
 .art { aspect-ratio: 1; background: linear-gradient(135deg, #27375b, #512e67); border-radius: 12px; position: relative; overflow: hidden; margin-bottom: 12px; }
 .art img, .player-art img { width: 100%; height: 100%; object-fit: cover; }
+.art img { display: block; background: linear-gradient(135deg, #27375b, #512e67); }
 .art .play { position: absolute; right: 10px; bottom: 10px; width: 38px; height: 38px; padding: 0; border-radius: 50%; opacity: 0; transform: translateY(6px); transition: .2s; }
 .card:hover .play { opacity: 1; transform: none; }
 .card b, .card small, .card em { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -67,6 +74,7 @@ nav .nav-active, nav button:hover { background: #1d2b3d; color: var(--text); }
   .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
   .player { left: 12px; right: 12px; }
   .player-meta { width: 120px; }
+  .account-menu { right: -8px; }
 }
 @media (max-width: 480px) {
   .content { padding: 18px 12px 158px; }
