@@ -1,23 +1,44 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from backend.cache import Cache
-from backend.storage import EventStore
+from backend.auth import issue_token, read_token
 from jiosaavn_client import JioSaavnClient
+from user_store import UserStore
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_local_secrets() -> None:
+    """Use Streamlit secrets locally; hosting platforms should use env vars."""
+    path = ROOT / ".streamlit" / "secrets.toml"
+    if not path.exists():
+        return
+    try:
+        values = tomllib.loads(path.read_text(encoding="utf-8"))
+        for key in ("DATABASE_URL", "REDIS_URL", "COZYBEATS_SESSION_SECRET", "TUNEMATCH_SESSION_SECRET"):
+            value = values.get(key)
+            if value and not os.getenv(key):
+                os.environ[key] = str(value)
+    except (OSError, tomllib.TOMLDecodeError):
+        pass
+
+
+load_local_secrets()
 
 
 class EventIn(BaseModel):
@@ -33,6 +54,20 @@ class RecommendationIn(BaseModel):
     limit: int = Field(default=20, ge=1, le=50)
 
 
+class AuthIn(BaseModel):
+    email: str = Field(min_length=5, max_length=320)
+    password: str = Field(min_length=8, max_length=200)
+
+
+def current_user(authorization: str | None = Header(default=None)) -> dict[str, str]:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Login required")
+    user = read_token(authorization.split(" ", 1)[1].strip())
+    if not user:
+        raise HTTPException(status_code=401, detail="Session expired; please login again")
+    return user
+
+
 def load_catalog() -> pd.DataFrame:
     path = ROOT / "spotify_tracks_data.csv"
     if not path.exists():
@@ -44,7 +79,7 @@ catalog = load_catalog()
 hybrid_engine = None
 client = JioSaavnClient()
 cache = Cache()
-events = EventStore()
+user_store = UserStore(database_url=os.getenv("DATABASE_URL") or None)
 
 
 def _get_hybrid_engine():
@@ -79,6 +114,48 @@ def _search(query: str, limit: int) -> list[dict]:
     return client.search(query, limit=min(max(limit, 1), 50))
 
 
+def _catalog_fallback(seed: dict[str, Any], existing: list[dict], limit: int) -> list[dict]:
+    """Keep the shelf full when a live provider returns too few playable records.
+
+    This is deliberately a last-mile fallback: live JioSaavn records stay first,
+    while the local catalog supplies same-language/genre-era context instead of
+    showing an empty recommendation shelf.
+    """
+    if catalog.empty or len(existing) >= limit:
+        return []
+    blocked = {
+        str(item.get("song_id") or item.get("track_id") or item.get("title", "")).casefold()
+        for item in existing
+    }
+    seed_key = str(seed.get("song_id") or seed.get("track_id") or seed.get("title", "")).casefold()
+    blocked.add(seed_key)
+    seed_artist = str(seed.get("artists", "")).casefold()
+    seed_genres = {token.strip() for token in str(seed.get("track_genre", "")).casefold().split(",") if token.strip()}
+    rows: list[tuple[float, dict[str, Any]]] = []
+    for _, row in catalog.iterrows():
+        track_id = str(row.get("track_id", ""))
+        if not track_id or track_id.casefold() in blocked:
+            continue
+        artists = str(row.get("artists", ""))
+        genres = {token.strip() for token in str(row.get("track_genre", "")).casefold().split(",") if token.strip()}
+        score = float(row.get("popularity", 0) or 0) / 1000.0
+        if seed_artist and seed_artist in artists.casefold():
+            score += 2.0
+        score += 1.0 * len(seed_genres.intersection(genres))
+        item = {
+            "song_id": track_id,
+            "title": str(row.get("track_name", "Untitled")),
+            "artists": artists,
+            "album": str(row.get("album_name", "")),
+            "track_genre": str(row.get("track_genre", "")),
+            "stream_url": "",
+            "recommendation_reason": "Same genre/artist context from the local catalog",
+        }
+        rows.append((score, item))
+    rows.sort(key=lambda pair: pair[0], reverse=True)
+    return [item for _, item in rows[: max(0, limit - len(existing))]]
+
+
 def _recommend(request: RecommendationIn) -> list[dict]:
     seed = dict(request.seed)
     title = str(seed.get("title", "")).strip()
@@ -101,15 +178,66 @@ def _recommend(request: RecommendationIn) -> list[dict]:
     if engine and not catalog.empty:
         try:
             ranked = engine.rank_jio_results(candidates, request.user_id, catalog, [], seed=seed)
-            return [dict(item) for item in ranked[: request.limit]]
+            ranked_items = [dict(item) for item in ranked[: request.limit]]
+            return ranked_items + _catalog_fallback(seed, ranked_items, request.limit)
         except Exception:
             pass
-    return candidates[: request.limit]
+    live_items = candidates[: request.limit]
+    return live_items + _catalog_fallback(seed, live_items, request.limit)
 
 
 @app.get("/healthz")
 async def healthz() -> dict[str, Any]:
     return {"ok": True, "service": "cozybeats-api", "catalog_tracks": len(catalog)}
+
+
+@app.post("/v1/auth/register")
+async def register(request: AuthIn):
+    ok, result = await run_in_threadpool(user_store.register, request.email, request.password)
+    if not ok:
+        raise HTTPException(status_code=409, detail=result)
+    email = request.email.strip().lower()
+    return {"token": issue_token(result, email), "user": {"id": result, "email": email}}
+
+
+@app.post("/v1/auth/login")
+async def login(request: AuthIn):
+    ok, result = await run_in_threadpool(user_store.authenticate, request.email, request.password)
+    if not ok:
+        raise HTTPException(status_code=401, detail=result)
+    email = request.email.strip().lower()
+    return {"token": issue_token(result, email), "user": {"id": result, "email": email}}
+
+
+@app.get("/v1/auth/me")
+async def me(user: dict[str, str] = Depends(current_user)):
+    return {"user": user}
+
+
+@app.get("/v1/home")
+async def home(user: dict[str, str] = Depends(current_user)):
+    categories = {
+        "Hindi picks": "hindi songs",
+        "English / global": "english pop hits",
+        "Romantic": "hindi romantic songs",
+        "Classics": "hindi evergreen classics",
+        "Chill": "chill acoustic songs",
+        "Trending": "latest popular songs",
+    }
+    # Home shelves are curated by category, so share them across users. User-specific
+    # ranking stays in /v1/recommendations; this prevents one provider fan-out per user.
+    cache_key = _key("home", "catalog-v1")
+    cached = cache.get_json(cache_key)
+    if cached is not None:
+        return {"shelves": cached, "cached": True}
+    with ThreadPoolExecutor(max_workers=len(categories)) as pool:
+        groups = list(pool.map(lambda q: _search(q, 12), categories.values()))
+    shelves = [
+        {"title": title, "items": items}
+        for (title, _), items in zip(categories.items(), groups)
+    ]
+    cache.set_json(cache_key, shelves, ttl=900)
+    return {"shelves": shelves, "cached": False}
 
 
 @app.get("/v1/search")
@@ -124,7 +252,8 @@ async def search(q: str = Query(min_length=1, max_length=160), limit: int = Quer
 
 
 @app.post("/v1/recommendations")
-async def recommendations(request: RecommendationIn):
+async def recommendations(request: RecommendationIn, user: dict[str, str] = Depends(current_user)):
+    request.user_id = user["user_id"]
     title = str(request.seed.get("title", "")).strip()
     if not title:
         raise HTTPException(status_code=422, detail="seed.title is required")
@@ -141,7 +270,20 @@ async def recommendations(request: RecommendationIn):
 
 
 @app.post("/v1/events", status_code=202)
-async def write_event(event: EventIn):
-    await run_in_threadpool(events.write, event.user_id, event.event_type, event.track_id, event.payload)
+async def write_event(event: EventIn, user: dict[str, str] = Depends(current_user)):
+    event.user_id = user["user_id"]
+    # Persist behavior in UserStore so Aiven MySQL is the shared source of truth.
+    metadata = json.dumps(event.payload, default=str)
+    session_id = str(event.payload.get("session_id", "web"))
+    duration_ms = int(event.payload.get("duration_ms", 0) or 0)
+    await run_in_threadpool(
+        user_store.log_event,
+        event.user_id,
+        event.track_id,
+        event.event_type,
+        session_id,
+        duration_ms,
+        metadata,
+    )
     return {"accepted": True}
 

@@ -43,7 +43,7 @@ Terminal 3:
 
 Open `http://localhost:3000`. The API health check is `http://localhost:8000/healthz`.
 
-Redis and PostgreSQL are optional locally. Without `REDIS_URL`, the API uses a bounded in-memory TTL cache. Without a database URL, API events use SQLite. For production, use managed Redis and PostgreSQL so multiple API replicas share state.
+Redis and Aiven MySQL are optional locally. Without `REDIS_URL`, the API uses a bounded in-memory TTL cache. Without `DATABASE_URL`, local development uses SQLite through the existing `UserStore`. For production, configure Aiven MySQL so accounts and behavior events are shared across API replicas.
 
 ## 500-user baseline
 
@@ -55,7 +55,7 @@ Redis and PostgreSQL are optional locally. Without `REDIS_URL`, the API uses a b
 - Use PostgreSQL connection pooling and indexes on `(user_id, created_at)` and `(user_id, track_id)`.
 - Serve artwork/audio through a CDN or provider URLs; do not proxy large audio through FastAPI.
 - Add health checks, structured logs, request IDs, timeouts, retries with backoff, and provider circuit breaking.
-- Load-test with 500 virtual users before claiming production capacity.
+- Load-test with 500 virtual users before claiming production capacity; this architecture is designed for that baseline, but real capacity depends on the Aiven/Redis plan and provider rate limits.
 
 ## Security before public launch
 
