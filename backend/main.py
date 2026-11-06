@@ -159,6 +159,44 @@ def _catalog_fallback(seed: dict[str, Any], existing: list[dict], limit: int) ->
     return [item for _, item in rows[: max(0, limit - len(existing))]]
 
 
+def _catalog_shelf_fallback(query: str, existing: list[dict], limit: int) -> list[dict]:
+    """Fill category shelves from the local catalog when live search is sparse."""
+    if catalog.empty or len(existing) >= limit:
+        return []
+    text = query.casefold()
+    hindi_terms = {"hindi", "romantic", "classic", "bollywood", "desi", "punjabi"}
+    english_terms = {"english", "global", "pop", "rock", "indie", "dance", "acoustic"}
+    mood_terms = {token for token in ("romantic", "chill", "popular", "trending", "acoustic") if token in text}
+    existing_ids = {str(item.get("song_id") or item.get("track_id") or item.get("title", "")).casefold() for item in existing}
+    indian_markers = {"filmi", "bollywood", "desi", "punjabi", "hindi", "bhangra", "indian", "urdu"}
+    rows: list[tuple[float, dict[str, Any]]] = []
+    for _, row in catalog.iterrows():
+        track_id = str(row.get("track_id", ""))
+        if not track_id or track_id.casefold() in existing_ids:
+            continue
+        genre_text = str(row.get("track_genre", "")).casefold()
+        tokens = {token.strip() for token in genre_text.split(",") if token.strip()}
+        score = float(row.get("popularity", 0) or 0) / 1000.0
+        if hindi_terms.intersection(tokens) or ("hindi" in text and "filmi" in tokens):
+            score += 2.0
+        if "english" in text and not tokens.intersection(indian_markers):
+            score += 2.0
+        if mood_terms.intersection(tokens):
+            score += 1.0
+        item = {
+            "song_id": track_id,
+            "title": str(row.get("track_name", "Untitled")),
+            "artists": str(row.get("artists", "")),
+            "album": str(row.get("album_name", "")),
+            "track_genre": str(row.get("track_genre", "")),
+            "stream_url": "",
+            "recommendation_reason": "Curated from the CozyBeats catalog",
+        }
+        rows.append((score, item))
+    rows.sort(key=lambda pair: pair[0], reverse=True)
+    return [item for _, item in rows[: max(0, limit - len(existing))]]
+
+
 def _recommend(request: RecommendationIn) -> list[dict]:
     seed = dict(request.seed)
     title = str(seed.get("title", "")).strip()
@@ -235,10 +273,11 @@ async def home(user: dict[str, str] = Depends(current_user)):
         return {"shelves": cached, "cached": True}
     with ThreadPoolExecutor(max_workers=len(categories)) as pool:
         groups = list(pool.map(lambda q: _search(q, 12), categories.values()))
-    shelves = [
-        {"title": title, "items": items}
-        for (title, _), items in zip(categories.items(), groups)
-    ]
+    shelves = []
+    for (title, search_query), items in zip(categories.items(), groups):
+        items = list(items)
+        items.extend(_catalog_shelf_fallback(search_query, items, 16))
+        shelves.append({"title": title, "items": items[:16]})
     cache.set_json(cache_key, shelves, ttl=900)
     return {"shelves": shelves, "cached": False}
 
@@ -257,6 +296,7 @@ async def search(q: str = Query(min_length=1, max_length=160), limit: int = Quer
 @app.post("/v1/recommendations")
 async def recommendations(request: RecommendationIn, user: dict[str, str] = Depends(current_user)):
     request.user_id = user["user_id"]
+    request.limit = max(request.limit, 10)
     title = str(request.seed.get("title", "")).strip()
     if not title:
         raise HTTPException(status_code=422, detail="seed.title is required")
