@@ -5,6 +5,7 @@
   --green: #9bf6cf;
 }
 * { box-sizing: border-box; }
+html, body { max-width: 100%; overflow-x: hidden; }
 body { margin: 0; background: radial-gradient(circle at 80% 0, #2a2056 0, transparent 34%), var(--bg); color: var(--text); font-family: Arial, sans-serif; }
 button, input { font: inherit; }
 .app-shell { display: flex; min-height: 100vh; }
@@ -17,7 +18,7 @@ nav .nav-active, nav button:hover { background: #1d2b3d; color: var(--text); }
 .account { margin-top: auto; border-top: 1px solid #222b42; padding-top: 18px; display: grid; gap: 7px; color: var(--muted); font-size: 12px; }
 .account b { color: var(--text); overflow: hidden; text-overflow: ellipsis; }
 .account button { border: 1px solid #3b4866; background: #18223a; color: var(--text); border-radius: 10px; padding: 10px; cursor: pointer; }
-.content { width: min(1260px, 100%); margin: auto; padding: 38px 52px 120px; }
+.content { width: min(1440px, 100%); margin: auto; padding: 38px clamp(18px, 4vw, 52px) 120px; }
 .topbar { display: flex; justify-content: space-between; align-items: center; }
 .eyebrow { color: var(--green); font-size: 12px; letter-spacing: 2px; text-transform: uppercase; margin: 0 0 8px; }
 .topbar h1 { font-size: 36px; margin: 0; }
@@ -45,6 +46,7 @@ nav .nav-active, nav button:hover { background: #1d2b3d; color: var(--text); }
 .art { aspect-ratio: 1; background: linear-gradient(135deg, #27375b, #512e67); border-radius: 12px; position: relative; overflow: hidden; margin-bottom: 12px; }
 .art img, .player-art img { width: 100%; height: 100%; object-fit: cover; }
 .art img { display: block; background: linear-gradient(135deg, #27375b, #512e67); }
+.art-fallback { width: 100%; height: 100%; display: grid; place-items: center; color: #dcd5ff; font-size: clamp(28px, 4vw, 54px); font-weight: 800; letter-spacing: 2px; background: radial-gradient(circle at 25% 20%, #7661b5, transparent 36%), linear-gradient(135deg, #263b63, #43295f); }
 .art .play { position: absolute; right: 10px; bottom: 10px; width: 38px; height: 38px; padding: 0; border-radius: 50%; opacity: 0; transform: translateY(6px); transition: .2s; }
 .card:hover .play { opacity: 1; transform: none; }
 .card b, .card small, .card em { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -64,6 +66,9 @@ nav .nav-active, nav button:hover { background: #1d2b3d; color: var(--text); }
 .switch-auth { background: none; border: 0; color: var(--green); width: 100%; padding: 16px 0; cursor: pointer; }
 .muted { color: var(--muted); line-height: 1.6; }
 .error { color: #ff8f9c; font-size: 13px; }
+@media (max-width: 1100px) {
+  .cards { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 15px; }
+}
 @media (max-width: 800px) {
   .sidebar { display: none; }
   .content { padding: 24px 18px 130px; }
@@ -75,13 +80,14 @@ nav .nav-active, nav button:hover { background: #1d2b3d; color: var(--text); }
   .player { left: 12px; right: 12px; }
   .player-meta { width: 120px; }
   .account-menu { right: -8px; }
+  .shelf-heading { align-items: flex-start; flex-direction: column; gap: 5px; }
 }
 @media (max-width: 480px) {
   .content { padding: 18px 12px 158px; }
   .topbar h1 { font-size: 24px; }
-  .searchbar { margin: 20px 0; gap: 7px; }
-  .searchbar input { padding: 13px 12px; }
-  .searchbar button { padding: 0 14px; }
+  .searchbar { margin: 20px 0; gap: 8px; flex-direction: column; }
+  .searchbar input { width: 100%; padding: 13px 12px; }
+  .searchbar button { min-height: 44px; width: 100%; padding: 0 14px; }
   .hero { min-height: 205px; padding: 20px; border-radius: 18px; }
   .hero h2 { font-size: 29px; margin: 11px 0; }
   .hero p { font-size: 13px; line-height: 1.45; }

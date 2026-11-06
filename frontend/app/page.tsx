@@ -82,6 +82,15 @@ export default function Home() {
 
 function AuthScreen({ mode, setMode, email, setEmail, password, setPassword, error, onSubmit }: { mode: "login" | "register"; setMode: (mode: "login" | "register") => void; email: string; setEmail: (value: string) => void; password: string; setPassword: (value: string) => void; error: string; onSubmit: () => void }) { return <main className="auth-shell"><div className="auth-card"><div className="brand"><span className="brand-dot" />CozyBeats</div><p className="eyebrow">YOUR SOUND, EVOLVING</p><h1>{mode === "login" ? "Welcome back." : "Create your account."}</h1><p className="muted">Your recommendations, history and library stay connected to your account.</p><input value={email} onChange={e => setEmail(e.target.value)} placeholder="Email address" type="email" /><input value={password} onChange={e => setPassword(e.target.value)} placeholder="Password · 8+ characters" type="password" onKeyDown={e => e.key === "Enter" && onSubmit()} />{error && <p className="error">{error}</p>}<button className="primary-action" onClick={onSubmit}>{mode === "login" ? "Log in" : "Create account"}</button><button className="switch-auth" onClick={() => setMode(mode === "login" ? "register" : "login")}>{mode === "login" ? "New to CozyBeats? Create account" : "Already have an account? Log in"}</button></div></main>; }
 
-function Artwork({ track, eager = false }: { track: Track; eager?: boolean }) { return track.image_url ? <img src={track.image_url} alt={track.title} loading={eager ? "eager" : "lazy"} decoding="async" onError={event => { event.currentTarget.style.display = "none"; }} /> : <span>♪</span>; }
+function Artwork({ track, eager = false }: { track: Track; eager?: boolean }) {
+  const [failed, setFailed] = useState(false);
+  const rawUrl = track.image_url?.trim() || "";
+  const imageUrl = rawUrl
+    .replace(/^http:\/\//i, "https://")
+    .replace(/(?:50|150|250)x(?:50|150|250)/gi, "500x500");
+  const initials = track.title.split(/\s+/).filter(Boolean).slice(0, 2).map(word => word[0]).join("").toUpperCase() || "♪";
+  if (!imageUrl || failed) return <span className="art-fallback" aria-label={`Artwork unavailable for ${track.title}`}>{initials}</span>;
+  return <img src={imageUrl} alt={track.title} loading={eager ? "eager" : "lazy"} decoding="async" referrerPolicy="no-referrer" onError={() => setFailed(true)} />;
+}
 
 function Shelf({ title, tracks, onPlay, recommendation = false }: { title: string; tracks: Track[]; onPlay: (track: Track) => void; recommendation?: boolean }) { return <section className="shelf"><div className="shelf-heading"><h3>{title}</h3><span>{recommendation ? "Ranked for your taste" : "Curated live picks"}</span></div><div className="cards">{tracks.slice(0, 20).map((track, index) => <article className="card" key={`${track.song_id || track.title}-${index}`} onClick={() => onPlay(track)}><div className="art"><Artwork track={track} /><button className="play" aria-label={`Play ${track.title}`}>▶</button></div><b>{track.title}</b><small>{track.artists || "Unknown artist"}</small>{track.album && <small>{track.album}{track.year ? ` · ${track.year}` : ""}</small>}{recommendation && <em>{track.recommendation_reason || "Similar vibe"}</em>}</article>)}</div></section>; }
