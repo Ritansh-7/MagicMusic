@@ -387,6 +387,15 @@ def _compact_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
 
 
+def _has_artwork(item: dict | None) -> bool:
+    url = str((item or {}).get("image_url") or "").strip()
+    return url.startswith("http")
+
+
+RECOMMENDATION_QUEUE_SIZE = 40
+HOME_SHELF_SIZE = 160
+
+
 def _visible_recording_key(item: dict) -> str:
     """Collapse alternate releases of one recording for search shelves."""
     title = _recommendation_title_key(item.get("title", ""))
@@ -652,43 +661,42 @@ def play_dashboard_live_item(item: dict) -> None:
     st.rerun()
 
 
-@st.cache_data(ttl=3600, max_entries=4, show_spinner=False)
-def fetch_english_dashboard_tracks(base_url: str) -> pd.DataFrame:
-    """Build a cached English-only live shelf; never mix it with Hindi rows."""
-    queries = (
-        "english pop songs", "english rock classics", "english chill songs",
-        "english love songs", "english sad songs", "english dance hits",
-        "english indie songs", "english acoustic songs", "english 2000s hits",
-        "english 2010s hits", "english 90s hits", "english party songs",
-        "english feel good songs", "english heartbreak songs", "english soft songs",
-        "english alternative songs", "english rnb songs", "english jazz songs",
-        "english country songs", "english classics", "english trending songs",
-        "english female singers", "english male singers", "english movie songs",
-        "english radio hits", "english summer songs", "english night songs",
-        "english workout songs", "english calm songs", "english retro songs",
-        "english top hits", "english new music", "english slow songs",
-        "english romantic hits", "english viral songs", "english piano songs",
-        "english road trip songs", "english morning songs", "english golden hits",
-        "english timeless songs", "english soundtrack songs", "english acoustic pop",
-        "english rock ballads", "english edm hits", "english singer songwriter",
-        "english disco hits", "english folk songs", "english soul music",
-        "english blues songs", "english alternative rock",
-    )
+@st.cache_data(ttl=3600, max_entries=8, show_spinner=False)
+def fetch_live_dashboard_tracks(base_url: str, language: str) -> pd.DataFrame:
+    """Cached live shelves with artwork only; one small query wave per language."""
+    if language == "hindi":
+        queries = (
+            "hindi songs", "bollywood hits", "bollywood romantic songs",
+            "bollywood 2010s songs", "bollywood 2000s songs", "arijit singh songs",
+            "shreya ghoshal songs", "bollywood party songs",
+        )
+        allowed = {"hindi", ""}
+    else:
+        queries = (
+            "english pop songs", "english love songs", "english chill songs",
+            "english 2010s hits", "english 2000s hits", "english dance hits",
+            "english acoustic songs", "english rock classics",
+        )
+        allowed = {"english"}
     blocked_terms = re.compile(
-        r"hindi|bollywood|filmi|indian|bhangra|punjabi|desi|sufi|tamil|telugu|"
-        r"bengali|gujarati|marathi|bhojpuri|assamese|odia|kannada|malayalam|"
-        r"urdu|nepali|rajasthani|sanskrit|qawwali|ghazal|bhajan",
+        r"tamil|telugu|bengali|gujarati|marathi|bhojpuri|assamese|odia|kannada|malayalam",
+        re.IGNORECASE,
+    )
+    hindi_block = re.compile(
+        r"hindi|bollywood|filmi|indian|bhangra|punjabi|desi|sufi|urdu|ghazal|bhajan",
         re.IGNORECASE,
     )
     client = JioSaavnClient(base_url)
-
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        pages = executor.map(lambda query: client.search_direct(query, limit=10), queries)
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        pages = executor.map(lambda query: client.search_direct(query, limit=24), queries)
         rows: list[dict] = []
         seen: set[str] = set()
         for page in pages:
             for item in page:
-                if str(item.get("language", "")).casefold() != "english":
+                if not _has_artwork(item):
+                    continue
+                language_value = str(item.get("language", "")).casefold()
+                if allowed and language_value and language_value not in allowed:
                     continue
                 identity = f"{item.get('title', '')}|{item.get('artists', '')}".casefold()
                 searchable = " ".join(
@@ -697,15 +705,21 @@ def fetch_english_dashboard_tracks(base_url: str) -> pd.DataFrame:
                 )
                 if not identity or identity in seen or blocked_terms.search(searchable):
                     continue
+                if language == "english" and hindi_block.search(searchable):
+                    continue
                 seen.add(identity)
                 rows.append(item)
     frame = pd.DataFrame(rows)
     if frame.empty:
         return frame
-    frame["track_id"] = frame["song_id"].astype(str)
-    frame["track_name"] = frame["title"].astype(str)
-    frame["album_name"] = frame["album"].astype(str)
-    return frame.head(1000).reset_index(drop=True)
+    frame["track_id"] = frame.get("song_id", pd.Series(dtype=str)).astype(str)
+    frame["track_name"] = frame.get("title", pd.Series(dtype=str)).astype(str)
+    frame["album_name"] = frame.get("album", pd.Series(dtype=str)).astype(str)
+    return frame.head(HOME_SHELF_SIZE).reset_index(drop=True)
+
+
+def fetch_english_dashboard_tracks(base_url: str) -> pd.DataFrame:
+    return fetch_live_dashboard_tracks(base_url, "english")
 
 
 @st.cache_resource
@@ -1263,7 +1277,7 @@ def build_jio_up_next(
     user_id: str,
     catalog: pd.DataFrame,
     preferred_track_ids: list[str],
-    limit: int = 35,
+    limit: int = RECOMMENDATION_QUEUE_SIZE,
     exclude_items: list[dict] | None = None,
 ) -> list[dict]:
     """Build a separate recommendation queue; never reuse search results."""
@@ -1563,32 +1577,32 @@ def build_jio_up_next(
     # They must enter the same collection/ranking pipeline as API discovery
     # results, otherwise a short search can produce an empty Up Next shelf.
     collect_items(
-        [dict(item) for item in search_results if isinstance(item, dict)],
+        [
+            dict(item) for item in search_results
+            if isinstance(item, dict) and _has_artwork(item)
+        ],
         source="seed_search_results",
     )
-    collect_queries(prioritized_queries, page_limit=20, max_queries=8, source="seed_title_album_artist")
-    soundtrack_peer_queries = _era_artist_discovery_queries(
-        seed_year,
-        _soundtrack_peer_artists(seed, collected),
-    )
-    collect_queries(
-        soundtrack_peer_queries,
-        page_limit=20,
-        max_queries=4,
-        source="soundtrack_peer_era",
-    )
-    # Artist radio needs the provider's expanded catalogue endpoint. The
-    # narrow direct query often returns only one or two Coldplay recordings;
-    # this extra artist-only fetch stays inside the recommendation pipeline,
-    # where the ranker still enforces the seed's language, mood and era.
-    for artist in artist_names[:2]:
-        try:
-            collect_items(
-                client.search(artist, limit=40),
-                source="seed_artist_catalogue",
-            )
-        except Exception:
-            provider_failures += 1
+    if len(collected) < RECOMMENDATION_QUEUE_SIZE:
+        collect_queries(prioritized_queries, page_limit=20, max_queries=6, source="seed_title_album_artist")
+        soundtrack_peer_queries = _era_artist_discovery_queries(
+            seed_year,
+            _soundtrack_peer_artists(seed, collected),
+        )
+        collect_queries(
+            soundtrack_peer_queries,
+            page_limit=20,
+            max_queries=3,
+            source="soundtrack_peer_era",
+        )
+        for artist in artist_names[:2]:
+            try:
+                collect_items(
+                    [item for item in client.search(artist, limit=40) if _has_artwork(item)],
+                    source="seed_artist_catalogue",
+                )
+            except Exception:
+                provider_failures += 1
     inferred_seed_year = _recommendation_seed_year(seed, collected)
     if inferred_seed_year and not seed_year:
         seed_year = inferred_seed_year
@@ -1942,7 +1956,11 @@ def build_jio_up_next(
                 if len(existing_title) <= len(item_title)
                 else (item_title, existing_title)
             )
-            if shorter and shorter in longer:
+            if (
+                len(shorter.split()) >= 3
+                and len(shorter) >= 12
+                and shorter in longer
+            ):
                 is_subset = True
                 break
         if is_subset:
@@ -1965,16 +1983,14 @@ def build_jio_up_next(
     try:
         effective_limit = max(1, int(limit or 0))
     except (TypeError, ValueError):
-        effective_limit = 35
-    queue = unique[:effective_limit]
-    # A non-empty ranking must never become an empty UI queue because of an
-    # over-aggressive identity/near-duplicate pass. This can happen when a
-    # provider returns incomplete metadata or multiple releases collapse to
-    # the same canonical key. Keep the ranked order as the last-resort
-    # displayable result; the player still excludes the seed upstream.
-    dedup_fallback_used = bool(ranked and not queue)
-    if dedup_fallback_used:
-        queue = list(ranked[:effective_limit])
+        effective_limit = RECOMMENDATION_QUEUE_SIZE
+    queue = [item for item in unique[:effective_limit] if _has_artwork(item)]
+    if len(queue) < 10:
+        queue = [
+            item for item in ranked
+            if isinstance(item, dict) and _has_artwork(item)
+        ][:effective_limit] or list(ranked[:effective_limit])
+    dedup_fallback_used = bool(ranked and len(unique) < len(queue))
     queue_status = st.session_state.setdefault("jio_queue_status", {})
     queue_status["post_dedup_queue_size"] = len(queue)
     queue_status["ranked_queue_size"] = len(ranked)
@@ -2001,9 +2017,10 @@ def build_jio_up_next(
         seen_impressions = st.session_state.setdefault("recommendation_impressions", set())
         if impression_key not in seen_impressions:
             seen_impressions.add(impression_key)
-            log_behavior(
-                "recommendation_impression",
-                metadata={
+            try:
+                log_behavior(
+                    "recommendation_impression",
+                    metadata={
                     "model_version": HYBRID_MODEL_VERSION,
                     "experiment_variant": st.session_state.get("recommendation_variant", "control"),
                     "seed_track_id": str(seed.get("song_id") or seed.get("title", "")),
@@ -2028,7 +2045,9 @@ def build_jio_up_next(
                         for item in queue[:25]
                     ],
                 },
-            )
+                )
+            except Exception:
+                pass
     return queue
 
 
@@ -2518,9 +2537,15 @@ def _dashboard_language_frames(profile: object, excluded_ids: list[str]) -> dict
             selected = pd.concat([selected, fallback], ignore_index=True)
         return selected.drop_duplicates(subset=["track_name", "artists"]).head(1000).reset_index(drop=True)
 
-    english_live = fetch_english_dashboard_tracks(jio_client.base_url)
-    english_shelf = english_live if len(english_live) >= 100 else shelf(english_mask)
-    return {"Hindi": shelf(hindi_mask), "English / global": english_shelf}
+    hindi_live = fetch_live_dashboard_tracks(jio_client.base_url, "hindi")
+    english_live = fetch_live_dashboard_tracks(jio_client.base_url, "english")
+    hindi_shelf = hindi_live if len(hindi_live) >= 80 else shelf(hindi_mask)
+    english_shelf = english_live if len(english_live) >= 80 else shelf(english_mask)
+    def with_art(frame: pd.DataFrame) -> pd.DataFrame:
+        if frame.empty or "image_url" not in frame.columns:
+            return frame.head(0)
+        return frame[frame["image_url"].astype(str).str.startswith("http")].head(HOME_SHELF_SIZE).reset_index(drop=True)
+    return {"Hindi": with_art(hindi_shelf), "English / global": with_art(english_shelf)}
 
 
 def _recommendation_feedback(track_id: str, section: str, rating: str) -> None:
@@ -2539,7 +2564,7 @@ def _set_dashboard_browse_page(widget_key: str, page: int) -> None:
 def render_dashboard_shelf(language: str, tracks: pd.DataFrame) -> None:
     page_key = f"dashboard_page_{language}"
     browse_key = f"dashboard_browse_{language}"
-    page_size = 12
+    page_size = 40
     page_count = max(1, int(np.ceil(len(tracks) / page_size)))
     if browse_key not in st.session_state:
         initial_page = int(st.session_state.get(page_key, 0)) + 1
@@ -2555,7 +2580,7 @@ def render_dashboard_shelf(language: str, tracks: pd.DataFrame) -> None:
     visible = tracks.iloc[start:start + page_size]
     st.markdown(f"<div class='shelf-title'>{language} picks</div>", unsafe_allow_html=True)
     st.markdown(
-        f"<div class='shelf-subtitle'>100+ personalized picks · showing {start + 1}–{start + len(visible)} of {len(tracks)}</div>",
+        f"<div class='shelf-subtitle'>{len(tracks)} songs with artwork · showing {start + 1}–{start + len(visible)}</div>",
         unsafe_allow_html=True,
     )
     st.selectbox(
@@ -2582,8 +2607,9 @@ def render_dashboard_shelf(language: str, tracks: pd.DataFrame) -> None:
                 artist = str(row.get("artists", "Unknown artist"))
                 album = str(row.get("album_name", ""))
                 artwork = str(row.get("image_url", "")) or posters.get(str(row.get("track_id", "")), {}).get("image_url", "")
-                if artwork:
-                    st.image(artwork, width="stretch")
+                if not str(artwork).startswith("http"):
+                    continue
+                st.image(artwork, width="stretch")
                 st.caption(f"{start + row_start + column_index + 1:02d}")
                 st.markdown(f"**{title}**")
                 st.caption(f"{artist}{f' · {album}' if album else ''}")
@@ -2650,7 +2676,7 @@ with st.container(border=True):
     count_a.metric("Dashboard library", f"{total_dashboard_tracks:,} tracks")
     count_b.metric("Hindi shelf", f"{len(dashboard_shelves['Hindi']):,} picks")
     count_c.metric("English / global shelf", f"{len(dashboard_shelves['English / global']):,} picks")
-    st.caption("Two mood-aware shelves with 1000+ tracks across the dashboard. Use Jump to page to browse the full library.")
+    st.caption("Home shelves show 160 songs with artwork on phone and laptop. Jump pages to browse the rest.")
     hindi_tab, english_tab = st.tabs(["Hindi", "English / global"])
     with hindi_tab:
         render_dashboard_shelf("Hindi", dashboard_shelves["Hindi"])
@@ -2734,6 +2760,7 @@ else:
             if jio_results:
                 search_cache[search_cache_key] = jio_results
         if jio_results:
+            jio_results = [item for item in jio_results if _has_artwork(item)][:HOME_SHELF_SIZE]
             st.caption(f"{len(jio_results)} songs")
             for row_start in range(0, len(jio_results), 4):
                 jio_cols = st.columns(4)
@@ -2765,13 +2792,29 @@ else:
                             # because jio_queue_seed_id is popped below).
                             st.session_state["jio_now_playing"] = item
                             st.session_state["scroll_to_player"] = True
-                            st.session_state["jio_queue"] = []
-                            # Fresh seed: clear history so new candidates aren't
-                            # blocked by songs shown for previous seeds.
                             st.session_state["jio_recommendation_history"] = set()
-                            st.session_state.pop("jio_queue_seed_id", None)
+                            fast_pool = [
+                                dict(candidate) for candidate in jio_results
+                                if isinstance(candidate, dict)
+                                and _has_artwork(candidate)
+                                and str(candidate.get("song_id") or candidate.get("title", ""))
+                                != str(item.get("song_id") or item.get("title", ""))
+                            ]
+                            try:
+                                st.session_state["jio_queue"] = hybrid_engine.rank_jio_results(
+                                    fast_pool,
+                                    local_user_id,
+                                    data,
+                                    preferred_track_ids,
+                                    seed=item,
+                                )[:RECOMMENDATION_QUEUE_SIZE]
+                            except Exception:
+                                st.session_state["jio_queue"] = fast_pool[:RECOMMENDATION_QUEUE_SIZE]
+                            st.session_state["jio_queue_seed_id"] = str(
+                                item.get("song_id") or item.get("title", "")
+                            )
                             st.session_state.pop("jio_queue_attempted_id", None)
-                            st.session_state.pop("jio_queue_refill_attempted_id", None)
+                            st.session_state["jio_queue_refill_attempted_id"] = ""
                             st.session_state["jio_current_track_id"] = str(
                                 item.get("song_id") or item.get("title", "")
                             )
@@ -2928,21 +2971,22 @@ if jio_now:
                     for item in fallback_pool
                     if isinstance(item, dict)
                     and str(item.get("song_id") or item.get("title", "")) != current_id
-                ][:30]
+                ][:RECOMMENDATION_QUEUE_SIZE]
+            artwork_queue = [item for item in fresh_queue if isinstance(item, dict) and _has_artwork(item)]
             if queue_seed_changed:
-                st.session_state["jio_queue"] = fresh_queue[:30]
-                st.session_state.setdefault("jio_queue_status", {})["post_build_queue_size"] = len(fresh_queue)
+                st.session_state["jio_queue"] = (artwork_queue or existing_queue or fresh_queue)[:RECOMMENDATION_QUEUE_SIZE]
+                st.session_state.setdefault("jio_queue_status", {})["post_build_queue_size"] = len(st.session_state["jio_queue"])
             else:
                 merged_queue = []
                 seen_recordings: set[str] = set()
-                for item in [*existing_queue, *fresh_queue]:
+                for item in [*existing_queue, *artwork_queue]:
                     identity_keys = _recommendation_history_keys(item)
                     if not identity_keys:
                         merged_queue.append(item)
                     elif not identity_keys.intersection(seen_recordings):
                         seen_recordings.update(identity_keys)
                         merged_queue.append(item)
-                st.session_state["jio_queue"] = merged_queue[:30]
+                st.session_state["jio_queue"] = merged_queue[:RECOMMENDATION_QUEUE_SIZE]
                 st.session_state.setdefault("jio_queue_status", {})["post_build_queue_size"] = len(merged_queue)
             st.session_state["jio_queue_seed_id"] = current_id
         liked_ids = set(user_store.liked_track_ids(local_user_id))
@@ -3029,6 +3073,9 @@ if jio_now:
     if raw_up_next and not up_next:
         up_next = list(raw_up_next)
         st.session_state.setdefault("jio_queue_status", {})["render_dedup_fallback_used"] = True
+    with_art = [item for item in up_next if _has_artwork(item)]
+    if with_art:
+        up_next = with_art
     st.session_state.setdefault("jio_queue_status", {})["render_output_queue_size"] = len(up_next)
     st.session_state.setdefault("jio_queue_status", {})["render_dedup_dropped"] = dedup_dropped
     st.session_state["jio_queue"] = up_next

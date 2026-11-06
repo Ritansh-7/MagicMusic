@@ -2450,17 +2450,17 @@ class HybridRecommendationEngine:
             # Direct audio/mood similarity + intent sentiment match carry >58% of the score.
             # Era and artist diversity are strictly regulated in sequence re-ranking.
             hybrid = (
-                0.36 * audio_values
-                + 0.10 * metadata_values
-                + 0.04 * collaborative
+                0.32 * audio_values
+                + 0.08 * metadata_values
+                + 0.02 * collaborative
                 + 0.03 * (0.60 * short_values + 0.40 * medium_values)
-                + 0.06 * np.asarray([item.get("_listener_mood_match", 0.0) for item in results])
-                + 0.02 * np.asarray([item.get("_listener_era_match", 0.0) for item in results])
-                + 0.05 * transition_values
-                + 0.13 * context_values
-                + 0.04 * artist_anchor_values
-                + 0.07 * era_values
-                + 0.06 * mood_fallback_values
+                + 0.08 * np.asarray([item.get("_listener_mood_match", 0.0) for item in results])
+                + 0.04 * np.asarray([item.get("_listener_era_match", 0.0) for item in results])
+                + 0.04 * transition_values
+                + 0.10 * context_values
+                + 0.03 * artist_anchor_values
+                + 0.12 * era_values
+                + 0.11 * mood_fallback_values
                 + 0.06 * intent_values
                 + 0.02 * bandit_values
                 + 0.01 * popularity
