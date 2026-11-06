@@ -88,6 +88,19 @@ BHAKTI_GENRE_TOKENS: set[str] = {
     "radha",
 }
 
+# Film soundtracks can express faith without using a genre label such as
+# "bhajan" or "chalisa". These are multi-word/title-level signals, so they
+# are strong enough to classify a seed while a lone deity word remains weak.
+BHAKTI_SPIRITUAL_PHRASES: tuple[str, ...] = (
+    "sach hai ke bhagwan",
+    "bhagwan ke ghar",
+    "bhagwan bharose",
+    "allah ke bande",
+    "prabhu mere",
+    "hey prabhu",
+    "jai jagdish",
+)
+
 
 def is_strong_bhakti_seed(item: dict[str, Any]) -> bool:
     """Decide whether a SEED track is genuinely devotional music.
@@ -115,6 +128,9 @@ def is_strong_bhakti_seed(item: dict[str, Any]) -> bool:
     title_genre = title_tokens & BHAKTI_GENRE_TOKENS
     album_genre = album_tokens & BHAKTI_GENRE_TOKENS
     title_bhakti = title_tokens & BHAKTI_SKILL["bhakti_tokens"]
+
+    if any(phrase in title_key for phrase in BHAKTI_SPIRITUAL_PHRASES):
+        return True
 
     if title_genre:
         return True

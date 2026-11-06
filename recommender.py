@@ -1791,7 +1791,9 @@ class HybridRecommendationEngine:
                                 kept = [
                                     item for item in compatible
                                     if any(
-                                        t in recommendation_title_key(item.get("title", ""))
+                                        t in recommendation_title_key(
+                                            f"{item.get('title', '')} {item.get('album', '')}"
+                                        )
                                         for t in bhakti_filter_terms
                                     )
                                 ]
@@ -1841,7 +1843,12 @@ class HybridRecommendationEngine:
                         # Refine it with bhakti title terms for precision.
                         filtered = [
                             item for item in compatible
-                            if any(t in recommendation_title_key(item.get("title", "")) for t in bhakti_terms)
+                            if any(
+                                t in recommendation_title_key(
+                                    f"{item.get('title', '')} {item.get('album', '')}"
+                                )
+                                for t in bhakti_terms
+                            )
                         ]
                         if filtered:
                             results = filtered
@@ -1853,7 +1860,12 @@ class HybridRecommendationEngine:
                             # pre-gate pool so the queue isn't empty.
                             relaxed = [
                                 item for item in results
-                                if any(t in recommendation_title_key(item.get("title", "")) for t in bhakti_terms)
+                                if any(
+                                    t in recommendation_title_key(
+                                        f"{item.get('title', '')} {item.get('album', '')}"
+                                    )
+                                    for t in bhakti_terms
+                                )
                             ]
                             if relaxed:
                                 results = relaxed

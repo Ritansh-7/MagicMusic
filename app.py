@@ -1861,9 +1861,9 @@ def build_jio_up_next(
         except Exception:
             pass
 
-    # Desperate final pad: if still below 10 after every floor, broaden
-    # completely (no bhakti filter) so every song always gets at least 10
-    # recommendations and the user never sees "no recommendations".
+    # Desperate final pad: broaden only within the seed's intent. A queue with
+    # fewer devotional tracks is preferable to padding a devotional seed with
+    # unrelated romantic/party Bollywood songs.
     if len(ranked) < 10:
         pad_queries = ["hindi songs", "bollywood hits", "hindi top hits", "popular hindi songs", "hindi evergreen"]
         if is_bhakti_seed:
@@ -1884,6 +1884,8 @@ def build_jio_up_next(
                 seed=seed,
                 relaxed_context=True,
             )
+            if is_bhakti_seed:
+                pad_ranked = [item for item in pad_ranked if bhakti_agent.is_bhakti(item)]
             pad_ranked = pad_ranked[: max(0, 10 - len(ranked))]
             ranked.extend(pad_ranked)
         except Exception:
@@ -1955,8 +1957,9 @@ def build_jio_up_next(
         bhakti_unique = [
             item for item in unique if bhakti_agent.is_bhakti(item)
         ]
-        if bhakti_unique:
-            unique = bhakti_unique
+        # This is a hard safety boundary: never re-introduce secular tracks
+        # merely because the provider returned too few devotional candidates.
+        unique = bhakti_unique
     # Never allow a falsey/invalid limit to turn a successful ranking into an
     # empty queue. Some rerun paths can carry an old zero-like widget value.
     try:
