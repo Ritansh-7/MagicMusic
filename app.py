@@ -42,7 +42,17 @@ from search_ranking import (
 from spotify_api import SpotifyOAuth, new_oauth_state, verify_oauth_state
 from user_store import UserStore
 from bhakti_agent import BhaktiAgent, quick_bhakti_recommend, is_devotional
-from bhakti_skill import is_strong_bhakti_seed
+try:
+    from bhakti_skill import is_strong_bhakti_seed
+except ImportError:
+    # Keep older Streamlit deployments bootable while their module cache is
+    # refreshed. The full implementation lives in bhakti_skill.py.
+    def is_strong_bhakti_seed(item: dict) -> bool:
+        text = " ".join(str(item.get(field, "")) for field in ("title", "album")).casefold()
+        return bool(set(re.findall(r"[a-z0-9]+", text)) & {
+            "bhajan", "aarti", "chalisa", "kirtan", "stuti", "mantra",
+            "dhun", "stotram", "stotra", "ashtak", "kavach", "satsang",
+        })
 
 ERA_COMPATIBILITY_WINDOW_YEARS = 30
 

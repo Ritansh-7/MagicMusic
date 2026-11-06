@@ -12,9 +12,23 @@ from bhakti_skill import (
     bhakti_score,
     infer_bhakti_mood,
     is_bhakti_skill_match,
-    is_strong_bhakti_seed,
     resolve_deity,
 )
+
+try:
+    from bhakti_skill import is_strong_bhakti_seed
+except ImportError:
+    def is_strong_bhakti_seed(item: dict[str, Any]) -> bool:
+        """Compatibility fallback for deployments with an older skill module."""
+        text = " ".join(
+            str(item.get(field, "")) for field in ("title", "album")
+        ).casefold()
+        tokens = set(re.findall(r"[a-z0-9]+", text))
+        form_tokens = {
+            "bhajan", "aarti", "chalisa", "kirtan", "stuti", "mantra",
+            "dhun", "stotram", "stotra", "ashtak", "kavach", "satsang",
+        }
+        return bool(tokens & form_tokens)
 
 
 class BhaktiAgent:
