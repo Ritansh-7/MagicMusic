@@ -11,3 +11,4 @@ streamlit.err.log
 frontend/node_modules/
 frontend/.next/
 frontend/out/
+cozybeats_api.sqlite3
