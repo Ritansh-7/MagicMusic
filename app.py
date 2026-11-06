@@ -824,7 +824,7 @@ if not st.session_state.get("local_user_id"):
     if restored_session:
         st.session_state["local_user_id"] = restored_session[0]
         st.session_state.setdefault("local_session_started_at", restored_session[1])
-if st.session_state.get("local_user_id"):
+if st.session_state.get("local_user_id") and not st.session_state.get("auth_just_completed"):
     refresh_hybrid_model()
 
 
@@ -2092,24 +2092,17 @@ with st.sidebar:
             st.rerun()
     else:
         st.subheader("Welcome to CozyBeats")
-        auth_choice = st.radio(
-            "Choose an option to continue",
-            ["I am new — create account", "I already have an account — log in"],
-            index=None,
-            key="auth_choice",
-        )
-        if auth_choice is None:
-            st.info("First choose whether you are a new or existing user.")
-            st.stop()
-        is_new_user = auth_choice.startswith("I am new")
-        auth_mode = "Create account" if is_new_user else "Log in"
         with st.form("local_auth", border=False):
             email = st.text_input("Email")
             password = st.text_input("Password", type="password")
-            submitted = st.form_submit_button(auth_mode, width="stretch")
-        if submitted:
+            login_col, create_col = st.columns(2)
+            with login_col:
+                login_submitted = st.form_submit_button("Log in", width="stretch")
+            with create_col:
+                create_submitted = st.form_submit_button("Create account", width="stretch")
+        if login_submitted or create_submitted:
             try:
-                if is_new_user:
+                if create_submitted:
                     ok, message = user_store.register(email, password)
                 else:
                     ok, message = user_store.authenticate(email, password)
@@ -2126,9 +2119,10 @@ with st.sidebar:
                 bucket = int(hashlib.sha256(str(message).encode("utf-8")).hexdigest()[:8], 16) % 2
                 st.session_state["recommendation_variant"] = "diverse" if bucket else "control"
                 st.session_state["local_session_started_at"] = time.time()
-                st.session_state["local_is_admin"] = user_store.is_admin(message)
+                st.session_state["local_is_admin"] = False
+                st.session_state["auth_just_completed"] = True
+                st.session_state["pending_session_start"] = True
                 st.query_params[AUTH_SESSION_PARAM] = _make_auth_session_ticket(message)
-                log_behavior("session_start")
                 st.rerun()
             else:
                 st.error(message)
@@ -2506,11 +2500,11 @@ onboarding_tracks: list[str] = []
 
 live_track_ids = local_ids_for_spotify_taste(spotify_taste or {}, data)
 imported_track_ids = local_ids_for_imported_history(imported_history, data)
-preferred_track_ids = (
-    user_store.liked_track_ids(local_user_id)
-    + live_track_ids
-    + imported_track_ids
-)
+if st.session_state.get("auth_just_completed"):
+    liked_track_ids: list[str] = []
+else:
+    liked_track_ids = user_store.liked_track_ids(local_user_id)
+preferred_track_ids = liked_track_ids + live_track_ids + imported_track_ids
 
 
 def _dashboard_language_frames(profile: object, excluded_ids: list[str]) -> dict[str, pd.DataFrame]:
@@ -2661,34 +2655,69 @@ def render_dashboard_shelf(language: str, tracks: pd.DataFrame) -> None:
         )
 
 
-dashboard_profile = engine.build_user_profile(
-    track_ids=preferred_track_ids,
-    genres=onboarding_genres,
-)
-dashboard_signature = "|".join([
-    ",".join(sorted(map(str, preferred_track_ids))),
-    ",".join(sorted(map(str, onboarding_genres))),
-])
-if st.session_state.get("dashboard_signature") != dashboard_signature:
-    st.session_state["dashboard_shelves"] = _dashboard_language_frames(
-        dashboard_profile,
-        preferred_track_ids,
-    )
-    st.session_state["dashboard_signature"] = dashboard_signature
-dashboard_shelves = st.session_state["dashboard_shelves"]
-with st.container(border=True):
-    st.markdown("### Your music dashboard")
-    total_dashboard_tracks = len(dashboard_shelves["Hindi"]) + len(dashboard_shelves["English / global"])
-    count_a, count_b, count_c = st.columns(3)
-    count_a.metric("Dashboard library", f"{total_dashboard_tracks:,} tracks")
-    count_b.metric("Hindi shelf", f"{len(dashboard_shelves['Hindi']):,} picks")
-    count_c.metric("English / global shelf", f"{len(dashboard_shelves['English / global']):,} picks")
-    st.caption("Home shelves show 160 songs with artwork on phone and laptop. Jump pages to browse the rest.")
-    hindi_tab, english_tab = st.tabs(["Hindi", "English / global"])
-    with hindi_tab:
-        render_dashboard_shelf("Hindi", dashboard_shelves["Hindi"])
-    with english_tab:
-        render_dashboard_shelf("English / global", dashboard_shelves["English / global"])
+empty_shelves = {
+    "Hindi": pd.DataFrame(),
+    "English / global": pd.DataFrame(),
+}
+if st.session_state.get("auth_just_completed"):
+    st.session_state["dashboard_shelves"] = empty_shelves
+    st.session_state["dashboard_live_pending"] = True
+    st.session_state["home_defer_live"] = True
+    st.session_state["auth_just_completed"] = False
+elif "dashboard_shelves" not in st.session_state:
+    st.session_state["dashboard_shelves"] = empty_shelves
+    st.session_state["dashboard_live_pending"] = True
+
+def _render_home_shelves(dashboard_shelves: dict[str, pd.DataFrame]) -> None:
+    with st.container(border=True):
+        st.markdown("### Your music dashboard")
+        total_dashboard_tracks = len(dashboard_shelves["Hindi"]) + len(dashboard_shelves["English / global"])
+        if total_dashboard_tracks == 0:
+            st.caption("Home is ready. Song shelves are loading in the background.")
+            return
+        count_a, count_b, count_c = st.columns(3)
+        count_a.metric("Dashboard library", f"{total_dashboard_tracks:,} tracks")
+        count_b.metric("Hindi shelf", f"{len(dashboard_shelves['Hindi']):,} picks")
+        count_c.metric("English / global shelf", f"{len(dashboard_shelves['English / global']):,} picks")
+        st.caption("Home shelves show 160 songs with artwork on phone and laptop. Jump pages to browse the rest.")
+        hindi_tab, english_tab = st.tabs(["Hindi", "English / global"])
+        with hindi_tab:
+            render_dashboard_shelf("Hindi", dashboard_shelves["Hindi"])
+        with english_tab:
+            render_dashboard_shelf("English / global", dashboard_shelves["English / global"])
+
+@st.fragment(run_every="1s")
+def fill_home_shelves() -> None:
+    if st.session_state.pop("home_defer_live", False):
+        return
+    if st.session_state.get("pending_session_start"):
+        log_behavior("session_start")
+        st.session_state["pending_session_start"] = False
+    if st.session_state.get("dashboard_live_pending"):
+        dashboard_profile = engine.build_user_profile(
+            track_ids=preferred_track_ids,
+            genres=onboarding_genres,
+        )
+        st.session_state["dashboard_shelves"] = _dashboard_language_frames(
+            dashboard_profile,
+            preferred_track_ids,
+        )
+        st.session_state["dashboard_live_pending"] = False
+    if st.session_state.get("local_user_id") and not st.session_state.get("admin_checked"):
+        try:
+            st.session_state["local_is_admin"] = user_store.is_admin(
+                st.session_state["local_user_id"]
+            )
+        except Exception:
+            st.session_state["local_is_admin"] = False
+        st.session_state["admin_checked"] = True
+    st.rerun()
+
+if st.session_state.get("dashboard_live_pending") or st.session_state.get("home_defer_live"):
+    st.caption("Home is ready. Song shelves are loading in the background.")
+    fill_home_shelves()
+else:
+    _render_home_shelves(st.session_state.get("dashboard_shelves") or empty_shelves)
 
 
 def play_next_from_queue(mark_previous_as_skip: bool = True) -> bool:
