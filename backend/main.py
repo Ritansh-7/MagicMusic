@@ -267,7 +267,7 @@ async def home(user: dict[str, str] = Depends(current_user)):
     }
     # Home shelves are curated by category, so share them across users. User-specific
     # ranking stays in /v1/recommendations; this prevents one provider fan-out per user.
-    cache_key = _key("home", "catalog-v1")
+    cache_key = _key("home", "catalog-v2")
     cached = cache.get_json(cache_key)
     if cached is not None:
         return {"shelves": cached, "cached": True}
