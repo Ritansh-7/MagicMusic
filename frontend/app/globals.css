@@ -15,6 +15,7 @@ button, input { font: inherit; }
 nav { display: grid; gap: 8px; margin-top: 55px; }
 nav button { background: none; border: 0; color: var(--muted); text-align: left; font-size: 15px; padding: 13px 14px; border-radius: 10px; cursor: pointer; }
 nav .nav-active, nav button:hover { background: #1d2b3d; color: var(--text); }
+.mobile-nav { display: none; }
 .account { margin-top: auto; border-top: 1px solid #222b42; padding-top: 18px; display: grid; gap: 7px; color: var(--muted); font-size: 12px; }
 .account b { color: var(--text); overflow: hidden; text-overflow: ellipsis; }
 .account button { border: 1px solid #3b4866; background: #18223a; color: var(--text); border-radius: 10px; padding: 10px; cursor: pointer; }
@@ -77,6 +78,9 @@ nav .nav-active, nav button:hover { background: #1d2b3d; color: var(--text); }
 @media (max-width: 800px) {
   .sidebar { display: none; }
   .content { padding: 24px 18px 130px; }
+  .mobile-nav { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; margin: 16px 0 4px; }
+  .mobile-nav button { border: 1px solid #35425e; background: #131c31; color: var(--muted); border-radius: 10px; padding: 9px 5px; font-size: 11px; cursor: pointer; }
+  .mobile-nav button:hover { color: var(--green); border-color: var(--green); }
   .topbar h1 { font-size: 28px; }
   .hero { padding: 26px; }
   .hero h2 { font-size: 34px; }

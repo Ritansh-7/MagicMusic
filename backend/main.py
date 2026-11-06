@@ -294,20 +294,22 @@ async def home(user: dict[str, str] = Depends(current_user)):
         "Classics": "hindi evergreen classics",
         "Chill": "chill acoustic songs",
         "Trending": "latest popular songs",
+        "Motivation": "motivational workout songs",
+        "Devotional": "hindi devotional bhajan songs",
     }
     # Home shelves are curated by category, so share them across users. User-specific
     # ranking stays in /v1/recommendations; this prevents one provider fan-out per user.
-    cache_key = _key("home", "catalog-v2")
+    cache_key = _key("home", "catalog-v3-160")
     cached = cache.get_json(cache_key)
     if cached is not None:
         return {"shelves": cached, "cached": True}
     with ThreadPoolExecutor(max_workers=len(categories)) as pool:
-        groups = list(pool.map(lambda q: _search(q, 12), categories.values()))
+        groups = list(pool.map(lambda q: _search(q, 20), categories.values()))
     shelves = []
     for (title, search_query), items in zip(categories.items(), groups):
         items = list(items)
-        items.extend(_catalog_shelf_fallback(search_query, items, 16))
-        shelves.append({"title": title, "items": items[:16]})
+        items.extend(_catalog_shelf_fallback(search_query, items, 20))
+        shelves.append({"title": title, "items": items[:20]})
     cache.set_json(cache_key, shelves, ttl=900)
     return {"shelves": shelves, "cached": False}
 
