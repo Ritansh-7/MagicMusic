@@ -393,6 +393,7 @@ def _has_artwork(item: dict | None) -> bool:
 
 
 RECOMMENDATION_QUEUE_SIZE = 40
+MIN_RECOMMENDATION_QUEUE_SIZE = 15
 HOME_SHELF_SIZE = 160
 
 
@@ -654,6 +655,8 @@ def play_dashboard_live_item(item: dict) -> None:
     st.session_state.pop("jio_queue_seed_id", None)
     st.session_state.pop("jio_queue_attempted_id", None)
     st.session_state.pop("jio_queue_refill_attempted_id", None)
+    st.session_state["jio_queue_needs_expand"] = True
+    st.session_state["jio_queue_expand_defer"] = True
     st.session_state["jio_current_track_id"] = track_id
     st.session_state["jio_started_at"] = time.time()
     st.session_state["jio_last_accounted_at"] = st.session_state["jio_started_at"]
@@ -661,23 +664,34 @@ def play_dashboard_live_item(item: dict) -> None:
     st.rerun()
 
 
-@st.cache_data(ttl=3600, max_entries=8, show_spinner=False)
-def fetch_live_dashboard_tracks(base_url: str, language: str) -> pd.DataFrame:
-    """Cached live shelves with artwork only; one small query wave per language."""
+def _dashboard_query_waves(language: str) -> dict[str, tuple[str, ...]]:
     if language == "hindi":
-        queries = (
-            "hindi songs", "bollywood hits", "bollywood romantic songs",
-            "bollywood 2010s songs", "bollywood 2000s songs", "arijit singh songs",
-            "shreya ghoshal songs", "bollywood party songs",
-        )
-        allowed = {"hindi", ""}
-    else:
-        queries = (
-            "english pop songs", "english love songs", "english chill songs",
-            "english 2010s hits", "english 2000s hits", "english dance hits",
+        return {
+            "fast": ("hindi songs", "bollywood hits", "arijit singh songs"),
+            "more": (
+                "bollywood romantic songs", "bollywood 2010s songs",
+                "bollywood 2000s songs", "shreya ghoshal songs",
+                "bollywood party songs",
+            ),
+        }
+    return {
+        "fast": ("english pop songs", "english love songs", "english 2010s hits"),
+        "more": (
+            "english chill songs", "english 2000s hits", "english dance hits",
             "english acoustic songs", "english rock classics",
-        )
-        allowed = {"english"}
+        ),
+    }
+
+
+@st.cache_data(ttl=3600, max_entries=16, show_spinner=False)
+def fetch_live_dashboard_tracks(base_url: str, language: str, wave: str = "fast") -> pd.DataFrame:
+    """Cached live shelves with artwork only. `fast` is 3 queries; `more` fills later."""
+    waves = _dashboard_query_waves(language)
+    if wave == "full":
+        queries = waves["fast"] + waves["more"]
+    else:
+        queries = waves.get(wave) or waves["fast"]
+    allowed = {"hindi", ""} if language == "hindi" else {"english"}
     blocked_terms = re.compile(
         r"tamil|telugu|bengali|gujarati|marathi|bhojpuri|assamese|odia|kannada|malayalam",
         re.IGNORECASE,
@@ -687,8 +701,8 @@ def fetch_live_dashboard_tracks(base_url: str, language: str) -> pd.DataFrame:
         re.IGNORECASE,
     )
     client = JioSaavnClient(base_url)
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        pages = executor.map(lambda query: client.search_direct(query, limit=24), queries)
+    with ThreadPoolExecutor(max_workers=min(8, len(queries))) as executor:
+        pages = executor.map(lambda query: client.search_direct(query, limit=40), queries)
         rows: list[dict] = []
         seen: set[str] = set()
         for page in pages:
@@ -1590,18 +1604,18 @@ def build_jio_up_next(
         ],
         source="seed_search_results",
     )
-    if len(collected) < RECOMMENDATION_QUEUE_SIZE:
-        collect_queries(prioritized_queries, page_limit=20, max_queries=6, source="seed_title_album_artist")
-        soundtrack_peer_queries = _era_artist_discovery_queries(
-            seed_year,
-            _soundtrack_peer_artists(seed, collected),
-        )
-        collect_queries(
-            soundtrack_peer_queries,
-            page_limit=20,
-            max_queries=3,
-            source="soundtrack_peer_era",
-        )
+    collect_queries(prioritized_queries, page_limit=20, max_queries=6, source="seed_title_album_artist")
+    soundtrack_peer_queries = _era_artist_discovery_queries(
+        seed_year,
+        _soundtrack_peer_artists(seed, collected),
+    )
+    collect_queries(
+        soundtrack_peer_queries,
+        page_limit=20,
+        max_queries=3,
+        source="soundtrack_peer_era",
+    )
+    if sum(1 for item in collected if _has_artwork(item)) < 30:
         for artist in artist_names[:2]:
             try:
                 collect_items(
@@ -1832,9 +1846,8 @@ def build_jio_up_next(
         except Exception:
             pass
 
-    # Hard floor: every seed must surface at least 10 recommendations; never
-    # show "no recommendations" for any song regardless of provider sparsity.
-    if len(ranked) < 10:
+    # Hard floor: every seed must surface more than 14 recommendations.
+    if len(ranked) < MIN_RECOMMENDATION_QUEUE_SIZE:
         emergency_queries = []
         lang_term = seed_language or "hindi"
         emergency_queries.extend([
@@ -1885,10 +1898,17 @@ def build_jio_up_next(
     # Desperate final pad: broaden only within the seed's intent. A queue with
     # fewer devotional tracks is preferable to padding a devotional seed with
     # unrelated romantic/party Bollywood songs.
-    if len(ranked) < 10:
-        pad_queries = ["hindi songs", "bollywood hits", "hindi top hits", "popular hindi songs", "hindi evergreen"]
+    if len(ranked) < MIN_RECOMMENDATION_QUEUE_SIZE:
+        lang_term = seed_language or "hindi"
+        pad_queries = [
+            f"{lang_term} songs",
+            f"{lang_term} hits",
+            f"{lang_term} top hits",
+            f"popular {lang_term} songs",
+            f"{lang_term} evergreen",
+        ]
         if is_bhakti_seed:
-            pad_queries.extend([f"{seed_language or 'hindi'} bhajan", f"{seed_language or 'hindi'} devotional"])
+            pad_queries.extend([f"{lang_term} bhajan", f"{lang_term} devotional"])
         collect_queries(
             pad_queries,
             page_limit=40,
@@ -1907,7 +1927,7 @@ def build_jio_up_next(
             )
             if is_bhakti_seed:
                 pad_ranked = [item for item in pad_ranked if bhakti_agent.is_bhakti(item)]
-            pad_ranked = pad_ranked[: max(0, 10 - len(ranked))]
+            pad_ranked = pad_ranked[: max(0, MIN_RECOMMENDATION_QUEUE_SIZE - len(ranked))]
             ranked.extend(pad_ranked)
         except Exception:
             pass
@@ -1938,42 +1958,15 @@ def build_jio_up_next(
         elif not identity_keys.intersection(used_recordings):
             used_recordings.update(identity_keys)
             unique.append(item)
-    # Final near-duplicate dedup: same song released on different albums often
-    # has slightly different title spellings (e.g. "Sunate" vs "Sunaate",
-    # "Dhaam" vs "Dham"). Collapse them by core title tokens and substring
-    # overlap so one song never repeats in a queue.
-    def _core_title_key(item: dict) -> str:
-        title = _recommendation_title_key(item.get("title", ""))
-        return " ".join(title.split()[:6])
-
-    seen_core: set[str] = set()
+    seen_title_artist: set[str] = set()
     deduped: list[dict] = []
     for item in unique:
-        item_title = _recommendation_title_key(item.get("title", ""))
-        core = _core_title_key(item)
-        if core and core in seen_core:
+        title_key = _recommendation_title_key(item.get("title", ""))
+        artist_key = _compact_key(str(item.get("artists", "")).split(",")[0])
+        recording_key = f"{title_key}|{artist_key}"
+        if recording_key in seen_title_artist:
             continue
-        is_subset = False
-        for existing in deduped:
-            existing_title = _recommendation_title_key(existing.get("title", ""))
-            if not existing_title or not item_title:
-                continue
-            shorter, longer = (
-                (existing_title, item_title)
-                if len(existing_title) <= len(item_title)
-                else (item_title, existing_title)
-            )
-            if (
-                len(shorter.split()) >= 3
-                and len(shorter) >= 12
-                and shorter in longer
-            ):
-                is_subset = True
-                break
-        if is_subset:
-            continue
-        if core:
-            seen_core.add(core)
+        seen_title_artist.add(recording_key)
         deduped.append(item)
     unique = deduped
     # Bhakti gate on the final queue: devotional seeds never surface Bollywood
@@ -1988,15 +1981,18 @@ def build_jio_up_next(
     # Never allow a falsey/invalid limit to turn a successful ranking into an
     # empty queue. Some rerun paths can carry an old zero-like widget value.
     try:
-        effective_limit = max(1, int(limit or 0))
+        effective_limit = max(MIN_RECOMMENDATION_QUEUE_SIZE, int(limit or 0))
     except (TypeError, ValueError):
         effective_limit = RECOMMENDATION_QUEUE_SIZE
-    queue = [item for item in unique[:effective_limit] if _has_artwork(item)]
-    if len(queue) < 10:
-        queue = [
+    queue = [item for item in unique if _has_artwork(item)][:effective_limit]
+    if len(queue) < MIN_RECOMMENDATION_QUEUE_SIZE:
+        extra = [
             item for item in ranked
-            if isinstance(item, dict) and _has_artwork(item)
-        ][:effective_limit] or list(ranked[:effective_limit])
+            if isinstance(item, dict)
+            and _has_artwork(item)
+            and item not in queue
+        ]
+        queue = (queue + extra)[:effective_limit] or list(ranked[:effective_limit])
     dedup_fallback_used = bool(ranked and len(unique) < len(queue))
     queue_status = st.session_state.setdefault("jio_queue_status", {})
     queue_status["post_dedup_queue_size"] = len(queue)
@@ -2070,13 +2066,21 @@ with st.sidebar:
             local_user_id, issued_at = restored_session
             st.session_state["local_user_id"] = local_user_id
             st.session_state.setdefault("local_session_started_at", issued_at)
-            st.session_state["local_is_admin"] = user_store.is_admin(local_user_id)
+            st.session_state.setdefault("local_is_admin", False)
     if local_user_id:
-        summary = cached_user_summary(local_user_id)
         st.success("Signed in")
         if st.session_state.get("auth_storage_warning"):
             st.warning(st.session_state.pop("auth_storage_warning"))
-        st.caption(f"{summary['tracks_played']} tracks played · {summary['likes']} likes")
+        home_still_opening = bool(
+            st.session_state.get("auth_just_completed")
+            or st.session_state.get("dashboard_live_pending")
+            or st.session_state.get("home_defer_live")
+        )
+        if home_still_opening:
+            st.caption("Home is opening.")
+        else:
+            summary = cached_user_summary(local_user_id)
+            st.caption(f"{summary['tracks_played']} tracks played · {summary['likes']} likes")
         if st.session_state.get("local_session_started_at"):
             minutes = (time.time() - st.session_state["local_session_started_at"]) / 60
             st.caption(f"Current session: {minutes:.1f} min")
@@ -2500,53 +2504,46 @@ onboarding_tracks: list[str] = []
 
 live_track_ids = local_ids_for_spotify_taste(spotify_taste or {}, data)
 imported_track_ids = local_ids_for_imported_history(imported_history, data)
-if st.session_state.get("auth_just_completed"):
-    liked_track_ids: list[str] = []
+if st.session_state.get("auth_just_completed") or st.session_state.get("dashboard_live_pending"):
+    liked_track_ids = list(st.session_state.get("liked_ids_cache") or [])
 else:
-    liked_track_ids = user_store.liked_track_ids(local_user_id)
+    if st.session_state.get("liked_ids_cache") is None or st.session_state.get("summary_dirty"):
+        st.session_state["liked_ids_cache"] = user_store.liked_track_ids(local_user_id)
+    liked_track_ids = list(st.session_state.get("liked_ids_cache") or [])
 preferred_track_ids = liked_track_ids + live_track_ids + imported_track_ids
 
 
-def _dashboard_language_frames(profile: object, excluded_ids: list[str]) -> dict[str, pd.DataFrame]:
-    """Build broad, personalized local shelves once per profile state."""
-    ranked = engine.recommend_for_profile(
-        profile,
-        n=min(len(data), 1400),
-        exclude_ids=excluded_ids,
-        allow_explicit=False,
-        popularity_weight=0.10,
-        diversity=0.12,
-    )
-    genre_text = data["track_genre"].fillna("").astype(str).str.casefold()
-    hindi_mask = genre_text.str.contains(
-        r"bollywood|filmi|hindi|indian|bhangra|punjabi|desi pop|sufi|tollywood|bhojpuri|marathi",
-        regex=True,
-    )
-    # The local dataset has sparse language labels. Treat the remaining
-    # catalogue as English/global so the dashboard can still provide a full
-    # 100+ track shelf without pretending every row has verified language.
-    english_mask = ~hindi_mask
-    ranked_ids = set(ranked["track_id"].astype(str)) if not ranked.empty else set()
+def _merge_live_shelf_frames(*frames: pd.DataFrame) -> pd.DataFrame:
+    rows: list[pd.DataFrame] = [frame for frame in frames if frame is not None and not frame.empty]
+    if not rows:
+        return pd.DataFrame()
+    merged = pd.concat(rows, ignore_index=True)
+    if "track_name" in merged.columns and "artists" in merged.columns:
+        merged = merged.drop_duplicates(subset=["track_name", "artists"])
+    return merged.reset_index(drop=True)
 
-    def shelf(mask: pd.Series) -> pd.DataFrame:
-        selected = ranked[ranked["track_id"].astype(str).isin(set(data.loc[mask, "track_id"].astype(str)))]
-        selected = selected.drop_duplicates(subset=["track_name", "artists"])
-        if len(selected) < 100:
-            fallback = data.loc[mask].copy()
-            fallback = fallback[~fallback["track_id"].astype(str).isin(ranked_ids)]
-            fallback = fallback.sort_values(["popularity", "track_name"], ascending=[False, True])
-            selected = pd.concat([selected, fallback], ignore_index=True)
-        return selected.drop_duplicates(subset=["track_name", "artists"]).head(1000).reset_index(drop=True)
 
-    hindi_live = fetch_live_dashboard_tracks(jio_client.base_url, "hindi")
-    english_live = fetch_live_dashboard_tracks(jio_client.base_url, "english")
-    hindi_shelf = hindi_live if len(hindi_live) >= 80 else shelf(hindi_mask)
-    english_shelf = english_live if len(english_live) >= 80 else shelf(english_mask)
+def _dashboard_language_frames(profile: object, excluded_ids: list[str], enrich: bool = False) -> dict[str, pd.DataFrame]:
+    """Live JioSaavn shelves only. Login uses a 3-query wave; enrich fills later."""
+    del profile, excluded_ids
+    hindi_live = fetch_live_dashboard_tracks(jio_client.base_url, "hindi", "fast")
+    english_live = fetch_live_dashboard_tracks(jio_client.base_url, "english", "fast")
+    if enrich:
+        hindi_live = _merge_live_shelf_frames(
+            hindi_live,
+            fetch_live_dashboard_tracks(jio_client.base_url, "hindi", "more"),
+        )
+        english_live = _merge_live_shelf_frames(
+            english_live,
+            fetch_live_dashboard_tracks(jio_client.base_url, "english", "more"),
+        )
+
     def with_art(frame: pd.DataFrame) -> pd.DataFrame:
         if frame.empty or "image_url" not in frame.columns:
             return frame.head(0)
         return frame[frame["image_url"].astype(str).str.startswith("http")].head(HOME_SHELF_SIZE).reset_index(drop=True)
-    return {"Hindi": with_art(hindi_shelf), "English / global": with_art(english_shelf)}
+
+    return {"Hindi": with_art(hindi_live), "English / global": with_art(english_live)}
 
 
 def _recommendation_feedback(track_id: str, section: str, rating: str) -> None:
@@ -2625,7 +2622,10 @@ def render_dashboard_shelf(language: str, tracks: pd.DataFrame) -> None:
                 if like_col.button("♡ Like", key=f"dashboard_like_{language}_{feedback_key}", width="stretch"):
                     like_id = str(live_item.get("song_id") or row.get("track_id", title))
                     log_behavior("jio_like", like_id, metadata=live_item or {"title": title, "artists": artist})
-                    refresh_hybrid_model(force=True)
+                    liked_cache = list(st.session_state.get("liked_ids_cache") or [])
+                    if like_id not in liked_cache:
+                        liked_cache.append(like_id)
+                    st.session_state["liked_ids_cache"] = liked_cache
                     st.toast("Added to your taste profile")
                 yes_col, no_col = st.columns(2)
                 if yes_col.button("Yes", key=f"dash_yes_{language}_{feedback_key}", width="stretch"):
@@ -2662,11 +2662,13 @@ empty_shelves = {
 if st.session_state.get("auth_just_completed"):
     st.session_state["dashboard_shelves"] = empty_shelves
     st.session_state["dashboard_live_pending"] = True
+    st.session_state["dashboard_enrich_pending"] = False
     st.session_state["home_defer_live"] = True
     st.session_state["auth_just_completed"] = False
 elif "dashboard_shelves" not in st.session_state:
     st.session_state["dashboard_shelves"] = empty_shelves
     st.session_state["dashboard_live_pending"] = True
+    st.session_state["dashboard_enrich_pending"] = False
 
 def _render_home_shelves(dashboard_shelves: dict[str, pd.DataFrame]) -> None:
     with st.container(border=True):
@@ -2690,19 +2692,19 @@ def _render_home_shelves(dashboard_shelves: dict[str, pd.DataFrame]) -> None:
 def fill_home_shelves() -> None:
     if st.session_state.pop("home_defer_live", False):
         return
+    if st.session_state.get("dashboard_live_pending"):
+        st.session_state["dashboard_shelves"] = _dashboard_language_frames(
+            None,
+            preferred_track_ids,
+            enrich=False,
+        )
+        st.session_state["dashboard_live_pending"] = False
+        st.session_state["dashboard_enrich_pending"] = True
+        st.rerun()
+        return
     if st.session_state.get("pending_session_start"):
         log_behavior("session_start")
         st.session_state["pending_session_start"] = False
-    if st.session_state.get("dashboard_live_pending"):
-        dashboard_profile = engine.build_user_profile(
-            track_ids=preferred_track_ids,
-            genres=onboarding_genres,
-        )
-        st.session_state["dashboard_shelves"] = _dashboard_language_frames(
-            dashboard_profile,
-            preferred_track_ids,
-        )
-        st.session_state["dashboard_live_pending"] = False
     if st.session_state.get("local_user_id") and not st.session_state.get("admin_checked"):
         try:
             st.session_state["local_is_admin"] = user_store.is_admin(
@@ -2711,10 +2713,29 @@ def fill_home_shelves() -> None:
         except Exception:
             st.session_state["local_is_admin"] = False
         st.session_state["admin_checked"] = True
-    st.rerun()
+    if st.session_state.get("dashboard_enrich_pending"):
+        st.session_state["dashboard_shelves"] = _dashboard_language_frames(
+            None,
+            preferred_track_ids,
+            enrich=True,
+        )
+        st.session_state["dashboard_enrich_pending"] = False
+        st.rerun()
+        return
 
-if st.session_state.get("dashboard_live_pending") or st.session_state.get("home_defer_live"):
-    st.caption("Home is ready. Song shelves are loading in the background.")
+if (
+    st.session_state.get("dashboard_live_pending")
+    or st.session_state.get("home_defer_live")
+    or st.session_state.get("dashboard_enrich_pending")
+):
+    current_shelves = st.session_state.get("dashboard_shelves") or empty_shelves
+    total_dashboard_tracks = len(current_shelves.get("Hindi", pd.DataFrame())) + len(
+        current_shelves.get("English / global", pd.DataFrame())
+    )
+    if total_dashboard_tracks == 0:
+        st.caption("Home is ready. Song shelves are loading in the background.")
+    else:
+        _render_home_shelves(current_shelves)
     fill_home_shelves()
 else:
     _render_home_shelves(st.session_state.get("dashboard_shelves") or empty_shelves)
@@ -2835,7 +2856,7 @@ else:
                                 and _has_artwork(candidate)
                                 and str(candidate.get("song_id") or candidate.get("title", ""))
                                 != str(item.get("song_id") or item.get("title", ""))
-                            ]
+                            ][:60]
                             try:
                                 st.session_state["jio_queue"] = hybrid_engine.rank_jio_results(
                                     fast_pool,
@@ -2849,6 +2870,8 @@ else:
                             st.session_state["jio_queue_seed_id"] = str(
                                 item.get("song_id") or item.get("title", "")
                             )
+                            st.session_state["jio_queue_needs_expand"] = True
+                            st.session_state["jio_queue_expand_defer"] = True
                             st.session_state.pop("jio_queue_attempted_id", None)
                             st.session_state["jio_queue_refill_attempted_id"] = ""
                             st.session_state["jio_current_track_id"] = str(
@@ -2872,7 +2895,6 @@ else:
                             # queue. Preserve the existing queue and rerank it
                             # in memory so the action stays instant and does
                             # not shrink 55 recommendations to a few API rows.
-                            refresh_hybrid_model(force=True)
                             existing_queue = list(st.session_state.get("jio_queue", []))
                             if existing_queue:
                                 st.session_state["jio_queue"] = hybrid_engine.rank_jio_results(
@@ -2900,6 +2922,78 @@ else:
             st.caption("No songs found for this search.")
     except Exception as exc:
         st.error(f"Music search failed: {type(exc).__name__}: {exc}")
+
+@st.fragment(run_every="1s")
+def expand_recommendation_queue() -> None:
+    """Grow Up Next after the player is already on screen."""
+    if st.session_state.pop("jio_queue_expand_defer", False):
+        return
+    playing = st.session_state.get("jio_now_playing")
+    if not isinstance(playing, dict):
+        return
+    current_id = str(playing.get("song_id") or playing.get("title", ""))
+    existing_queue = list(st.session_state.get("jio_queue", []))
+    queue_seed_changed = st.session_state.get("jio_queue_seed_id") != current_id
+    needs_expand = bool(
+        st.session_state.get("jio_queue_needs_expand")
+        or queue_seed_changed
+        or (
+            len(existing_queue) < MIN_RECOMMENDATION_QUEUE_SIZE
+            and st.session_state.get("jio_queue_refill_attempted_id") != current_id
+        )
+    )
+    flush_player_events()
+    if not needs_expand:
+        return
+    st.session_state["jio_queue_needs_expand"] = False
+    st.session_state["jio_queue_attempted_id"] = current_id
+    st.session_state["jio_queue_refill_attempted_id"] = current_id
+    cached_results = st.session_state.get("jio_search_cache_v4", {}).get(
+        search_query.strip().lower() if search_query else "", []
+    )
+    fresh_queue = []
+    try:
+        fresh_queue = build_jio_up_next(
+            playing,
+            [*existing_queue, *cached_results],
+            jio_client,
+            hybrid_engine,
+            local_user_id,
+            data,
+            preferred_track_ids,
+            exclude_items=[playing] if queue_seed_changed else [playing, *existing_queue],
+        )
+    except Exception as exc:
+        queue_status = st.session_state.setdefault("jio_queue_status", {})
+        queue_status["build_error"] = type(exc).__name__
+        queue_status["build_error_detail"] = str(exc)
+        fallback_pool = [*existing_queue, *cached_results]
+        fresh_queue = [
+            dict(item)
+            for item in fallback_pool
+            if isinstance(item, dict)
+            and str(item.get("song_id") or item.get("title", "")) != current_id
+        ][:RECOMMENDATION_QUEUE_SIZE]
+    artwork_queue = [item for item in fresh_queue if isinstance(item, dict) and _has_artwork(item)]
+    if queue_seed_changed or not existing_queue:
+        st.session_state["jio_queue"] = (artwork_queue or existing_queue or fresh_queue)[:RECOMMENDATION_QUEUE_SIZE]
+    else:
+        merged_queue = []
+        seen_recordings: set[str] = set()
+        for item in [*existing_queue, *artwork_queue]:
+            identity_keys = _recommendation_history_keys(item)
+            if not identity_keys:
+                merged_queue.append(item)
+            elif not identity_keys.intersection(seen_recordings):
+                seen_recordings.update(identity_keys)
+                merged_queue.append(item)
+        st.session_state["jio_queue"] = merged_queue[:RECOMMENDATION_QUEUE_SIZE]
+    st.session_state.setdefault("jio_queue_status", {})["post_build_queue_size"] = len(
+        st.session_state.get("jio_queue", [])
+    )
+    st.session_state["jio_queue_seed_id"] = current_id
+    st.rerun()
+
 
 jio_now = st.session_state.get("jio_now_playing")
 if jio_now and (
@@ -2962,77 +3056,30 @@ if jio_now:
             st.link_button("Open song", perma_url, width="stretch")
         else:
             audio_ended = False
-        flush_player_events()
         if audio_ended and play_next_from_queue(mark_previous_as_skip=False):
             st.rerun()
-        existing_queue = list(st.session_state.get("jio_queue", []))
-        queue_seed_changed = (
-            st.session_state.get("jio_queue_seed_id") != current_id
-        )
-        if queue_seed_changed or (
-            len(existing_queue) <= 8
-            and st.session_state.get("jio_queue_refill_attempted_id") != current_id
-        ):
-            st.session_state["jio_queue_attempted_id"] = current_id
-            st.session_state["jio_queue_refill_attempted_id"] = current_id
-            try:
-                refresh_hybrid_model()
-            except Exception:
-                pass
-            cached_results = st.session_state.get("jio_search_cache_v4", {}).get(
-                search_query.strip().lower() if search_query else "", []
+        if (
+            st.session_state.get("jio_queue_expand_defer")
+            or st.session_state.get("jio_queue_needs_expand")
+            or st.session_state.get("pending_player_events")
+            or st.session_state.get("jio_queue_seed_id") != current_id
+            or (
+                len(st.session_state.get("jio_queue", [])) < MIN_RECOMMENDATION_QUEUE_SIZE
+                and st.session_state.get("jio_queue_refill_attempted_id") != current_id
             )
-            fresh_queue = []
-            try:
-                fresh_queue = build_jio_up_next(
-                    jio_now,
-                    [*existing_queue, *cached_results],
-                    jio_client,
-                    hybrid_engine,
-                    local_user_id,
-                    data,
-                    preferred_track_ids,
-                    exclude_items=[jio_now] if queue_seed_changed else [jio_now, *existing_queue],
-                )
-            except Exception as exc:
-                queue_status = st.session_state.setdefault("jio_queue_status", {})
-                queue_status["build_error"] = type(exc).__name__
-                queue_status["build_error_detail"] = str(exc)
-                # Ranking already retrieved valid provider rows. If the final
-                # queue shaping step fails on malformed metadata, keep those
-                # rows visible instead of replacing them with an empty queue.
-                fallback_pool = [*existing_queue, *cached_results]
-                fresh_queue = [
-                    dict(item)
-                    for item in fallback_pool
-                    if isinstance(item, dict)
-                    and str(item.get("song_id") or item.get("title", "")) != current_id
-                ][:RECOMMENDATION_QUEUE_SIZE]
-            artwork_queue = [item for item in fresh_queue if isinstance(item, dict) and _has_artwork(item)]
-            if queue_seed_changed:
-                st.session_state["jio_queue"] = (artwork_queue or existing_queue or fresh_queue)[:RECOMMENDATION_QUEUE_SIZE]
-                st.session_state.setdefault("jio_queue_status", {})["post_build_queue_size"] = len(st.session_state["jio_queue"])
-            else:
-                merged_queue = []
-                seen_recordings: set[str] = set()
-                for item in [*existing_queue, *artwork_queue]:
-                    identity_keys = _recommendation_history_keys(item)
-                    if not identity_keys:
-                        merged_queue.append(item)
-                    elif not identity_keys.intersection(seen_recordings):
-                        seen_recordings.update(identity_keys)
-                        merged_queue.append(item)
-                st.session_state["jio_queue"] = merged_queue[:RECOMMENDATION_QUEUE_SIZE]
-                st.session_state.setdefault("jio_queue_status", {})["post_build_queue_size"] = len(merged_queue)
-            st.session_state["jio_queue_seed_id"] = current_id
-        liked_ids = set(user_store.liked_track_ids(local_user_id))
+        ):
+            expand_recommendation_queue()
+        liked_ids = set(st.session_state.get("liked_ids_cache") or [])
         if current_id in liked_ids:
             st.success("♥ Liked")
         elif st.button("♡ Like this song", key=f"player_like_{current_id}", width="stretch"):
             st.session_state.pop("jio_queue_seed_id", None)
             st.session_state.pop("jio_queue_attempted_id", None)
             log_behavior("jio_like", current_id, metadata=jio_now)
-            refresh_hybrid_model(force=True)
+            liked_cache = list(st.session_state.get("liked_ids_cache") or [])
+            if current_id not in liked_cache:
+                liked_cache.append(current_id)
+            st.session_state["liked_ids_cache"] = liked_cache
             existing_queue = list(st.session_state.get("jio_queue", []))
             if existing_queue:
                 # Re-rank the already fetched queue immediately. This keeps

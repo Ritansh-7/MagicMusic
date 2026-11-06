@@ -2454,7 +2454,7 @@ class HybridRecommendationEngine:
             )
             hybrid = (
                 0.26 * audio_values
-                + 0.07 * metadata_values
+                + 0.05 * metadata_values
                 + 0.02 * collaborative
                 + 0.03 * (0.60 * short_values + 0.40 * medium_values)
                 + 0.08 * np.asarray([item.get("_listener_mood_match", 0.0) for item in results])
@@ -2462,10 +2462,10 @@ class HybridRecommendationEngine:
                 + 0.03 * transition_values
                 + 0.08 * context_values
                 + 0.03 * artist_anchor_values
-                + 0.13 * era_values
+                + 0.14 * era_values
                 + 0.12 * mood_fallback_values
                 + 0.08 * intent_values
-                + 0.08 * language_values
+                + 0.11 * language_values
                 + 0.02 * bandit_values
                 + 0.01 * popularity
             )
