@@ -5,6 +5,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from user_store import UserStore
 
 
+def test_login_accepts_legacy_and_new_password_hashes(tmp_path):
+    store = UserStore(tmp_path / "events.sqlite3", database_url="")
+    ok, user_id = store.register("new@example.com", "new-password")
+    assert ok
+    assert store.authenticate("new@example.com", "new-password")[0]
+
+    salt = bytes.fromhex("11" * 16)
+    digest = UserStore._digest_password("old-password", salt, UserStore._LEGACY_PASSWORD_ROUNDS)
+    encoded = f"{salt.hex()}${digest}"
+    assert UserStore._verify_password("old-password", encoded)
+    assert not UserStore._verify_password("wrong-password", encoded)
+
+
 def test_admin_allowlist_reads_streamlit_secrets(monkeypatch, tmp_path):
     import streamlit as st
 

@@ -808,7 +808,7 @@ def refresh_hybrid_model(force: bool = False) -> None:
     # A normal widget rerun cannot change the event table. Only reload remote
     # interactions after this session writes an event; admin analytics has its
     # own 10-second live refresh path.
-    if not force and not st.session_state.get("events_dirty", True):
+    if not force and not st.session_state.get("events_dirty", False):
         return
     events = user_store.interaction_events()
     latest_event = events[-1].get("created_at") if events else ""
@@ -819,7 +819,13 @@ def refresh_hybrid_model(force: bool = False) -> None:
         st.session_state["events_dirty"] = False
 
 
-refresh_hybrid_model()
+if not st.session_state.get("local_user_id"):
+    restored_session = _read_auth_session_ticket()
+    if restored_session:
+        st.session_state["local_user_id"] = restored_session[0]
+        st.session_state.setdefault("local_session_started_at", restored_session[1])
+if st.session_state.get("local_user_id"):
+    refresh_hybrid_model()
 
 
 def log_behavior(
@@ -851,7 +857,8 @@ def log_behavior(
         st.session_state["event_write_retry_after"] = time.time() + 30
         st.session_state["event_write_warning"] = True
         return
-    st.session_state["events_dirty"] = True
+    if event_type not in {"session_start", "session_end"}:
+        st.session_state["events_dirty"] = True
     st.session_state["summary_dirty"] = True
     st.session_state["user_events_dirty"] = True
 

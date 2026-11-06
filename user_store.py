@@ -206,17 +206,36 @@ class UserStore:
                 """
             )
 
-    @staticmethod
-    def _hash_password(password: str, salt: bytes | None = None) -> str:
-        salt = salt or secrets.token_bytes(16)
-        digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 240_000)
-        return f"{salt.hex()}${digest.hex()}"
+    # New hashes use fewer PBKDF2 rounds so login/signup stay interactive on
+    # Streamlit Cloud. Older ``salt$digest`` rows still verify at 240_000.
+    _PASSWORD_ROUNDS = 80_000
+    _LEGACY_PASSWORD_ROUNDS = 240_000
 
     @staticmethod
-    def _verify_password(password: str, encoded: str) -> bool:
+    def _digest_password(password: str, salt: bytes, rounds: int) -> str:
+        return hashlib.pbkdf2_hmac("sha256", password.encode(), salt, rounds).hex()
+
+    @classmethod
+    def _hash_password(cls, password: str, salt: bytes | None = None) -> str:
+        salt = salt or secrets.token_bytes(16)
+        digest = cls._digest_password(password, salt, cls._PASSWORD_ROUNDS)
+        return f"pbkdf2${cls._PASSWORD_ROUNDS}${salt.hex()}${digest}"
+
+    @classmethod
+    def _verify_password(cls, password: str, encoded: str) -> bool:
         try:
-            salt_hex, digest_hex = encoded.split("$", 1)
-            candidate = UserStore._hash_password(password, bytes.fromhex(salt_hex)).split("$", 1)[1]
+            parts = encoded.split("$")
+            if len(parts) == 4 and parts[0] == "pbkdf2":
+                rounds = int(parts[1])
+                salt = bytes.fromhex(parts[2])
+                digest_hex = parts[3]
+            elif len(parts) == 2:
+                rounds = cls._LEGACY_PASSWORD_ROUNDS
+                salt = bytes.fromhex(parts[0])
+                digest_hex = parts[1]
+            else:
+                return False
+            candidate = cls._digest_password(password, salt, rounds)
             return hmac.compare_digest(candidate, digest_hex)
         except (ValueError, TypeError):
             return False

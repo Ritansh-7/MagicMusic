@@ -2291,14 +2291,14 @@ class HybridRecommendationEngine:
             )
             # Current-track context is deliberately stronger than history.
             context_score = (
-                0.15 * seed_artist_match
-                + 0.12 * album_match
-                + 0.08 * era_match
-                + 0.08 * language_match
-                + 0.12 * cluster_match
-                + 0.25 * mood_match
-                + 0.10 * metadata_similarity
-                + 0.10 * intent_match
+                0.10 * seed_artist_match
+                + 0.10 * album_match
+                + 0.16 * era_match
+                + 0.14 * language_match
+                + 0.08 * cluster_match
+                + 0.22 * mood_match
+                + 0.08 * metadata_similarity
+                + 0.12 * intent_match
             )
             seed_content = (
                 0.40 * seed_artist_match
@@ -2449,19 +2449,23 @@ class HybridRecommendationEngine:
             # Mood & Sentiment is the PRIMARY driver of recommendations.
             # Direct audio/mood similarity + intent sentiment match carry >58% of the score.
             # Era and artist diversity are strictly regulated in sequence re-ranking.
+            language_values = np.asarray(
+                [float(item.get("_language_match", 0.0)) for item in results]
+            )
             hybrid = (
-                0.32 * audio_values
-                + 0.08 * metadata_values
+                0.26 * audio_values
+                + 0.07 * metadata_values
                 + 0.02 * collaborative
                 + 0.03 * (0.60 * short_values + 0.40 * medium_values)
                 + 0.08 * np.asarray([item.get("_listener_mood_match", 0.0) for item in results])
                 + 0.04 * np.asarray([item.get("_listener_era_match", 0.0) for item in results])
-                + 0.04 * transition_values
-                + 0.10 * context_values
+                + 0.03 * transition_values
+                + 0.08 * context_values
                 + 0.03 * artist_anchor_values
-                + 0.12 * era_values
-                + 0.11 * mood_fallback_values
-                + 0.06 * intent_values
+                + 0.13 * era_values
+                + 0.12 * mood_fallback_values
+                + 0.08 * intent_values
+                + 0.08 * language_values
                 + 0.02 * bandit_values
                 + 0.01 * popularity
             )
