@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from difflib import SequenceMatcher
 import numpy as np
 import pandas as pd
 
@@ -283,7 +284,6 @@ def double_verify_candidate(
 
     seed_intents = _infer_candidate_intents(seed)
     candidate_intents = _infer_candidate_intents(candidate)
-
     cand_title = str(candidate.get("title", "")).casefold()
     cand_artists = str(candidate.get("artists", "")).casefold()
     cand_album = str(candidate.get("album", "")).casefold()
@@ -1041,12 +1041,21 @@ def recommendation_history_keys(item: dict) -> set[str]:
 
 
 def _seed_title_token_overlap(seed: dict | None, candidate: dict) -> bool:
-    """Return True if seed and candidate share any title token (avoid near-duplicates)."""
+    """Return True only for an actual near-duplicate title.
+
+    Sharing one generic word (for example ``Current`` or ``ballad``) is not
+    enough to remove a relevant song from a radio queue.
+    """
     seed_title = recommendation_title_key((seed or {}).get("title", ""))
     cand_title = recommendation_title_key(candidate.get("title", ""))
     seed_tokens = set(seed_title.split())
     cand_tokens = set(cand_title.split())
-    return bool(seed_tokens and cand_tokens and seed_tokens & cand_tokens)
+    shared = seed_tokens & cand_tokens
+    if not shared:
+        return False
+    if len(shared) >= 2:
+        return True
+    return SequenceMatcher(None, seed_title, cand_title).ratio() >= 0.82
 
 
 def infer_audio_intents(item: dict) -> set[str]:
@@ -1112,6 +1121,40 @@ def _infer_candidate_intents(item: dict) -> set[str]:
             for label in supplied_labels
             if str(label).strip().casefold() not in {"", "general", "neutral"}
         )
+    # Use title/album/mood text only. Artist names are intentionally excluded:
+    # an artist called "Love" must not turn every track into a love song.
+    # Explicit provider intent labels are authoritative: don't let a generic
+    # mood label such as ``energetic`` silently override a provider label such
+    # as ``romantic``. This is important for mixed/compilation metadata.
+    has_explicit_labels = bool(
+        isinstance(supplied_labels, (list, tuple, set))
+        and any(
+            str(label).strip().casefold() not in {"", "general", "neutral"}
+            for label in supplied_labels
+        )
+    )
+    text_fields = ("title", "album", "track_genre", "genre")
+    if not has_explicit_labels:
+        text_fields = (*text_fields, "mood", "mood_label")
+    text = " ".join(
+        str(item.get(field, ""))
+        for field in text_fields
+    ).casefold()
+    intent_terms = {
+        "devotional": ("bhajan", "aarti", "chalisa", "kirtan", "mantra", "devotional", "bhakti", "hanuman", "krishna", "shiva", "darshan", "ghanshyam", "mata"),
+        "romantic": ("romantic", "love", "pyaar", "ishq", "mohabbat", "dil", "jaan", "valentine"),
+        "motivational": ("motivational", "motivation", "fight", "victory", "winner", "zinda", "courage", "inspire", "get ready"),
+        "playful": ("playful", "comic", "comedy", "theatrical", "fun", "masti", "chatur", "feel good"),
+        "energetic": ("energetic", "party", "dance", "banger", "club", "workout", "high energy"),
+        "sad": ("sad", "heartbreak", "broken", "lonely", "cry", "dard", "udaas"),
+        "calm": ("calm", "soothing", "peaceful", "relax", "sleep", "meditation", "chill"),
+        "acoustic_indie": ("acoustic", "indie", " unplugged "),
+        "rap_hiphop": ("rap", "hip hop", "hiphop", "mc "),
+        "ghazal": ("ghazal", "ghazals"),
+    }
+    for intent, terms in intent_terms.items():
+        if any(re.search(rf"(?<![a-z]){re.escape(term.strip())}(?![a-z])", text) for term in terms):
+            labels.add(intent)
     return labels | infer_audio_intents(item)
 
 
@@ -1126,7 +1169,17 @@ def infer_metadata_mood_labels(item: dict) -> set[str]:
                 return {mood}
     except Exception:
         pass
-    return set()
+    # Conservative offline fallback for common explicit mood words. This is
+    # used only when the classifier is unavailable and never reads artists.
+    text = " ".join(str(item.get(field, "")) for field in ("title", "album", "mood", "mood_label")).casefold()
+    fallback_terms = {
+        "romantic": ("romantic", "love", "pyaar", "ishq", "mohabbat", "dil"),
+        "playful": ("playful", "comic", "comedy", "theatrical", "fun", "masti"),
+        "motivational": ("motivational", "fight", "victory", "zinda", "inspire"),
+        "sad": ("sad", "heartbreak", "lonely", "dard"),
+        "calm": ("calm", "soothing", "peaceful", "relax", "chill"),
+    }
+    return {label for label, terms in fallback_terms.items() if any(term in text for term in terms)}
 import re
 from scipy.sparse import hstack, csr_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -1742,7 +1795,10 @@ class HybridRecommendationEngine:
                 if not _seed_title_token_overlap(seed, item)
             ]
             if seed and _is_bhakti_title(seed.get("title", "")):
-                romantic_terms = {"love", "pyaar", "ishq", "dil", "romantic", "yaar", "saajan", "sajna", "tum", "mera", "tera"}
+                # Keep generic possessives (mera/tera) out of this block:
+                # devotional titles such as "Merawali Re" commonly contain
+                # them and must not be discarded before devotional ranking.
+                romantic_terms = {"love", "pyaar", "ishq", "dil", "romantic", "yaar", "saajan", "sajna", "tum"}
                 results = [
                     item for item in results
                     if not any(t in recommendation_title_key(item.get("title", "")) for t in romantic_terms)
@@ -1767,10 +1823,12 @@ class HybridRecommendationEngine:
                         seed_intents = set(seed_p.get("intent_labels", []) or [])
                         seed_intent = seed_p.get("primary_intent")
                         seed_conf = float(seed_p.get("intent_confidence", 0.0) or 0.0)
+                        seed_religion = str(seed_p.get("religion") or "generic").casefold()
                         if _is_bhakti_title(seed.get("title", "")):
                             seed_intent = "devotional"
                             seed_conf = 1.0
-                            seed_religion = seed_religion or "hindu"
+                            if seed_religion in {"", "generic", "unknown"}:
+                                seed_religion = "hindu"
                         if (
                             seed_intent
                             and (
@@ -1786,7 +1844,7 @@ class HybridRecommendationEngine:
                                     "dhun", "stotram", "stotra", "namah", "jai", "om", "hare",
                                     "ram", "krishna", "shiva", "hanuman", "durga", "ganesha",
                                     "lakshmi", "saraswati", "vishnu", "narayan", "mahadev",
-                                    "shankar", "bholenath", "sai", "bhakti", "bhakt",
+                                    "shankar", "bholenath", "sai", "bhakti", "bhakt", "mata", "devotional",
                                 }
                                 kept = [
                                     item for item in compatible
@@ -1795,6 +1853,11 @@ class HybridRecommendationEngine:
                                             f"{item.get('title', '')} {item.get('album', '')}"
                                         )
                                         for t in bhakti_filter_terms
+                                    ) and not any(
+                                        t in recommendation_title_key(
+                                            f"{item.get('title', '')} {item.get('album', '')}"
+                                        )
+                                        for t in ("yeshu", "christian", "jesus", "church")
                                     )
                                 ]
                             else:
@@ -1808,7 +1871,13 @@ class HybridRecommendationEngine:
                                     ).casefold().strip()
                                     cand_p = cand_profiles.get(_ck) or _mu.profile(item)
                                     cand_intent = cand_p.get("primary_intent")
-                                    cand_religion = cand_p.get("religion")
+                                    cand_religion = str(cand_p.get("religion") or "unknown").casefold()
+                                    cand_text = f"{item.get('title', '')} {item.get('album', '')}".casefold()
+                                    if cand_religion in {"", "unknown", "generic"}:
+                                        if any(token in cand_text for token in ("yeshu", "christian", "jesus", "church")):
+                                            cand_religion = "christian"
+                                        elif any(token in cand_text for token in ("hanuman", "krishna", "shiva", "ram", "mata", "bhajan", "chalisa")):
+                                            cand_religion = "hindu"
                                     blocked = False
                                     if seed_intent == "devotional":
                                         if cand_intent != "devotional":
@@ -1837,7 +1906,7 @@ class HybridRecommendationEngine:
                             "dhun", "stotram", "stotra", "namah", "jai", "om", "hare",
                             "ram", "krishna", "shiva", "hanuman", "durga", "ganesha",
                             "lakshmi", "saraswati", "vishnu", "narayan", "mahadev",
-                            "shankar", "bholenath", "sai", "bhakti", "bhakt",
+                            "shankar", "bholenath", "sai", "bhakti", "bhakt", "mata", "devotional",
                         }
                         # Intent-gated compatible set is already devotional-only.
                         # Refine it with bhakti title terms for precision.
@@ -1848,6 +1917,11 @@ class HybridRecommendationEngine:
                                     f"{item.get('title', '')} {item.get('album', '')}"
                                 )
                                 for t in bhakti_terms
+                            ) and not any(
+                                t in recommendation_title_key(
+                                    f"{item.get('title', '')} {item.get('album', '')}"
+                                )
+                                for t in ("yeshu", "christian", "jesus", "church")
                             )
                         ]
                         if filtered:
@@ -2009,15 +2083,26 @@ class HybridRecommendationEngine:
             language_match = 1.0 if seed_language and language and seed_language == language else 0.0
             language_conflict = bool(seed_language and language and seed_language != language)
             item_intents = _infer_candidate_intents(item)
+            compilation_context = is_compilation_album(str((seed or {}).get("album", "")))
             era_language_fallback = bool(
                 seed_year
                 and item_year
                 and abs(seed_year - item_year) <= MAX_RECOMMENDATION_YEAR_DISTANCE
                 and language_match
-                and seed_confidence < 0.75
-                and seed_intents
+                and (seed_confidence < 0.75 or not seed_intents or compilation_context)
                 and not item_intents
             )
+            # A compilation/playlist seed often has a misleading upload year;
+            # its named film/work and language are still useful context for a
+            # same-era radio. Do not require an intent label for this bridge.
+            if (
+                compilation_context
+                and seed_year
+                and item_year
+                and abs(seed_year - item_year) <= MAX_RECOMMENDATION_YEAR_DISTANCE
+                and language_match
+            ):
+                era_language_fallback = True
             seed_cluster = (seed or {}).get("cluster_id")
             item_cluster = item.get("cluster_id")
             cluster_match = (
