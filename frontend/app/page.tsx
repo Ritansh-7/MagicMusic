@@ -93,4 +93,11 @@ function Artwork({ track, eager = false }: { track: Track; eager?: boolean }) {
   return <img src={imageUrl} alt={track.title} loading={eager ? "eager" : "lazy"} decoding="async" referrerPolicy="no-referrer" onError={() => setFailed(true)} />;
 }
 
-function Shelf({ title, tracks, onPlay, recommendation = false }: { title: string; tracks: Track[]; onPlay: (track: Track) => void; recommendation?: boolean }) { return <section className="shelf"><div className="shelf-heading"><h3>{title}</h3><span>{recommendation ? "Ranked for your taste" : "Curated live picks"}</span></div><div className="cards">{tracks.slice(0, 20).map((track, index) => <article className="card" key={`${track.song_id || track.title}-${index}`} onClick={() => onPlay(track)}><div className="art"><Artwork track={track} /><button className="play" aria-label={`Play ${track.title}`}>▶</button></div><b>{track.title}</b><small>{track.artists || "Unknown artist"}</small>{track.album && <small>{track.album}{track.year ? ` · ${track.year}` : ""}</small>}{recommendation && <em>{track.recommendation_reason || "Similar vibe"}</em>}</article>)}</div></section>; }
+function Shelf({ title, tracks, onPlay, recommendation = false }: { title: string; tracks: Track[]; onPlay: (track: Track) => void; recommendation?: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  const visibleTracks = tracks.slice(0, expanded ? 20 : 5);
+  return <section className="shelf">
+    <div className="shelf-heading"><div><h3>{title}</h3><span>{recommendation ? "Ranked for your taste" : "Curated live picks"}</span></div>{tracks.length > 5 && <button className="view-all" onClick={() => setExpanded(open => !open)}>{expanded ? "Show less" : `View all ${tracks.length} songs`}</button>}</div>
+    <div className="cards">{visibleTracks.map((track, index) => <article className="card" key={`${track.song_id || track.title}-${index}`} onClick={() => onPlay(track)}><div className="art"><Artwork track={track} /><button className="play" aria-label={`Play ${track.title}`}>▶</button></div><b>{track.title}</b><small>{track.artists || "Unknown artist"}</small>{track.album && <small>{track.album}{track.year ? ` · ${track.year}` : ""}</small>}{recommendation && <em>{track.recommendation_reason || "Similar vibe"}</em>}</article>)}</div>
+  </section>;
+}
