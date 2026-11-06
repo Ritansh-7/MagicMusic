@@ -99,7 +99,10 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="CozyBeats API", version="1.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("COZYBEATS_ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:8501").split(","),
+    allow_origins=os.getenv(
+        "COZYBEATS_ALLOWED_ORIGINS",
+        "https://cozybeats.vercel.app,http://localhost:3000,http://localhost:8501",
+    ).split(","),
     allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
