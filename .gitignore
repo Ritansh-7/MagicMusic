@@ -5,3 +5,9 @@ __pycache__/
 *.pyc
 streamlit.out.log
 streamlit.err.log
+.env
+.env.*
+!.env.example
+frontend/node_modules/
+frontend/.next/
+frontend/out/
