@@ -208,7 +208,7 @@ class UserStore:
 
     # New hashes use fewer PBKDF2 rounds so login/signup stay interactive on
     # Streamlit Cloud. Older ``salt$digest`` rows still verify at 240_000.
-    _PASSWORD_ROUNDS = 40_000
+    _PASSWORD_ROUNDS = 20_000
     _LEGACY_PASSWORD_ROUNDS = 240_000
 
     @staticmethod

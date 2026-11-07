@@ -11,6 +11,8 @@ from recommender import (
     _infer_candidate_intents,
     _interleave_recommendation_contexts,
     _mood_era_discovery_queries,
+    infer_seed_themes,
+    seed_context_discovery_queries,
     infer_audio_intents,
     infer_metadata_mood_labels,
     infer_same_soundtrack_audio_intents,
@@ -1398,4 +1400,69 @@ def test_secular_seed_excludes_devotional_candidates():
         "Devotional track leaked into romantic queue!"
     assert "bajrang_baan" not in ranked_ids, \
         "Devotional track leaked into romantic queue!"
+
+
+def test_life_title_builds_era_and_theme_queries_not_generic_hits():
+    seed = {
+        "title": "Jeena Yahan Marna Yahan",
+        "album": "Anand",
+        "year": 1971,
+        "language": "hindi",
+        "artists": "Mukesh",
+    }
+    assert "life" in infer_seed_themes(seed)
+    assert "romantic" not in infer_seed_themes(seed)
+    queries = seed_context_discovery_queries(seed, 1971, "hindi", ["Mukesh"])
+    blob = " ".join(queries).casefold()
+    assert "zindagi" in blob
+    assert "1970s" in blob
+    assert "mukesh" in blob
+    assert "anand" in blob
+    assert "bollywood hits" not in blob
+
+
+def test_romantic_seventies_title_queries_that_decade():
+    seed = {
+        "title": "Hum Tere Pyaar Mein",
+        "year": 1974,
+        "language": "hindi",
+        "artists": "Mahendra Kapoor",
+    }
+    assert "romantic" in infer_seed_themes(seed)
+    queries = seed_context_discovery_queries(seed, 1974, "hindi", ["Mahendra Kapoor"])
+    blob = " ".join(queries).casefold()
+    assert "romantic" in blob
+    assert "1970s" in blob
+    assert "mahendra" in blob
+
+
+def test_recent_romantic_seed_uses_2020s_window():
+    seed = {
+        "title": "Recent Love Song",
+        "year": 2025,
+        "language": "hindi",
+        "artists": "New Singer",
+        "intent_labels": ["romantic"],
+    }
+    queries = seed_context_discovery_queries(seed, 2025, "hindi", ["New Singer"])
+    blob = " ".join(queries).casefold()
+    assert "romantic" in blob
+    assert "2020s" in blob or "2025" in blob
+    assert "1970s" not in blob
+
+
+def test_different_seeds_get_different_discovery_queries():
+    life_queries = set(seed_context_discovery_queries(
+        {"title": "Jeena Yahan Marna Yahan", "album": "Anand", "year": 1971, "language": "hindi", "artists": "Mukesh"},
+        1971,
+        "hindi",
+        ["Mukesh"],
+    ))
+    love_queries = set(seed_context_discovery_queries(
+        {"title": "Hum Tere Pyaar Mein", "year": 1974, "language": "hindi", "artists": "Mahendra Kapoor"},
+        1974,
+        "hindi",
+        ["Mahendra Kapoor"],
+    ))
+    assert life_queries != love_queries
 

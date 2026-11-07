@@ -46,6 +46,7 @@ _INTENTS = (
     "energetic",
     "acoustic_indie",
     "calm",
+    "life",
     "film",
     "unknown",
 )
@@ -72,7 +73,7 @@ _MOODS = (
 _THEMES = (
     "hindu_devotional", "christian_devotional", "muslim_devotional",
     "sikh_devotional", "love", "separation", "nation", "celebration",
-    "devotional", "film", "unknown",
+    "devotional", "life", "film", "unknown",
 )
 
 _SYSTEM_PROMPT = """You classify Indian (Hindi/Hinglish) and English songs into
@@ -81,15 +82,15 @@ intent, mood, sub-genre and religion. Return ONLY one JSON object:
  "mood": ..., "theme": ...}
 
 Allowed intent: devotional, romantic, sad, party, patriotic, ghazal,
-motivational, energetic, acoustic_indie, calm, film, unknown
+motivational, energetic, acoustic_indie, calm, life, film, unknown
 Allowed sub_genre: bhajan, aarti, chalisa, kirtan, mantra, qawwali, ghazal,
 film, pop, rock, indie, folk, unknown
 Allowed religion: hindu, christian, muslim, sikh, generic, unknown
 Allowed mood: reverent, uplifting, tender, melancholic, energetic, playful,
 calm, romantic, sad, unknown
 Allowed theme: hindu_devotional, christian_devotional, muslim_devotional,
-sikh_devotional, love, separation, nation, celebration, devotional, film,
-unknown
+sikh_devotional, love, separation, nation, celebration, life, devotional,
+film, unknown
 
 Examples:
 "Shree Hanuman Chalisa - Hariharan, Lalit Sen - Shree Hanuman Chalisa
@@ -113,6 +114,15 @@ Hota Hai" ->
 "Tip Tip Barsa Paani - Alka Yagnik, Udit Narayan - Mohra" ->
 {"intent": "romantic", "intent_confidence": 0.85, "sub_genre": "film",
  "religion": "generic", "mood": "playful", "theme": "love"}
+"Jeena Yahan Marna Yahan - Mukesh - Anand" ->
+{"intent": "life", "intent_confidence": 0.93, "sub_genre": "film",
+ "religion": "generic", "mood": "melancholic", "theme": "life"}
+"Hum Tere Pyaar Mein - Mahendra Kapoor" ->
+{"intent": "romantic", "intent_confidence": 0.92, "sub_genre": "film",
+ "religion": "generic", "mood": "romantic", "theme": "love"}
+"Khat - 2025 Hindi romantic" ->
+{"intent": "romantic", "intent_confidence": 0.9, "sub_genre": "film",
+ "religion": "generic", "mood": "romantic", "theme": "love"}
 "Hui Aankh Nam - Anuradha Paudwal - Saathi" ->
 {"intent": "romantic", "intent_confidence": 0.85, "sub_genre": "film",
  "religion": "generic", "mood": "melancholic", "theme": "separation"}
@@ -289,7 +299,7 @@ def _valid(value: str, allowed: tuple[str, ...]) -> str:
     return value if value in allowed else "unknown"
 
 
-def classify_text(text: str) -> dict:
+def classify_text(text: str, allow_network: bool = True) -> dict:
     """Classify one free-text track description. Returns {} when the LLM is
     unavailable or unconfigured (callers fall back to keyword rules)."""
     if not text or not text.strip():
@@ -298,6 +308,8 @@ def classify_text(text: str) -> dict:
     cached = _cache_get(key)
     if cached is not None:
         return cached
+    if not allow_network:
+        return {}
     payload = _call_llm(
         _SYSTEM_PROMPT.rsplit("Text:", 1)[0] + "\nText: " + text
     )
@@ -320,7 +332,7 @@ def classify_text(text: str) -> dict:
     return payload or {}
 
 
-def classify_item(item: dict) -> dict:
+def classify_item(item: dict, allow_network: bool = True) -> dict:
     """Classify a track dict. Returns a music_understanding-compatible profile
     (primary_intent, intent_confidence, sub_genre, religion, mood, ...), or {}
     when classification is unavailable."""
@@ -328,7 +340,7 @@ def classify_item(item: dict) -> dict:
         str(item.get(field, ""))
         for field in ("title", "artists", "album", "language")
     )
-    llm = classify_text(text)
+    llm = classify_text(text, allow_network=allow_network)
     if not llm:
         return {}
     return {

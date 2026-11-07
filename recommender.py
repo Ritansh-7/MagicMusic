@@ -39,6 +39,8 @@ def recommendation_source_work(item: dict) -> str:
         work = re.sub(r"[^a-z0-9]+", " ", album_match.group(1).casefold()).strip()
         if work and not is_compilation_album(work):
             return work
+    if album and not is_compilation_album(album) and len(album.split()) <= 6:
+        return re.sub(r"[^a-z0-9]+", " ", album.casefold()).strip()
     return ""
 
 
@@ -391,6 +393,115 @@ def _era_artist_discovery_queries(seed_year: object, artists: list[str]) -> list
     return queries
 
 
+THEME_TERMS: dict[str, tuple[str, ...]] = {
+    "life": (
+        "zindagi", "jeena", "marna", "jeene", "safar", "jeevan", "zindagani",
+    ),
+    "romantic": (
+        "romantic", "love", "pyaar", "pyar", "ishq", "mohabbat",
+        "sanam", "preet", "sajna", "valentine",
+    ),
+    "sad": ("sad", "heartbreak", "dard", "udaas", "tanha", "judai", "alone", "broken"),
+    "motivational": ("motivational", "fight", "jeet", "victory", "inspire", "champion"),
+    "devotional": ("bhajan", "aarti", "chalisa", "kirtan", "bhakti", "mantra"),
+    "energetic": ("party", "dance", "energetic", "dhamaka"),
+    "playful": ("masti", "playful", "comedy", "fun"),
+    "ghazal": ("ghazal", "shayari"),
+    "calm": ("calm", "sukoon", "soothing", "lofi"),
+}
+
+
+def infer_seed_themes(item: dict | None) -> list[str]:
+    """Theme labels from this song's title/album only, not a global hits list."""
+    if not isinstance(item, dict):
+        return []
+    text = " ".join(
+        str(item.get(field, ""))
+        for field in ("title", "album", "mood", "mood_label")
+    ).casefold()
+    tokens = set(re.findall(r"[a-z0-9]+", text))
+    labels: list[str] = []
+    for theme, terms in THEME_TERMS.items():
+        if any((term in text if " " in term else term in tokens) for term in terms):
+            labels.append(theme)
+    supplied = item.get("intent_labels") or []
+    if isinstance(supplied, (list, tuple, set)):
+        for label in supplied:
+            key = str(label).strip().casefold()
+            if key in THEME_TERMS and key not in labels:
+                labels.append(key)
+    return labels
+
+
+def _era_search_terms(year: int) -> list[str]:
+    decade = (year // 10) * 10
+    if year >= 2020:
+        return ["2020s", "2020", "2023", "2024", "2025", "2026"]
+    return [f"{decade}s", str(year), str(decade + 5)]
+
+
+def seed_context_discovery_queries(
+    seed: dict | None,
+    seed_year: object,
+    language: object,
+    artists: list[str] | None = None,
+) -> list[str]:
+    """Build a unique query mix from this seed's era, mood, artist, and film."""
+    if not isinstance(seed, dict):
+        return []
+    year = _release_year(seed_year) or _release_year(seed.get("year"))
+    language_name = str(language or seed.get("language") or "hindi").strip().lower()
+    themes = infer_seed_themes(seed)
+    film = recommendation_source_work(seed)
+    artist_names = [
+        name.strip()
+        for name in (artists or str(seed.get("artists", "")).split(","))
+        if str(name).strip()
+    ][:2]
+    queries: list[str] = []
+    era_terms = _era_search_terms(year) if year else []
+    search_mood = {
+        "life": "zindagi",
+        "romantic": "romantic",
+        "sad": "sad",
+        "motivational": "motivational",
+        "devotional": "devotional",
+        "energetic": "party",
+        "playful": "feel good",
+        "ghazal": "ghazal",
+        "calm": "soft",
+    }
+    for theme in themes[:2]:
+        mood_word = search_mood.get(theme, theme)
+        queries.append(f"{language_name} {mood_word} songs")
+        for era in era_terms[:3]:
+            queries.append(f"{era} {language_name} {mood_word} songs")
+            queries.append(f"{language_name} {mood_word} {era}")
+        if theme == "life":
+            queries.extend([
+                f"{language_name} zindagi songs",
+                f"{era_terms[0]} {language_name} zindagi songs" if era_terms else f"{language_name} zindagi geet",
+            ])
+    if film:
+        queries.append(f"{film} songs")
+        queries.append(f"{film} soundtrack")
+        if themes:
+            queries.append(f"{film} {search_mood.get(themes[0], themes[0])} songs")
+    for artist in artist_names:
+        queries.append(f"{artist} songs")
+        if era_terms:
+            queries.append(f"{artist} {era_terms[0]} songs")
+        if themes:
+            queries.append(f"{artist} {search_mood.get(themes[0], themes[0])} songs")
+    title_tokens = [
+        token for token in re.findall(r"[a-z0-9]+", str(seed.get("title", "")).casefold())
+        if token not in {"the", "a", "and", "from", "song", "lyrics", "official", "full"}
+    ]
+    if title_tokens[:3]:
+        queries.append(" ".join(title_tokens[:3]) + f" {language_name} songs")
+    return list(dict.fromkeys(query for query in queries if query.strip()))
+
+
 def _mood_era_discovery_queries(
     seed_year: object,
     language: object,
@@ -410,14 +521,20 @@ def _mood_era_discovery_queries(
         "acoustic_indie": "acoustic",
         "rap_hiphop": "hip hop",
         "calm": "calm",
+        "life": "zindagi",
+        "motivational": "motivational",
     }
     terms = [mood_terms[intent] for intent in sorted(intents) if intent in mood_terms]
-    era = f"{year // 10 * 10}s"
+    era_terms = _era_search_terms(year)
     language_part = f" {language_name}" if language_name else ""
-    queries = [f"{era}{language_part} {term} songs" for term in terms[:2]]
+    queries = [
+        f"{era}{language_part} {term} songs"
+        for era in era_terms[:2]
+        for term in terms[:2]
+    ]
     if not queries:
-        queries.append(f"{era}{language_part} songs")
-    return queries
+        queries.append(f"{era_terms[0]}{language_part} songs")
+    return list(dict.fromkeys(queries))
 
 
 # ---------------------------------------------------------------------------
@@ -626,6 +743,7 @@ def era_mood_singer_discovery_queries(
         "romantic": "romantic", "sad": "sad", "energetic": "energetic",
         "playful": "feel good", "devotional": "devotional", "ghazal": "ghazal",
         "motivational": "motivational", "acoustic_indie": "acoustic", "rap_hiphop": "hip hop",
+        "life": "zindagi",
     }
     if mood_labels:
         mood_term = mood_map.get(mood_labels[0], "")
@@ -713,8 +831,9 @@ def era_theme_film_discovery_queries(
     for mood in mood_labels:
         for film in film_table.get(mood, [])[:max_films]:
             queries.append(f"{film} songs")
-            if mood in {"motivational", "romantic", "sad"}:
-                queries.append(f"{film} {mood} songs")
+            if mood in {"motivational", "romantic", "sad", "life"}:
+                mood_query = "zindagi" if mood == "life" else mood
+                queries.append(f"{film} {mood_query} songs")
     return queries[:max_films * 2]
 
 
@@ -1142,7 +1261,8 @@ def _infer_candidate_intents(item: dict) -> set[str]:
     ).casefold()
     intent_terms = {
         "devotional": ("bhajan", "aarti", "chalisa", "kirtan", "mantra", "devotional", "bhakti", "hanuman", "krishna", "shiva", "darshan", "ghanshyam", "mata"),
-        "romantic": ("romantic", "love", "pyaar", "ishq", "mohabbat", "dil", "jaan", "valentine"),
+        "romantic": ("romantic", "love", "pyaar", "ishq", "mohabbat", "valentine"),
+        "life": ("zindagi", "jeena", "marna", "jeene", "safar", "jeevan"),
         "motivational": ("motivational", "motivation", "fight", "victory", "winner", "zinda", "courage", "inspire", "get ready"),
         "playful": ("playful", "comic", "comedy", "theatrical", "fun", "masti", "chatur", "feel good"),
         "energetic": ("energetic", "party", "dance", "banger", "club", "workout", "high energy"),
@@ -2108,7 +2228,8 @@ class HybridRecommendationEngine:
         listener_eras = self.user_era_profiles.get(str(user_id), {})
         seed_feature_tokens = _semantic_metadata_tokens(seed or {})
         seed_confidence = float((seed or {}).get("mood_confidence", 0.0) or 0.0)
-        seed_intents = _infer_candidate_intents(seed or {})
+        seed_intents = _infer_candidate_intents(seed or {}) | set(infer_seed_themes(seed or {}))
+        seed_themes = set(infer_seed_themes(seed or {}))
         # Semantic embeddings are the generalisation layer for new titles,
         # artists and genres that have never appeared in a keyword rule.
         semantic_embedding_scores = _semantic_embedding_scores(
@@ -2197,7 +2318,7 @@ class HybridRecommendationEngine:
                     and (not seed_year or not item_year or era_delta <= 3)
                 )
             era_match = (
-                float(np.exp(-((seed_year - item_year) / 18.0) ** 2))
+                float(np.exp(-((seed_year - item_year) / (6.0 if seed_year >= 2020 else 12.0)) ** 2))
                 if seed_year and item_year else 0.0
             )
             same_era = bool(era_match >= 0.70)
@@ -2277,28 +2398,35 @@ class HybridRecommendationEngine:
                 metadata_similarity,
                 0.70 * semantic_embedding_match + 0.30 * metadata_similarity,
             )
+            item_themes = set(infer_seed_themes(item)) | item_intents
+            theme_match = (
+                len(seed_themes.intersection(item_themes)) / max(len(seed_themes), 1)
+                if seed_themes else 0.0
+            )
             intent_match = (
                 len(seed_intents.intersection(item_intents)) / max(len(seed_intents), 1)
                 if seed_intents else 0.0
             )
+            intent_match = max(intent_match, theme_match)
             intent_conflict = bool(seed_intents and item_intents and not seed_intents.intersection(item_intents))
             metadata_score = (
-                0.35 * intent_match
-                + 0.20 * era_match
-                + 0.15 * language_match
-                + 0.15 * style_match
-                + 0.15 * metadata_similarity
+                0.28 * intent_match
+                + 0.18 * theme_match
+                + 0.22 * era_match
+                + 0.14 * language_match
+                + 0.10 * style_match
+                + 0.08 * metadata_similarity
             )
             # Current-track context is deliberately stronger than history.
             context_score = (
                 0.10 * seed_artist_match
-                + 0.10 * album_match
-                + 0.16 * era_match
+                + 0.12 * album_match
+                + 0.18 * era_match
                 + 0.14 * language_match
-                + 0.08 * cluster_match
-                + 0.22 * mood_match
+                + 0.06 * cluster_match
+                + 0.16 * mood_match
                 + 0.08 * metadata_similarity
-                + 0.12 * intent_match
+                + 0.16 * intent_match
             )
             seed_content = (
                 0.40 * seed_artist_match
@@ -2462,10 +2590,10 @@ class HybridRecommendationEngine:
                 + 0.03 * transition_values
                 + 0.08 * context_values
                 + 0.03 * artist_anchor_values
-                + 0.14 * era_values
+                + 0.15 * era_values
                 + 0.12 * mood_fallback_values
-                + 0.08 * intent_values
-                + 0.11 * language_values
+                + 0.10 * intent_values
+                + 0.12 * language_values
                 + 0.02 * bandit_values
                 + 0.01 * popularity
             )

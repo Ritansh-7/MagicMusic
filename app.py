@@ -20,8 +20,8 @@ from recommender import (
     SpotifyRecommendationEngine,
     _era_artist_discovery_queries,
     _mood_era_discovery_queries,
-    era_mood_singer_discovery_queries,
-    era_theme_film_discovery_queries,
+    infer_seed_themes,
+    seed_context_discovery_queries,
     _soundtrack_peer_artists,
     infer_audio_intents,
     infer_metadata_mood_labels,
@@ -349,7 +349,8 @@ MOOD_VECTOR_FEATURES = (
 )
 
 INTENT_TERMS = {
-    "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "pyar", "dil", "jaan", "sanam", "sajan", "saiyaara", "milan"},
+    "romantic": {"love", "romantic", "ishq", "mohabbat", "pyaar", "pyar", "sanam", "sajan", "saiyaara", "milan"},
+    "life": {"zindagi", "jeena", "marna", "jeene", "safar", "jeevan"},
     "playful": {"playful", "comic", "comedy", "humorous", "funny", "lighthearted", "light hearted", "mischief", "masti", "nautanki", "chatur", "nok jhok", "banter", "witty", "theatrical", "expressive", "call and response", "call response", "jugalbandi"},
     "ghazal": {"ghazal", "ghazals", "shayar", "shayari", "mehfil", "rekhta", "ghulam ali", "ghulam ali classics", "ustad bade ghulam ali", "ghulam ali khan", "chupke chupke classics"},
     "motivational": {"motivation", "motivational", "fight", "fighting", "battle", "zinda", "jeet", "victory", "fighter", "warrior", "rise", "goal", "inspire", "champion", "unstoppable"},
@@ -393,7 +394,7 @@ def _has_artwork(item: dict | None) -> bool:
 
 
 RECOMMENDATION_QUEUE_SIZE = 40
-MIN_RECOMMENDATION_QUEUE_SIZE = 15
+MIN_RECOMMENDATION_QUEUE_SIZE = 20
 HOME_SHELF_SIZE = 160
 
 
@@ -667,7 +668,7 @@ def play_dashboard_live_item(item: dict) -> None:
 def _dashboard_query_waves(language: str) -> dict[str, tuple[str, ...]]:
     if language == "hindi":
         return {
-            "fast": ("hindi songs", "bollywood hits", "arijit singh songs"),
+            "fast": ("hindi songs", "bollywood hits"),
             "more": (
                 "bollywood romantic songs", "bollywood 2010s songs",
                 "bollywood 2000s songs", "shreya ghoshal songs",
@@ -675,7 +676,7 @@ def _dashboard_query_waves(language: str) -> dict[str, tuple[str, ...]]:
             ),
         }
     return {
-        "fast": ("english pop songs", "english love songs", "english 2010s hits"),
+        "fast": ("english pop songs", "english love songs"),
         "more": (
             "english chill songs", "english 2000s hits", "english dance hits",
             "english acoustic songs", "english rock classics",
@@ -702,7 +703,7 @@ def fetch_live_dashboard_tracks(base_url: str, language: str, wave: str = "fast"
     )
     client = JioSaavnClient(base_url)
     with ThreadPoolExecutor(max_workers=min(8, len(queries))) as executor:
-        pages = executor.map(lambda query: client.search_direct(query, limit=40), queries)
+        pages = executor.map(lambda query: client.search_direct(query, limit=24), queries)
         rows: list[dict] = []
         seen: set[str] = set()
         for page in pages:
@@ -1407,17 +1408,6 @@ def build_jio_up_next(
         else:
             related_queries.append(f"{artist} songs")
 
-    if seed_language:
-        related_queries.extend([
-            f"{seed_language} acoustic pop songs",
-            f"{seed_language} indie songs",
-            f"{seed_language} chill songs",
-            f"feel good {seed_language} songs",
-            f"{seed_language} ballads",
-            f"{seed_language} classics",
-        ])
-    else:
-        related_queries.extend(["acoustic pop songs", "indie songs", "chill songs", "classic songs"])
     # A sparse provider result must still produce a radio. This is especially
     # common for older international tracks whose artist catalogue is tiny.
     if len(search_results) < 5:
@@ -1476,30 +1466,36 @@ def build_jio_up_next(
             f"{artist_names[0]} essentials" if artist_names else f"{language_query} feel good songs",
         ],
     ]
-    seed_intents_set = set(seed.get("intent_labels", []))
-    era_singer_queries = era_mood_singer_discovery_queries(
+    try:
+        seed_profile = _llc.classify_item(seed, allow_network=False) if _llc else {}
+        llm_intent = str((seed_profile or {}).get("primary_intent") or "").casefold()
+        llm_theme = str((seed_profile or {}).get("theme") or "").casefold()
+        llm_conf = float((seed_profile or {}).get("intent_confidence") or 0.0)
+        if llm_intent in {"life", "romantic", "sad", "motivational", "devotional"} and llm_conf >= 0.55:
+            seed["intent_labels"] = sorted(set(seed.get("intent_labels") or []) | {llm_intent})
+        if llm_theme == "love" and llm_conf >= 0.55:
+            seed["intent_labels"] = sorted(set(seed.get("intent_labels") or []) | {"romantic"})
+        if llm_theme == "life" and llm_conf >= 0.55:
+            seed["intent_labels"] = sorted(set(seed.get("intent_labels") or []) | {"life"})
+    except Exception:
+        pass
+    seed_intents_set = set(seed.get("intent_labels", [])) | set(infer_seed_themes(seed))
+    seed["intent_labels"] = sorted(seed_intents_set - {"general", "neutral", ""})
+    seed_context_queries = seed_context_discovery_queries(
+        seed,
         seed_year,
         seed_language,
-        seed_intents_set,
         artist_names,
-        max_singers=5,
-    )
-    era_film_queries = era_theme_film_discovery_queries(
-        seed_year,
-        seed_language,
-        seed_intents_set,
-        max_films=4,
     )
     prioritized_queries = (
-        related_queries[:3]
+        seed_context_queries
+        + related_queries[:3]
         + title_variants[refresh_round % len(title_variants)]
         + _mood_era_discovery_queries(
             seed_year,
             seed_language,
             seed_intents_set,
         )
-        + era_singer_queries
-        + era_film_queries
         + _era_artist_discovery_queries(seed_year, artist_names)
         + related_queries[3:]
     )
@@ -1605,21 +1601,21 @@ def build_jio_up_next(
         source="seed_search_results",
     )
     collect_queries(prioritized_queries, page_limit=20, max_queries=6, source="seed_title_album_artist")
-    soundtrack_peer_queries = _era_artist_discovery_queries(
-        seed_year,
-        _soundtrack_peer_artists(seed, collected),
-    )
-    collect_queries(
-        soundtrack_peer_queries,
-        page_limit=20,
-        max_queries=3,
-        source="soundtrack_peer_era",
-    )
-    if sum(1 for item in collected if _has_artwork(item)) < 30:
-        for artist in artist_names[:2]:
+    if sum(1 for item in collected if _has_artwork(item)) < 20:
+        soundtrack_peer_queries = _era_artist_discovery_queries(
+            seed_year,
+            _soundtrack_peer_artists(seed, collected),
+        )
+        collect_queries(
+            soundtrack_peer_queries,
+            page_limit=16,
+            max_queries=2,
+            source="soundtrack_peer_era",
+        )
+        for artist in artist_names[:1]:
             try:
                 collect_items(
-                    [item for item in client.search(artist, limit=40) if _has_artwork(item)],
+                    [item for item in client.search_direct(artist, limit=20) if _has_artwork(item)],
                     source="seed_artist_catalogue",
                 )
             except Exception:
@@ -1628,17 +1624,6 @@ def build_jio_up_next(
     if inferred_seed_year and not seed_year:
         seed_year = inferred_seed_year
         seed["year"] = seed_year
-        collect_queries(
-            _mood_era_discovery_queries(
-                seed_year,
-                seed_language,
-                set(seed.get("intent_labels", [])),
-            )
-            + _era_artist_discovery_queries(seed_year, artist_names),
-            page_limit=20,
-            max_queries=4,
-            source="seed_inferred_era_mood",
-        )
     enriched_collected = []
     try:
         enriched_collected = enrich_live_items(collected)
@@ -1658,14 +1643,14 @@ def build_jio_up_next(
         )
         seed["intent_source"] = "same_soundtrack_audio_proxy"
     # Bhakti agent: use dedicated devotional recommender when seed is bhakti/devotional
-    bhakti_agent = BhaktiAgent(llm_classifier=_llc if _llc else None, llm_enabled=_llc is not None)
+    bhakti_agent = BhaktiAgent(llm_classifier=_llc if _llc else None, llm_enabled=False)
     try:
         # is_strong_bhakti_seed (not is_bhakti_skill_match): a single generic
         # deity token in a Bollywood film title ("Ye Toh Sach Hai Ke Bhagwan")
         # must not classify the seed as devotional, because the bhakti gate
         # would then demand devotional-only candidates and wipe the queue.
         is_bhakti_seed = is_strong_bhakti_seed(seed) or bool(
-            _llc and _llc.classify_item(seed).get("primary_intent") == "devotional"
+            _llc and _llc.classify_item(seed, allow_network=False).get("primary_intent") == "devotional"
         )
     except Exception:
         is_bhakti_seed = False
@@ -1693,7 +1678,7 @@ def build_jio_up_next(
         ranked = []
     # A strict pass is preferred, but sparse live metadata should not leave
     # the player with an empty queue when a language/era/style bridge exists.
-    if len(ranked) < 25 and enriched_collected:
+    if len(ranked) < 20 and enriched_collected:
         try:
             if is_bhakti_seed:
                 # Relaxed bhakti pass: lower min_score to surface more devotional candidates
@@ -1717,62 +1702,24 @@ def build_jio_up_next(
         except Exception:
             pass
 
-    # Guarantee queue contains 10-35 songs matching seed's mood + era with diverse singers:
-    # If the initial queries yield < 25 relevant songs, fire an intensive expansion wave
-    # targeting other singers from that exact era doing the same mood + iconic era films.
-    if len(ranked) < 25:
+    if len(ranked) < 20:
         era_term = f"{(seed_year // 10) * 10}s" if seed_year else ""
         lang_term = seed_language or "hindi"
         seed_mood_labels = [l for l in seed.get("intent_labels", []) if l not in {"general", "neutral"}]
-        mood_str = seed_mood_labels[0] if seed_mood_labels else (
-            "romantic" if "romantic" in str(seed.get("mood_label", ""))
-            else "sad" if "sad" in str(seed.get("mood_label", ""))
-            else "energetic" if "energetic" in str(seed.get("mood_label", ""))
-            else "dance" if lang_term == "english"
-            else "hits"
-        )
-        expansion_queries = []
-        # Era-aware different singer queries (Rafi, Lata, Asha, etc. for 70s romantic)
-        expansion_queries.extend(
-            era_mood_singer_discovery_queries(
-                seed_year,
-                seed_language,
-                seed_intents_set,
-                artist_names,
-                max_singers=4,
-            )
-        )
-        # Iconic era film soundtrack queries (e.g. Sultan/Bhaag Milkha Bhaag for 2010s motivational)
-        expansion_queries.extend(
-            era_theme_film_discovery_queries(
-                seed_year,
-                seed_language,
-                seed_intents_set,
-                max_films=3,
-            )
-        )
+        mood_str = seed_mood_labels[0] if seed_mood_labels else "songs"
+        if mood_str == "life":
+            mood_str = "zindagi"
+        expansion_queries = list(seed_context_discovery_queries(
+            seed, seed_year, seed_language, artist_names,
+        ))
         if era_term:
             expansion_queries.extend([
                 f"{era_term} {lang_term} {mood_str} songs",
                 f"{era_term} {lang_term} {mood_str} hits",
-                f"{era_term} {lang_term} superhits",
-                f"best of {era_term} {lang_term}",
-                f"{era_term} {lang_term} top songs",
-                f"{era_term} {lang_term} trending songs",
             ])
-            if lang_term == "english":
-                expansion_queries.extend([
-                    f"{era_term} dance hits",
-                    f"{era_term} pop hits",
-                    f"{era_term} club hits",
-                    f"{era_term} party hits",
-                ])
         else:
             expansion_queries.extend([
-                f"{lang_term} {mood_str} hits",
                 f"{lang_term} {mood_str} songs",
-                f"top {lang_term} {mood_str} songs",
-                f"{lang_term} superhits",
             ])
         if is_bhakti_seed:
             expansion_queries.extend([
@@ -1785,7 +1732,7 @@ def build_jio_up_next(
                 f"{lang_term} mantra songs",
                 f"{lang_term} stuti songs",
             ])
-        collect_queries(expansion_queries, page_limit=40, max_queries=16, source="same_era_mood_artist_expansion")
+        collect_queries(expansion_queries, page_limit=20, max_queries=4, source="same_era_mood_artist_expansion")
         enriched_collected = enrich_live_items(collected)
         try:
             expanded_ranked = hybrid.rank_jio_results(
@@ -1808,111 +1755,25 @@ def build_jio_up_next(
         except Exception:
             pass
 
-    # Safety floor: never let queue drop below 20 songs under any circumstance
-    if len(ranked) < 20:
-        safety_queries = []
-        era_term = f"{(seed_year // 10) * 10}s" if seed_year else ""
-        lang_term = seed_language or "hindi"
-        if era_term:
-            safety_queries.extend([
-                f"{era_term} {lang_term} hits",
-                f"{era_term} {lang_term} songs",
-                f"best of {era_term} songs",
-            ])
-        safety_queries.extend([
-            f"{lang_term} classics" if era_term and int(str(seed_year)[:4]) < 2000 else f"{lang_term} top hits",
-            f"popular {lang_term} songs",
-        ])
-        collect_queries(safety_queries, page_limit=40, max_queries=6, source="safety_floor_expansion")
-        enriched_collected = enrich_live_items(collected)
-        try:
-            safety_ranked = hybrid.rank_jio_results(
-                enriched_collected,
-                user_id,
-                catalog,
-                preferred_track_ids,
-                seed=seed,
-                relaxed_context=True,
-            )
-            if is_bhakti_seed:
-                seed_deity = bhakti_agent.get_deity(seed)
-                safety_ranked = [
-                    item for item in safety_ranked
-                    if bhakti_agent.is_bhakti(item)
-                    or (seed_deity and bhakti_agent.get_deity(item) == seed_deity)
-                ]
-            if len(safety_ranked) > len(ranked):
-                ranked = safety_ranked
-        except Exception:
-            pass
-
-    # Hard floor: every seed must surface more than 14 recommendations.
-    if len(ranked) < MIN_RECOMMENDATION_QUEUE_SIZE:
-        emergency_queries = []
-        lang_term = seed_language or "hindi"
-        emergency_queries.extend([
-            f"{lang_term} top hits",
-            f"{lang_term} popular songs",
-            f"{lang_term} evergreen songs",
-            f"{lang_term} superhits",
-            "bollywood hits",
-            "hindi songs",
-            f"{lang_term} old songs",
-            f"{lang_term} new songs",
-        ])
-        if is_bhakti_seed:
-            emergency_queries.extend([
-                f"{lang_term} bhajan",
-                f"{lang_term} devotional",
-                f"{lang_term} aarti",
-                f"{lang_term} bhakti",
-            ])
-        collect_queries(
-            emergency_queries,
-            page_limit=40,
-            max_queries=14,
-            source="emergency_hard_floor",
-        )
-        enriched_collected = enrich_live_items(collected)
-        try:
-            emergency_ranked = hybrid.rank_jio_results(
-                enriched_collected,
-                user_id,
-                catalog,
-                preferred_track_ids,
-                seed=seed,
-                relaxed_context=True,
-            )
-            if is_bhakti_seed:
-                seed_deity = bhakti_agent.get_deity(seed)
-                emergency_ranked = [
-                    item for item in emergency_ranked
-                    if bhakti_agent.is_bhakti(item)
-                    or (seed_deity and bhakti_agent.get_deity(item) == seed_deity)
-                ]
-            if len(emergency_ranked) > len(ranked):
-                ranked = emergency_ranked
-        except Exception:
-            pass
-
     # Desperate final pad: broaden only within the seed's intent. A queue with
     # fewer devotional tracks is preferable to padding a devotional seed with
     # unrelated romantic/party Bollywood songs.
-    if len(ranked) < MIN_RECOMMENDATION_QUEUE_SIZE:
+    if len(ranked) < 12:
         lang_term = seed_language or "hindi"
+        seed_themes = infer_seed_themes(seed)
+        mood_word = "zindagi" if "life" in seed_themes else (seed_themes[0] if seed_themes else "songs")
+        era_word = f"{(seed_year // 10) * 10}s" if seed_year else ""
         pad_queries = [
-            f"{lang_term} songs",
-            f"{lang_term} hits",
-            f"{lang_term} top hits",
-            f"popular {lang_term} songs",
-            f"{lang_term} evergreen",
+            f"{lang_term} {mood_word} songs",
+            f"{era_word} {lang_term} {mood_word} songs" if era_word else f"{lang_term} {mood_word} hits",
+            f"{lang_term} {mood_word} hits",
         ]
         if is_bhakti_seed:
             pad_queries.extend([f"{lang_term} bhajan", f"{lang_term} devotional"])
         collect_queries(
             pad_queries,
-            page_limit=40,
-            max_queries=len(pad_queries),
+            page_limit=16,
+            max_queries=3,
             source="desperate_pad",
         )
         enriched_collected = enrich_live_items(collected)
@@ -2663,7 +2524,7 @@ if st.session_state.get("auth_just_completed"):
     st.session_state["dashboard_shelves"] = empty_shelves
     st.session_state["dashboard_live_pending"] = True
     st.session_state["dashboard_enrich_pending"] = False
-    st.session_state["home_defer_live"] = True
+    st.session_state["home_defer_live"] = False
     st.session_state["auth_just_completed"] = False
 elif "dashboard_shelves" not in st.session_state:
     st.session_state["dashboard_shelves"] = empty_shelves
@@ -2699,7 +2560,7 @@ def fill_home_shelves() -> None:
             enrich=False,
         )
         st.session_state["dashboard_live_pending"] = False
-        st.session_state["dashboard_enrich_pending"] = True
+        st.session_state["dashboard_enrich_pending"] = False
         st.rerun()
         return
     if st.session_state.get("pending_session_start"):
@@ -3002,7 +2863,7 @@ if jio_now and (
 ) and jio_now.get("title"):
     # Upgrade a player item created before the API started exposing media_url.
     try:
-        refreshed = jio_client.search(str(jio_now["title"]), limit=5)
+        refreshed = jio_client.search_direct(str(jio_now["title"]), limit=5)
         same_song = next(
             (item for item in refreshed if item.get("song_id") == jio_now.get("song_id")),
             next((item for item in refreshed if item.get("title") == jio_now.get("title")), None),
