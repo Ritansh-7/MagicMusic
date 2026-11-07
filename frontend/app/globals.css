@@ -69,6 +69,7 @@ nav .nav-active, nav button:hover { background: #1d2b3d; color: var(--text); }
 .auth-card h1 { font-size: 34px; margin: 12px 0; }
 .auth-card input { display: block; width: 100%; margin-top: 14px; }
 .primary-action { width: 100%; height: 48px; margin-top: 18px; }
+.primary-action:disabled, .switch-auth:disabled { opacity: .6; cursor: wait; }
 .switch-auth { background: none; border: 0; color: var(--green); width: 100%; padding: 16px 0; cursor: pointer; }
 .muted { color: var(--muted); line-height: 1.6; }
 .error { color: #ff8f9c; font-size: 13px; }

@@ -13,6 +13,7 @@ export default function Home() {
   const [authEmail, setAuthEmail] = useState("");
   const [password, setPassword] = useState("");
   const [authError, setAuthError] = useState("");
+  const [authPending, setAuthPending] = useState(false);
   const [shelves, setShelves] = useState<Shelf[]>([]);
   const [recent, setRecent] = useState<Track[]>([]);
   const [query, setQuery] = useState("");
@@ -49,13 +50,21 @@ export default function Home() {
   }
 
   async function submitAuth() {
+    if (authPending) return;
     setAuthError("");
+    setAuthPending(true);
     const endpoint = authMode === "login" ? "login" : "register";
-    const response = await fetch(`${API}/v1/auth/${endpoint}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: authEmail, password }) });
-    const body = await response.json();
-    if (!response.ok) { setAuthError(body.detail || "Unable to authenticate"); return; }
-    window.localStorage.setItem("cozybeats_token", body.token);
-    setToken(body.token); setEmail(body.user.email); setPassword(""); void Promise.all([loadHome(body.token), loadHistory(body.token)]);
+    try {
+      const response = await fetch(`${API}/v1/auth/${endpoint}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: authEmail, password }) });
+      const body = await response.json();
+      if (!response.ok) { setAuthError(body.detail || "Unable to authenticate"); return; }
+      window.localStorage.setItem("cozybeats_token", body.token);
+      setToken(body.token); setEmail(body.user.email); setPassword(""); void Promise.all([loadHome(body.token), loadHistory(body.token)]);
+    } catch {
+      setAuthError("The music service is taking longer than usual to respond. Please try again.");
+    } finally {
+      setAuthPending(false);
+    }
   }
 
   function logout() {
@@ -89,11 +98,11 @@ export default function Home() {
     if (next) void play(next);
   }
 
-  if (!token) return <AuthScreen mode={authMode} setMode={setAuthMode} email={authEmail} setEmail={setAuthEmail} password={password} setPassword={setPassword} error={authError} onSubmit={submitAuth} />;
+  if (!token) return <AuthScreen mode={authMode} setMode={mode => { setAuthMode(mode); setAuthError(""); }} email={authEmail} setEmail={setAuthEmail} password={password} setPassword={setPassword} error={authError} pending={authPending} onSubmit={submitAuth} />;
   return <main className="app-shell"><aside className="sidebar"><div className="brand"><span className="brand-dot" />CozyBeats</div><nav><button className="nav-active">⌂ Home</button><button onClick={() => document.getElementById("search-input")?.focus()}>⌕ Search</button><button>♡ Your library</button><button onClick={() => document.getElementById("recently-listened")?.scrollIntoView({ behavior: "smooth" })}>◷ Listening history</button></nav><div className="account"><span>Signed in</span><b>{email}</b><button onClick={logout}>Log out</button></div></aside><section className="content"><header className="topbar"><div><p className="eyebrow">Good evening, listener</p><h1>Find your next favorite.</h1></div><div className="profile-wrap"><button className="profile" aria-label="Open account menu" onClick={() => setAccountOpen(open => !open)}>{email.slice(0, 1).toUpperCase()}</button>{accountOpen && <div className="account-menu"><span>Signed in as</span><b>{email}</b><button onClick={logout}>Log out</button></div>}</div></header><nav className="mobile-nav"><button onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}>⌂ Home</button><button onClick={() => document.getElementById("search-input")?.focus()}>⌕ Search</button><button onClick={() => document.getElementById("recently-listened")?.scrollIntoView({ behavior: "smooth" })}>◷ Recent</button><button onClick={() => setAccountOpen(open => !open)}>◉ Account</button></nav><div className="searchbar"><input id="search-input" value={query} onChange={e => setQuery(e.target.value)} onKeyDown={e => e.key === "Enter" && void search()} placeholder="Search songs, artists, albums..." /><button onClick={() => void search()}>{loading ? "..." : "Search"}</button></div><section className="hero"><div><span className="pill">PERSONALIZED FOR {email.toUpperCase()}</span><h2>A mix that moves<br />with you.</h2><p>Play a song and recommendations will appear in the “Made for you” shelf.</p></div><div className="hero-orb">✦</div></section>{recent.length > 0 && <div id="recently-listened"><Shelf title="Recently listened" tracks={recent} onPlay={play} /></div>}{results.length > 0 && <Shelf title="Search results" tracks={results} onPlay={play} />}{recommendationLoading && <div className="recommendation-loading">✦ Building your fresh mix…</div>}{queue.length > 0 && <Shelf title={`Made for you · ${queue.length} tracks`} tracks={queue} onPlay={play} recommendation />}{shelves.map(shelf => <Shelf key={shelf.title} title={shelf.title} tracks={shelf.items} onPlay={play} />)}{now && <div className="player"><div className="player-art"><Artwork track={now} eager /></div><div className="player-meta"><b>{now.title}</b><span>{now.artists || "Unknown artist"}</span></div><button className="next-button" onClick={playNext} disabled={!queue.length}>Next <span>›</span></button><audio controls autoPlay src={now.stream_url} /></div>}</section></main>;
 }
 
-function AuthScreen({ mode, setMode, email, setEmail, password, setPassword, error, onSubmit }: { mode: "login" | "register"; setMode: (mode: "login" | "register") => void; email: string; setEmail: (value: string) => void; password: string; setPassword: (value: string) => void; error: string; onSubmit: () => void }) { return <main className="auth-shell"><div className="auth-card"><div className="brand"><span className="brand-dot" />CozyBeats</div><p className="eyebrow">YOUR SOUND, EVOLVING</p><h1>{mode === "login" ? "Welcome back." : "Create your account."}</h1><p className="muted">Your recommendations, history and library stay connected to your account.</p><input value={email} onChange={e => setEmail(e.target.value)} placeholder="Email address" type="email" /><input value={password} onChange={e => setPassword(e.target.value)} placeholder="Password · 8+ characters" type="password" onKeyDown={e => e.key === "Enter" && onSubmit()} />{error && <p className="error">{error}</p>}<button className="primary-action" onClick={onSubmit}>{mode === "login" ? "Log in" : "Create account"}</button><button className="switch-auth" onClick={() => setMode(mode === "login" ? "register" : "login")}>{mode === "login" ? "New to CozyBeats? Create account" : "Already have an account? Log in"}</button></div></main>; }
+function AuthScreen({ mode, setMode, email, setEmail, password, setPassword, error, pending, onSubmit }: { mode: "login" | "register"; setMode: (mode: "login" | "register") => void; email: string; setEmail: (value: string) => void; password: string; setPassword: (value: string) => void; error: string; pending: boolean; onSubmit: () => void }) { return <main className="auth-shell"><div className="auth-card"><div className="brand"><span className="brand-dot" />CozyBeats</div><p className="eyebrow">YOUR SOUND, EVOLVING</p><h1>{mode === "login" ? "Welcome back." : "Create your account."}</h1><p className="muted">Your recommendations, history and library stay connected to your account.</p><input value={email} onChange={e => setEmail(e.target.value)} placeholder="Email address" type="email" autoComplete="email" disabled={pending} /><input value={password} onChange={e => setPassword(e.target.value)} placeholder="Password · 8+ characters" type="password" autoComplete={mode === "login" ? "current-password" : "new-password"} onKeyDown={e => e.key === "Enter" && !pending && onSubmit()} disabled={pending} />{error && <p className="error">{error}</p>}<button className="primary-action" onClick={onSubmit} disabled={pending}>{pending ? "Connecting..." : mode === "login" ? "Log in" : "Create account"}</button><button className="switch-auth" onClick={() => setMode(mode === "login" ? "register" : "login")} disabled={pending}>{mode === "login" ? "New to CozyBeats? Create account" : "Already have an account? Log in"}</button></div></main>; }
 
 function Artwork({ track, eager = false }: { track: Track; eager?: boolean }) {
   const [failed, setFailed] = useState(false);
