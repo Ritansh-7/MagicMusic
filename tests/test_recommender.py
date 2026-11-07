@@ -12,6 +12,7 @@ from recommender import (
     _interleave_recommendation_contexts,
     _mood_era_discovery_queries,
     infer_seed_themes,
+    is_weak_live_title,
     seed_context_discovery_queries,
     infer_audio_intents,
     infer_metadata_mood_labels,
@@ -1465,4 +1466,11 @@ def test_different_seeds_get_different_discovery_queries():
         ["Mahendra Kapoor"],
     ))
     assert life_queries != love_queries
+
+
+def test_weak_live_titles_are_dropped():
+    assert is_weak_live_title({"title": "d"})
+    assert is_weak_live_title({"title": "License"})
+    assert is_weak_live_title({"title": "Unknown"})
+    assert not is_weak_live_title({"title": "Jeena Yahan Marna Yahan"})
 

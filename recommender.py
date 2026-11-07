@@ -1102,6 +1102,19 @@ def _canonical_recording_key(item: dict) -> str:
     return f"{title}|{artists}" if title else artists
 
 
+def is_weak_live_title(item: dict | None) -> bool:
+    """Drop truncated or non-song provider rows such as 'd' or 'license'."""
+    if not isinstance(item, dict):
+        return True
+    key = recommendation_title_key(item.get("title", ""))
+    tokens = key.split()
+    if not key or len(key) < 2:
+        return True
+    if len(tokens) == 1 and len(tokens[0]) <= 2:
+        return True
+    return key in {"license", "unknown", "untitled", "track", "song", "n a", "na"}
+
+
 def recommendation_title_key(value: str) -> str:
     """Normalize release annotations so alternate versions do not repeat in a queue."""
     title = str(value).casefold()

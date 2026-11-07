@@ -25,15 +25,20 @@ export default function Home() {
 
   useEffect(() => {
     const saved = window.localStorage.getItem("cozybeats_token");
-    if (saved) { setToken(saved); void loadMe(saved); }
+    if (saved) {
+      setToken(saved);
+      void loadHome(saved);
+      void loadHistory(saved);
+      void loadMe(saved);
+    }
   }, []);
 
   async function loadMe(accessToken: string) {
     const response = await fetch(`${API}/v1/auth/me`, { headers: { Authorization: `Bearer ${accessToken}` } });
-    if (!response.ok) { logout(); return; }
+    if (response.status === 401) { logout(); return; }
+    if (!response.ok) return;
     const body = await response.json();
     setEmail(body.user.email);
-    void Promise.all([loadHome(accessToken), loadHistory(accessToken)]);
   }
 
   async function loadHome(accessToken = token) {
@@ -55,7 +60,11 @@ export default function Home() {
     const body = await response.json();
     if (!response.ok) { setAuthError(body.detail || "Unable to authenticate"); return; }
     window.localStorage.setItem("cozybeats_token", body.token);
-    setToken(body.token); setEmail(body.user.email); setPassword(""); void Promise.all([loadHome(body.token), loadHistory(body.token)]);
+    setToken(body.token);
+    setEmail(body.user.email);
+    setPassword("");
+    void loadHome(body.token);
+    void loadHistory(body.token);
   }
 
   function logout() {
@@ -78,8 +87,13 @@ export default function Home() {
     if (!token) return;
     setRecommendationLoading(true);
     try {
-      const response = await fetch(`${API}/v1/recommendations`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ seed: track, limit: 24 }) });
-      if (response.ok) setQueue((await response.json()).items || []);
+      const excludeIds = queue.map(item => String(item.song_id || item.title || "")).filter(Boolean);
+      const response = await fetch(`${API}/v1/recommendations`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ seed: track, limit: 28, exclude_ids: excludeIds }) });
+      if (response.ok) {
+        const items: Track[] = (await response.json()).items || [];
+        const seedKey = String(track.song_id || track.title || "").toLowerCase();
+        setQueue(items.filter(item => String(item.song_id || item.title || "").toLowerCase() !== seedKey).slice(0, 28));
+      }
     } finally { setRecommendationLoading(false); }
     void fetch(`${API}/v1/events`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ event_type: "play", track_id: track.song_id || track.title, payload: track }) });
   }
@@ -113,7 +127,7 @@ function Artwork({ track, eager = false }: { track: Track; eager?: boolean }) {
 
 function Shelf({ title, tracks, onPlay, recommendation = false }: { title: string; tracks: Track[]; onPlay: (track: Track) => void; recommendation?: boolean }) {
   const [expanded, setExpanded] = useState(false);
-  const visibleTracks = tracks.slice(0, expanded ? 20 : 5);
+  const visibleTracks = tracks.slice(0, recommendation || expanded ? 28 : 5);
   return <section className="shelf">
     <div className="shelf-heading"><div><h3>{title}</h3><span>{recommendation ? "Ranked for your taste" : "Curated live picks"}</span></div>{tracks.length > 5 && <button className="view-all" onClick={() => setExpanded(open => !open)}>{expanded ? "Show less" : `View all ${tracks.length} songs`}</button>}</div>
     <div className="cards">{visibleTracks.map((track, index) => <article className="card" key={`${track.song_id || track.title}-${index}`} onClick={() => onPlay(track)}><div className="art"><Artwork track={track} /><button className="play" aria-label={`Play ${track.title}`}>▶</button></div><b>{track.title}</b><small>{track.artists || "Unknown artist"}</small>{track.album && <small>{track.album}{track.year ? ` · ${track.year}` : ""}</small>}{recommendation && <em>{track.recommendation_reason || "Similar vibe"}</em>}</article>)}</div>

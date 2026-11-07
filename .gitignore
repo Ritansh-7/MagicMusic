@@ -13,3 +13,14 @@ frontend/.next/
 frontend/out/
 frontend/*.tsbuildinfo
 cozybeats_api.sqlite3
+.venv/
+*.log
+hindi_similarity.csv
+data_lake/
+*.parquet
+*.npy
+*.faiss
+*.model
+api.log
+output.txt
+test_output.txt

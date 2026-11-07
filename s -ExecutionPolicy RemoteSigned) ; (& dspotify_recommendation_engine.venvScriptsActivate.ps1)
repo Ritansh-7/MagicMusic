@@ -1,0 +1,78 @@
+[1mdiff --git a/app.py b/app.py[m
+[1mindex 96720a8..06f5393 100644[m
+[1m--- a/app.py[m
+[1m+++ b/app.py[m
+[36m@@ -1423,6 +1423,9 @@[m [mdef build_jio_up_next([m
+     # Exclude only the current seed and explicit old-queue items; excluding the[m
+     # entire search shelf was the reason small searches produced empty queues.[m
+     search_ids: set[str] = set()[m
+[32m+[m[32m    # Session-level recommendation history is used as a hard freshness[m
+[32m+[m[32m    # constraint: songs already recommended for a different seed this[m
+[32m+[m[32m    # session are not resurrected by broad repeat-term queries.[m
+     seen_recommendation_keys = st.session_state.setdefault([m
+         "jio_recommendation_history", set()[m
+     )[m
+[36m@@ -1434,7 +1437,31 @@[m [mdef build_jio_up_next([m
+     search_titles = {_recommendation_title_key(seed.get("title", ""))}[m
+     for item in [seed, *(exclude_items or [])]:[m
+         search_ids.add(str(item.get("song_id") or item.get("title", "")))[m
+[32m+[m[32m    # Shared state is threaded through every stage (initial discovery,[m
+[32m+[m[32m    # expansion wave, safety floor, desperate pad, emergency hard floor) so[m
+[32m+[m[32m    # that the same generic evergreen songs are never re-fetched under[m
+[32m+[m[32m    # different candidate_source tags. This is the root cause of the[m
+[32m+[m[32m    # "again same recommendations" loop: broad repeat terms like[m
+[32m+[m[32m    # "bollywood hits" / "hindi songs" each had their own local `seen`[m
+[32m+[m[32m    # set, so the same top songs were added repeatedly and then ranked[m
+[32m+[m[32m    # identically on every refresh.[m
+[32m+[m[32m    shared_state = {[m
+[32m+[m[32m        "seen": seen,[m
+[32m+[m[32m        "search_ids": search_ids,[m
+[32m+[m[32m        "collected": collected,[m
+[32m+[m[32m    }[m
+[32m+[m[32m    seen.update(_recommendation_history_keys(seed))[m
+[32m+[m[32m    seen.update(_recommendation_history_keys(exclude_items)) if exclude_items else None[m
+     def collect_items(items: list[dict], source: str = "metadata_discovery") -> None:[m
+[32m+[m[32m        # Block items already in the current pipeline's `seen` set[m
+[32m+[m[32m        # (collected items), the current search shelf (`search_ids`),[m
+[32m+[m[32m        # and the current seed's title. Do NOT use the session-level[m
+[32m+[m[32m        # `jio_recommendation_history` here: it is global across seeds,[m
+[32m+[m[32m        # and for same-seed refreshes the good candidate songs (which were[m
+[32m+[m[32m        # already recommended for this seed) must remain available to the[m
+[32m+[m[32m        # ranker so it can re-rank them with updated diversity scoring.[m
+[32m+[m[32m        # Cross-seed blocking is handled by `exclude_items`, which is added[m
+[32m+[m[32m        # to `search_ids` above.[m
+         for item in items:[m
+             key = str(item.get("song_id") or item.get("title", ""))[m
+             title_key = _recommendation_title_key(item.get("title", ""))[m
+[36m@@ -1443,22 +1470,23 @@[m [mdef build_jio_up_next([m
+                 not key[m
+                 or not title_key[m
+                 or not identity_keys[m
+[31m-                or key in seen[m
+[31m-                or identity_keys.intersection(seen_recommendation_keys)[m
+[31m-                or identity_keys.intersection(seen)[m
+[31m-                or key in search_ids[m
+[32m+[m[32m                or key in shared_state["seen"][m
+[32m+[m[32m                or identity_keys.intersection(shared_state["seen"])[m
+[32m+[m[32m                or key in shared_state["search_ids"][m
+                 or title_key in search_titles[m
+             ):[m
+                 continue[m
+[31m-            seen.add(key)[m
+[31m-            seen.update(identity_keys)[m
+[32m+[m[32m            shared_state["seen"].add(key)[m
+[32m+[m[32m            shared_state["seen"].update(identity_keys)[m
+             item.setdefault("candidate_source", source)[m
+[31m-            collected.append(item)[m
+[32m+[m[32m            shared_state["collected"].append(item)[m
+ [m
+     def collect_queries(queries: list[str], page_limit: int = 12, max_queries: int = 16, source: str = "metadata_discovery") -> None:[m
+         # One bounded concurrent wave is faster than sequential batches. The[m
+         # upstream client is cached, so repeated songs do not cause repeated[m
+[31m-        # network work across Streamlit reruns.[m
+[32m+[m[32m        # network work across Streamlit reruns. All stages share `shared_state`[m
+[32m+[m[32m        # so duplicates across stages are blocked before any request is[m
+[32m+[m[32m        # issued, not silently appended after the fact.[m
+         queries = list(dict.fromkeys(query for query in queries if query))[:max_queries][m
+         if not queries:[m
+             return[m
