@@ -117,7 +117,12 @@ def _search(query: str, limit: int) -> list[dict]:
     return client.search(query, limit=min(max(limit, 1), 50))
 
 
-def _catalog_fallback(seed: dict[str, Any], existing: list[dict], limit: int) -> list[dict]:
+def _catalog_fallback(
+    seed: dict[str, Any],
+    existing: list[dict],
+    limit: int,
+    recent_tracks: list[dict] | None = None,
+) -> list[dict]:
     """Keep the shelf full when a live provider returns too few playable records.
 
     This is deliberately a last-mile fallback: live JioSaavn records stay first,
@@ -157,7 +162,12 @@ def _catalog_fallback(seed: dict[str, Any], existing: list[dict], limit: int) ->
         }
         rows.append((score, item))
     rows.sort(key=lambda pair: pair[0], reverse=True)
-    return [item for _, item in rows[: max(0, limit - len(existing))]]
+    items = [item for _, item in rows]
+    if recent_tracks:
+        from recommender import exclude_recent_candidates
+
+        items = exclude_recent_candidates(items, recent_tracks)
+    return items[: max(0, limit - len(existing))]
 
 
 def _catalog_shelf_fallback(query: str, existing: list[dict], limit: int) -> list[dict]:
@@ -199,8 +209,16 @@ def _catalog_shelf_fallback(query: str, existing: list[dict], limit: int) -> lis
     return [item for _, item in rows[: max(0, limit - len(existing))]]
 
 
-def _recommend(request: RecommendationIn) -> list[dict]:
+def _recommend(
+    request: RecommendationIn,
+    recent_tracks: list[dict] | None = None,
+    preferred_track_ids: list[str] | None = None,
+) -> list[dict]:
+    from recommender import HybridRecommendationEngine, SpotifyRecommendationEngine, exclude_recent_candidates
+
     seed = dict(request.seed)
+    recent_tracks = recent_tracks or []
+    preferred_track_ids = list(preferred_track_ids or [])
     title = str(seed.get("title", "")).strip()
     artist = str(seed.get("artists", "")).split(",")[0].strip()
     if not title:
@@ -217,16 +235,25 @@ def _recommend(request: RecommendationIn) -> list[dict]:
                 continue
             seen.add(identity)
             candidates.append(item)
+    candidates = exclude_recent_candidates(candidates, recent_tracks)
+    preferred_track_ids.extend(
+        str(track.get("song_id")) for track in recent_tracks[:20] if track.get("song_id")
+    )
+    preferred_track_ids = list(dict.fromkeys(preferred_track_ids))
     engine = _get_hybrid_engine()
     if engine and not catalog.empty:
         try:
-            ranked = engine.rank_jio_results(candidates, request.user_id, catalog, [], seed=seed)
+            ranked = engine.rank_jio_results(
+                candidates, request.user_id, catalog, preferred_track_ids, seed=seed
+            )
             ranked_items = [dict(item) for item in ranked[: request.limit]]
-            return ranked_items + _catalog_fallback(seed, ranked_items, request.limit)
+            fallback = _catalog_fallback(seed, ranked_items, request.limit, recent_tracks)
+            return ranked_items + fallback
         except Exception:
             pass
     live_items = candidates[: request.limit]
-    return live_items + _catalog_fallback(seed, live_items, request.limit)
+    fallback = _catalog_fallback(seed, live_items, request.limit, recent_tracks)
+    return live_items + fallback
 
 
 @app.get("/healthz")
@@ -333,12 +360,34 @@ async def recommendations(request: RecommendationIn, user: dict[str, str] = Depe
     title = str(request.seed.get("title", "")).strip()
     if not title:
         raise HTTPException(status_code=422, detail="seed.title is required")
-    key = _key("recommendations", f"{request.user_id}:{title}:{request.limit}")
+    context = await run_in_threadpool(user_store.recommendation_context, request.user_id)
+    recent_events = context["recent_events"]
+    recent_tracks = []
+    for event in recent_events:
+        try:
+            payload = json.loads(event.get("metadata_json") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = {}
+        if isinstance(payload, dict):
+            payload.setdefault("song_id", event.get("track_id", ""))
+            recent_tracks.append(payload)
+    seed_identity = json.dumps(request.seed, sort_keys=True, default=str)
+    history_identity = "|".join([
+        *(str(track.get("song_id") or track.get("title") or "") for track in recent_tracks),
+        *(str(track_id) for track_id in context["preferred_track_ids"]),
+    ]
+    )
+    key = _key(
+        "recommendations",
+        f"{request.user_id}:{seed_identity}:{history_identity}:{request.limit}",
+    )
     cached = cache.get_json(key)
     if cached is not None:
         return {"items": cached, "cached": True}
     try:
-        items = await run_in_threadpool(_recommend, request)
+        items = await run_in_threadpool(
+            _recommend, request, recent_tracks, context["preferred_track_ids"]
+        )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"recommendation provider unavailable: {type(exc).__name__}") from exc
     cache.set_json(key, items, ttl=180)

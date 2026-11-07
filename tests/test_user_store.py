@@ -62,6 +62,21 @@ def test_user_events_are_scoped_to_the_requested_account(tmp_path):
     assert events[0]["metadata_json"] == '{"title": "First song"}'
 
 
+def test_recommendation_context_returns_recent_plays_and_likes(tmp_path):
+    store = UserStore(tmp_path / "events.sqlite3", database_url="")
+    ok, user_id = store.register("listener@example.com", "listener-password")
+    assert ok
+
+    store.log_event(user_id, "one", "play", "session", metadata_json='{"title":"First"}')
+    store.log_event(user_id, "two", "play", "session", metadata_json='{"title":"Second"}')
+    store.log_event(user_id, "liked-track", "like", "session")
+
+    context = store.recommendation_context(user_id, limit=1)
+    assert len(context["recent_events"]) == 1
+    assert context["recent_events"][0]["track_id"] == "two"
+    assert context["preferred_track_ids"] == ["liked-track"]
+
+
 def test_listening_time_summary_counts_only_listen_progress(tmp_path):
     store = UserStore(tmp_path / "events.sqlite3", database_url="")
     ok, user_id = store.register("listener@example.com", "listener-password")

@@ -529,7 +529,7 @@ def _mood_era_discovery_queries(
     language_part = f" {language_name}" if language_name else ""
     queries = [
         f"{era}{language_part} {term} songs"
-        for era in era_terms[:2]
+        for era in era_terms[:1]
         for term in terms[:2]
     ]
     if not queries:
@@ -1157,6 +1157,19 @@ def recommendation_history_keys(item: dict) -> set[str]:
     if len(title_key.split()) >= 3:
         keys.add(f"title:{title_key}")
     return keys
+
+
+def exclude_recent_candidates(candidates: list[dict], recent_tracks: list[dict]) -> list[dict]:
+    """Remove recently played recordings without excluding unrelated artists."""
+    recent_keys = set().union(
+        *(recommendation_history_keys(item) for item in recent_tracks)
+    ) if recent_tracks else set()
+    if not recent_keys:
+        return candidates
+    return [
+        item for item in candidates
+        if not recent_keys.intersection(recommendation_history_keys(item))
+    ]
 
 
 def _seed_title_token_overlap(seed: dict | None, candidate: dict) -> bool:
@@ -2307,6 +2320,7 @@ class HybridRecommendationEngine:
                 album_match = float(
                     bool(seed_source_work)
                     and seed_source_work == item_source_work
+                    and (not seed_year or not item_year or era_delta <= 3)
                 )
             else:
                 album_name = str(item.get("album", "")).strip()

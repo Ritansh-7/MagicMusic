@@ -328,6 +328,33 @@ class UserStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def recommendation_context(self, user_id: str, limit: int = 100) -> dict[str, list]:
+        """Load recent plays and explicit likes for freshness and taste ranking."""
+        limit = max(1, min(int(limit), 500))
+        with self._connect() as connection:
+            recent_rows = connection.execute(
+                self._sql("""
+                SELECT track_id, event_type, metadata_json, created_at
+                FROM behavior_events
+                WHERE user_id = ? AND event_type IN ('play', 'play_start', 'jio_play')
+                ORDER BY id DESC
+                LIMIT ?
+                """),
+                (str(user_id), limit),
+            ).fetchall()
+            liked_rows = connection.execute(
+                self._sql("""
+                SELECT DISTINCT track_id
+                FROM behavior_events
+                WHERE user_id = ? AND event_type IN ('like', 'jio_like') AND track_id IS NOT NULL
+                """),
+                (str(user_id),),
+            ).fetchall()
+        return {
+            "recent_events": [dict(row) for row in recent_rows],
+            "preferred_track_ids": [str(row["track_id"]) for row in liked_rows],
+        }
+
     def log_event(
         self,
         user_id: str,

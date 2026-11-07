@@ -16,6 +16,7 @@ from recommender import (
     infer_audio_intents,
     infer_metadata_mood_labels,
     infer_same_soundtrack_audio_intents,
+    exclude_recent_candidates,
     _soundtrack_peer_artists,
     is_compilation_album,
     recommendation_source_work,
@@ -148,6 +149,16 @@ def test_recommendation_history_matches_long_title_across_artist_credit_variants
         "title": "Stay",
         "artists": "Justin Bieber",
     }))
+
+
+def test_recently_played_tracks_are_excluded_without_blocking_other_artists():
+    candidates = [
+        {"title": "Until I Found You (Em Beihold Version)", "artists": "Stephen Sanchez, Em Beihold"},
+        {"title": "Stay", "artists": "Justin Bieber"},
+    ]
+    recent = [{"title": "Until I Found You", "artists": "Stephen Sanchez"}]
+
+    assert exclude_recent_candidates(candidates, recent) == [candidates[1]]
 
 
 def test_seed_exclusion_does_not_exclude_other_tracks_from_same_soundtrack():
