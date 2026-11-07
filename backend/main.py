@@ -18,6 +18,13 @@ from starlette.concurrency import run_in_threadpool
 from backend.cache import Cache
 from backend.auth import issue_token, read_token
 from jiosaavn_client import JioSaavnClient
+from recommender import (
+    infer_seed_themes,
+    infer_track_language,
+    is_weak_live_title,
+    recommendation_title_key,
+    seed_context_discovery_queries,
+)
 from user_store import UserStore
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,7 +58,8 @@ class EventIn(BaseModel):
 class RecommendationIn(BaseModel):
     seed: dict[str, Any]
     user_id: str = Field(default="anonymous", max_length=160)
-    limit: int = Field(default=20, ge=1, le=50)
+    limit: int = Field(default=24, ge=1, le=50)
+    exclude_ids: list[str] = Field(default_factory=list)
 
 
 class AuthIn(BaseModel):
@@ -80,6 +88,7 @@ hybrid_engine = None
 client = JioSaavnClient()
 cache = Cache()
 user_store = UserStore(database_url=os.getenv("DATABASE_URL") or None)
+_recent_recs: dict[str, list[str]] = {}
 
 
 def _get_hybrid_engine():
@@ -114,7 +123,25 @@ def _key(prefix: str, value: str) -> str:
 
 
 def _search(query: str, limit: int) -> list[dict]:
-    return client.search(query, limit=min(max(limit, 1), 50))
+    return client.search_direct(query, limit=min(max(limit, 1), 40))
+
+
+def _track_identity(item: dict[str, Any]) -> str:
+    return str(item.get("song_id") or item.get("title", "")).casefold().strip()
+
+
+def _is_repeat_filler(item: dict[str, Any], seed: dict[str, Any]) -> bool:
+    if is_weak_live_title(item):
+        return True
+    seed_title = recommendation_title_key(seed.get("title", ""))
+    item_title = recommendation_title_key(item.get("title", ""))
+    if seed_title and item_title == seed_title:
+        return True
+    seed_lang = infer_track_language(seed) or str(seed.get("language", "")).casefold()
+    item_lang = infer_track_language(item) or str(item.get("language", "")).casefold()
+    if seed_lang and item_lang and seed_lang != item_lang:
+        return True
+    return False
 
 
 def _catalog_fallback(seed: dict[str, Any], existing: list[dict], limit: int) -> list[dict]:
@@ -205,28 +232,63 @@ def _recommend(request: RecommendationIn) -> list[dict]:
     artist = str(seed.get("artists", "")).split(",")[0].strip()
     if not title:
         raise ValueError("seed.title is required")
-    queries = list(dict.fromkeys([f"{title} {artist}".strip(), title, f"{artist} songs".strip()]))
-    with ThreadPoolExecutor(max_workers=min(3, len(queries))) as pool:
-        candidate_groups = list(pool.map(lambda q: _search(q, 30), queries))
+    seed.setdefault("intent_labels", infer_seed_themes(seed))
+    language = infer_track_language(seed) or str(seed.get("language", "")).strip()
+    queries = seed_context_discovery_queries(seed, seed.get("year"), language, [artist] if artist else [])
+    queries = list(dict.fromkeys([f"{title} {artist}".strip(), title, *queries]))[:6]
+    with ThreadPoolExecutor(max_workers=min(6, len(queries))) as pool:
+        candidate_groups = list(pool.map(lambda q: _search(q, 24), queries))
+    blocked = {
+        str(value).casefold().strip()
+        for value in request.exclude_ids
+        if str(value).strip()
+    }
+    blocked.update(_recent_recs.get(request.user_id, []))
+    blocked.add(_track_identity(seed))
     candidates: list[dict] = []
     seen: set[str] = set()
     for group in candidate_groups:
         for item in group:
-            identity = str(item.get("song_id") or item.get("title", "")).casefold()
-            if not identity or identity in seen:
+            identity = _track_identity(item)
+            title_key = recommendation_title_key(item.get("title", ""))
+            if not identity or identity in seen or identity in blocked or title_key in blocked:
+                continue
+            if _is_repeat_filler(item, seed):
                 continue
             seen.add(identity)
+            if title_key:
+                seen.add(title_key)
             candidates.append(item)
     engine = _get_hybrid_engine()
-    if engine and not catalog.empty:
+    ranked_items: list[dict] = []
+    if engine:
         try:
             ranked = engine.rank_jio_results(candidates, request.user_id, catalog, [], seed=seed)
-            ranked_items = [dict(item) for item in ranked[: request.limit]]
-            return ranked_items + _catalog_fallback(seed, ranked_items, request.limit)
+            ranked_items = [dict(item) for item in ranked if not _is_repeat_filler(item, seed)]
         except Exception:
-            pass
-    live_items = candidates[: request.limit]
-    return live_items + _catalog_fallback(seed, live_items, request.limit)
+            ranked_items = []
+    if not ranked_items:
+        ranked_items = candidates
+    limit = max(20, int(request.limit or 24))
+    unique: list[dict] = []
+    used: set[str] = set()
+    for item in ranked_items:
+        identity = _track_identity(item)
+        title_key = recommendation_title_key(item.get("title", ""))
+        keys = {identity, title_key}
+        if not identity or keys.intersection(used):
+            continue
+        used.update(keys)
+        unique.append(item)
+        if len(unique) >= limit:
+            break
+    remembered = _recent_recs.setdefault(request.user_id, [])
+    for item in unique:
+        identity = _track_identity(item)
+        if identity and identity not in remembered:
+            remembered.append(identity)
+    _recent_recs[request.user_id] = remembered[-80:]
+    return unique
 
 
 @app.get("/healthz")
@@ -289,18 +351,11 @@ async def history(user: dict[str, str] = Depends(current_user)):
 async def home(user: dict[str, str] = Depends(current_user)):
     categories = {
         "Hindi picks": "hindi songs",
-        "Bollywood romance": "hindi romantic bollywood songs",
-        "Hindi classics": "hindi evergreen classic songs",
-        "Punjabi hits": "punjabi hit songs",
-        "English pop": "english pop hits",
-        "English chill": "english chill acoustic songs",
-        "Global trending": "latest english popular songs",
-        "Motivation": "motivational workout songs",
-        "Devotional": "hindi devotional bhajan songs",
+        "Bollywood romance": "hindi romantic songs",
+        "English pop": "english pop songs",
+        "English chill": "english love songs",
     }
-    # Home shelves are curated by category, so share them across users. User-specific
-    # ranking stays in /v1/recommendations; this prevents one provider fan-out per user.
-    cache_key = _key("home", "catalog-v4-bilingual-160")
+    cache_key = _key("home", "catalog-v5-fast-home")
     cached = cache.get_json(cache_key)
     if cached is not None:
         return {"shelves": cached, "cached": True}
@@ -308,7 +363,7 @@ async def home(user: dict[str, str] = Depends(current_user)):
         groups = list(pool.map(lambda q: _search(q, 20), categories.values()))
     shelves = []
     for (title, search_query), items in zip(categories.items(), groups):
-        items = list(items)
+        items = [item for item in items if not is_weak_live_title(item)]
         items.extend(_catalog_shelf_fallback(search_query, items, 20))
         shelves.append({"title": title, "items": items[:20]})
     cache.set_json(cache_key, shelves, ttl=900)
@@ -329,19 +384,14 @@ async def search(q: str = Query(min_length=1, max_length=160), limit: int = Quer
 @app.post("/v1/recommendations")
 async def recommendations(request: RecommendationIn, user: dict[str, str] = Depends(current_user)):
     request.user_id = user["user_id"]
-    request.limit = max(request.limit, 10)
+    request.limit = max(request.limit, 20)
     title = str(request.seed.get("title", "")).strip()
     if not title:
         raise HTTPException(status_code=422, detail="seed.title is required")
-    key = _key("recommendations", f"{request.user_id}:{title}:{request.limit}")
-    cached = cache.get_json(key)
-    if cached is not None:
-        return {"items": cached, "cached": True}
     try:
         items = await run_in_threadpool(_recommend, request)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"recommendation provider unavailable: {type(exc).__name__}") from exc
-    cache.set_json(key, items, ttl=180)
     return {"items": items, "cached": False}
 
 
