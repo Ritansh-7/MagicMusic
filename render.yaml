@@ -1,4 +1,5 @@
 services:
+  # The Streamlit research/admin app is separate from the public music API.
   - type: web
     name: tunematch
     env: python
@@ -12,3 +13,20 @@ services:
         value: https://saavnapi-nine.vercel.app
       - key: DATABASE_URL
         sync: false
+  # Vercel's NEXT_PUBLIC_API_URL must point to this FastAPI service.
+  - type: web
+    name: cozybeats-api
+    env: python
+    plan: free
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: COZYBEATS_SESSION_SECRET
+        generateValue: true
+      - key: COZYBEATS_ALLOWED_ORIGINS
+        value: https://cozybeats.vercel.app
+      - key: JIOSAAVN_API_URL
+        value: https://saavnapi-nine.vercel.app
