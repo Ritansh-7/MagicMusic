@@ -2,7 +2,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from user_store import UserStore
+from user_store import UserStore, _MySQLConnection
 
 
 def test_login_accepts_legacy_and_new_password_hashes(tmp_path):
@@ -18,6 +18,28 @@ def test_login_accepts_legacy_and_new_password_hashes(tmp_path):
     assert not UserStore._verify_password("wrong-password", encoded)
 
 
+def test_mysql_commit_errors_are_not_reported_as_success():
+    class BrokenConnection:
+        def __init__(self):
+            self.closed = False
+
+        def commit(self):
+            raise OSError("database commit failed")
+
+        def close(self):
+            self.closed = True
+
+    wrapper = object.__new__(_MySQLConnection)
+    wrapper.connection = BrokenConnection()
+    try:
+        wrapper.__exit__(None, None, None)
+    except OSError as error:
+        assert str(error) == "database commit failed"
+    else:
+        raise AssertionError("MySQL commit failure was swallowed")
+    assert wrapper.connection.closed
+
+
 def test_admin_allowlist_reads_streamlit_secrets(monkeypatch, tmp_path):
     import streamlit as st
 
@@ -26,12 +48,7 @@ def test_admin_allowlist_reads_streamlit_secrets(monkeypatch, tmp_path):
     assert ok
 
     monkeypatch.delenv("TUNEMATCH_ADMIN_EMAIL", raising=False)
-    monkeypatch.setattr(
-        st,
-        "secrets",
-        {"TUNEMATCH_ADMIN_EMAIL": "ADMIN@example.com"},
-    )
-
+    monkeypatch.setattr(st, "secrets", {"TUNEMATCH_ADMIN_EMAIL": "ADMIN@example.com"})
     assert store.is_admin(user_id)
 
 
@@ -41,21 +58,8 @@ def test_user_events_are_scoped_to_the_requested_account(tmp_path):
     second_ok, second_id = store.register("second@example.com", "second-password")
     assert first_ok and second_ok
 
-    store.log_event(
-        first_id,
-        "track-one",
-        "jio_play",
-        "session-one",
-        metadata_json='{"title": "First song"}',
-    )
-    store.log_event(
-        second_id,
-        "track-two",
-        "jio_play",
-        "session-two",
-        metadata_json='{"title": "Second song"}',
-    )
-
+    store.log_event(first_id, "track-one", "jio_play", "session-one", metadata_json='{"title": "First song"}')
+    store.log_event(second_id, "track-two", "jio_play", "session-two", metadata_json='{"title": "Second song"}')
     events = store.user_events(first_id)
     assert len(events) == 1
     assert events[0]["track_id"] == "track-one"
@@ -66,12 +70,6 @@ def test_listening_time_summary_counts_only_listen_progress(tmp_path):
     store = UserStore(tmp_path / "events.sqlite3", database_url="")
     ok, user_id = store.register("listener@example.com", "listener-password")
     assert ok
-
-    store.log_event(
-        user_id, "track-one", "listen_progress", "session-one", duration_ms=120_000
-    )
-    store.log_event(
-        user_id, None, "session_end", "session-one", duration_ms=300_000
-    )
-
+    store.log_event(user_id, "track-one", "listen_progress", "session-one", duration_ms=120_000)
+    store.log_event(user_id, None, "session_end", "session-one", duration_ms=300_000)
     assert store.summary(user_id)["listening_ms"] == 120_000

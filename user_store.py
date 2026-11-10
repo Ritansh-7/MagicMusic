@@ -35,12 +35,7 @@ class _MySQLConnection:
             database=(parsed.path or "").lstrip("/"),
             charset="utf8mb4",
             cursorclass=pymysql.cursors.DictCursor,
-            # Each user/event write is independent. Autocommit avoids holding
-            # a transaction open across a remote Streamlit rerun.
             autocommit=True,
-            # Do not let a sleeping/unreachable cloud database freeze a
-            # Streamlit rerun indefinitely. Aiven connections normally finish
-            # well below this; these are only a safety bound for cold starts.
             connect_timeout=5,
             read_timeout=6,
             write_timeout=6,
@@ -52,23 +47,21 @@ class _MySQLConnection:
     def __exit__(self, exc_type, exc_value, traceback):
         try:
             if exc_type:
-                # The server can close the socket while a query is in flight.
-                # Never mask the original database error with a second error
-                # from rollback on that already-dead connection.
                 try:
                     self.connection.rollback()
                 except Exception:
                     pass
             else:
-                try:
-                    self.connection.commit()
-                except Exception:
-                    pass
+                # Never report a successful signup/login if the DB commit failed.
+                # The old implementation swallowed this exception and could issue
+                # a token for an account that had not actually been persisted.
+                self.connection.commit()
         finally:
             try:
                 self.connection.close()
             except Exception:
                 pass
+        return False
 
     def execute(self, query: str, parameters=()):
         cursor = self.connection.cursor()
@@ -77,10 +70,7 @@ class _MySQLConnection:
 
 
 class UserStore:
-    """Local account and behavior store for the demo app.
-
-    Passwords are salted PBKDF2 hashes; raw passwords are never stored.
-    """
+    """Account and behavior store. Passwords are salted PBKDF2 hashes."""
 
     def __init__(self, path: str | Path | None = None, database_url: str | None = None):
         self.database_url = (database_url or os.getenv("DATABASE_URL", "")).strip()
@@ -107,7 +97,7 @@ class UserStore:
         scheme = urlparse(database_url).scheme.lower()
         if scheme.startswith("mysql"):
             return "mysql"
-        if scheme.startswith("postgres") or scheme.startswith("postgresql"):
+        if scheme.startswith(("postgres", "postgresql")):
             return "postgres"
         return "sqlite"
 
@@ -126,18 +116,15 @@ class UserStore:
     def _initialize(self) -> None:
         with self._connect() as connection:
             if self.uses_postgres:
-                connection.execute(
-                    """
+                connection.execute("""
                     CREATE TABLE IF NOT EXISTS users (
                         id BIGSERIAL PRIMARY KEY,
                         email TEXT UNIQUE NOT NULL,
                         password_hash TEXT NOT NULL,
                         created_at TEXT NOT NULL
                     )
-                    """
-                )
-                connection.execute(
-                    """
+                """)
+                connection.execute("""
                     CREATE TABLE IF NOT EXISTS behavior_events (
                         id BIGSERIAL PRIMARY KEY,
                         user_id BIGINT NOT NULL REFERENCES users(id),
@@ -148,22 +135,18 @@ class UserStore:
                         metadata_json TEXT NOT NULL DEFAULT '{}',
                         created_at TEXT NOT NULL
                     )
-                    """
-                )
+                """)
                 return
             if self.uses_mysql:
-                connection.execute(
-                    """
+                connection.execute("""
                     CREATE TABLE IF NOT EXISTS users (
                         id BIGINT PRIMARY KEY AUTO_INCREMENT,
                         email VARCHAR(320) UNIQUE NOT NULL,
                         password_hash TEXT NOT NULL,
                         created_at VARCHAR(64) NOT NULL
                     ) ENGINE=InnoDB
-                    """
-                )
-                connection.execute(
-                    """
+                """)
+                connection.execute("""
                     CREATE TABLE IF NOT EXISTS behavior_events (
                         id BIGINT PRIMARY KEY AUTO_INCREMENT,
                         user_id BIGINT NOT NULL,
@@ -177,21 +160,17 @@ class UserStore:
                         INDEX idx_behavior_created (created_at),
                         CONSTRAINT fk_behavior_user FOREIGN KEY (user_id) REFERENCES users(id)
                     ) ENGINE=InnoDB
-                    """
-                )
+                """)
                 return
-            connection.execute(
-                """
+            connection.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     email TEXT UNIQUE NOT NULL,
                     password_hash TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 )
-                """
-            )
-            connection.execute(
-                """
+            """)
+            connection.execute("""
                 CREATE TABLE IF NOT EXISTS behavior_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL,
@@ -203,11 +182,8 @@ class UserStore:
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(user_id) REFERENCES users(id)
                 )
-                """
-            )
+            """)
 
-    # New hashes use fewer PBKDF2 rounds so login/signup stay interactive on
-    # Streamlit Cloud. Older ``salt$digest`` rows still verify at 240_000.
     _PASSWORD_ROUNDS = 20_000
     _LEGACY_PASSWORD_ROUNDS = 240_000
 
@@ -226,17 +202,12 @@ class UserStore:
         try:
             parts = encoded.split("$")
             if len(parts) == 4 and parts[0] == "pbkdf2":
-                rounds = int(parts[1])
-                salt = bytes.fromhex(parts[2])
-                digest_hex = parts[3]
+                rounds, salt, digest_hex = int(parts[1]), bytes.fromhex(parts[2]), parts[3]
             elif len(parts) == 2:
-                rounds = cls._LEGACY_PASSWORD_ROUNDS
-                salt = bytes.fromhex(parts[0])
-                digest_hex = parts[1]
+                rounds, salt, digest_hex = cls._LEGACY_PASSWORD_ROUNDS, bytes.fromhex(parts[0]), parts[1]
             else:
                 return False
-            candidate = cls._digest_password(password, salt, rounds)
-            return hmac.compare_digest(candidate, digest_hex)
+            return hmac.compare_digest(cls._digest_password(password, salt, rounds), digest_hex)
         except (ValueError, TypeError):
             return False
 
@@ -275,115 +246,76 @@ class UserStore:
 
     def user_email(self, user_id: str) -> str:
         with self._connect() as connection:
-            row = connection.execute(
-                self._sql("SELECT email FROM users WHERE id = ?"),
-                (str(user_id),),
-            ).fetchone()
+            row = connection.execute(self._sql("SELECT email FROM users WHERE id = ?"), (str(user_id),)).fetchone()
         return str(row["email"]) if row else ""
 
     def is_admin(self, user_id: str) -> bool:
-        """Check the deployment allowlist, never an address supplied by the UI."""
         admin_email = os.getenv("TUNEMATCH_ADMIN_EMAIL", "").strip()
         if not admin_email:
             try:
                 import streamlit as st
-
                 admin_email = str(st.secrets.get("TUNEMATCH_ADMIN_EMAIL", "")).strip()
             except (ImportError, FileNotFoundError, KeyError, AttributeError):
                 admin_email = ""
-        admin_email = admin_email.lower()
-        return bool(admin_email and self.user_email(user_id).lower() == admin_email)
+        return bool(admin_email and self.user_email(user_id).lower() == admin_email.lower())
 
     def admin_users(self) -> list[dict]:
         with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT id, email, created_at FROM users ORDER BY created_at DESC"
-            ).fetchall()
+            rows = connection.execute("SELECT id, email, created_at FROM users ORDER BY created_at DESC").fetchall()
         return [dict(row) for row in rows]
 
     def admin_events(self) -> list[dict]:
         with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT user_id, track_id, event_type, session_id, duration_ms,
-                       metadata_json, created_at
-                FROM behavior_events
-                ORDER BY created_at ASC, id ASC
-                """
-            ).fetchall()
+            rows = connection.execute("""
+                SELECT user_id, track_id, event_type, session_id, duration_ms, metadata_json, created_at
+                FROM behavior_events ORDER BY created_at ASC, id ASC
+            """).fetchall()
         return [dict(row) for row in rows]
 
     def user_events(self, user_id: str) -> list[dict]:
-        """Return one listener's activity for their private analytics view."""
         with self._connect() as connection:
-            rows = connection.execute(
-                self._sql("""
-                SELECT track_id, event_type, session_id, duration_ms,
-                       metadata_json, created_at
-                FROM behavior_events
-                WHERE user_id = ?
-                ORDER BY created_at ASC
-                """),
-                (str(user_id),),
-            ).fetchall()
+            rows = connection.execute(self._sql("""
+                SELECT track_id, event_type, session_id, duration_ms, metadata_json, created_at
+                FROM behavior_events WHERE user_id = ? ORDER BY created_at ASC
+            """), (str(user_id),)).fetchall()
         return [dict(row) for row in rows]
 
-    def log_event(
-        self,
-        user_id: str,
-        track_id: str | None,
-        event_type: str,
-        session_id: str,
-        duration_ms: int = 0,
-        metadata_json: str = "{}",
-    ) -> None:
+    def log_event(self, user_id: str, track_id: str | None, event_type: str, session_id: str,
+                  duration_ms: int = 0, metadata_json: str = "{}") -> None:
         with self._connect() as connection:
-            connection.execute(
-                self._sql("""
+            connection.execute(self._sql("""
                 INSERT INTO behavior_events
                     (user_id, track_id, event_type, session_id, duration_ms, metadata_json, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-                """),
-                (str(user_id), track_id, event_type, session_id, int(duration_ms), metadata_json,
-                 datetime.now(timezone.utc).isoformat()),
-            )
+            """), (str(user_id), track_id, event_type, session_id, int(duration_ms), metadata_json,
+                    datetime.now(timezone.utc).isoformat()))
 
     def liked_track_ids(self, user_id: str) -> list[str]:
         with self._connect() as connection:
-            rows = connection.execute(
-                self._sql("SELECT DISTINCT track_id FROM behavior_events WHERE user_id = ? AND event_type = 'like' AND track_id IS NOT NULL"),
-                (str(user_id),),
-            ).fetchall()
+            rows = connection.execute(self._sql("""
+                SELECT DISTINCT track_id FROM behavior_events
+                WHERE user_id = ? AND event_type = 'like' AND track_id IS NOT NULL
+            """), (str(user_id),)).fetchall()
         return [str(row["track_id"]) for row in rows]
 
     def interaction_events(self):
-        """Return anonymized interaction rows used by the implicit-feedback model."""
         with self._connect() as connection:
-            rows = connection.execute(
-                """
+            rows = connection.execute("""
                 SELECT user_id, track_id, event_type, session_id, duration_ms, metadata_json, created_at
-                FROM behavior_events
-                WHERE track_id IS NOT NULL OR event_type = 'recommendation_impression'
-                """
-            ).fetchall()
+                FROM behavior_events WHERE track_id IS NOT NULL OR event_type = 'recommendation_impression'
+            """).fetchall()
         return [dict(row) for row in rows]
 
     def summary(self, user_id: str, session_id: str | None = None) -> dict[str, int]:
         session_clause = " AND session_id = ?" if session_id else ""
         parameters = (str(user_id), str(session_id)) if session_id else (str(user_id),)
         with self._connect() as connection:
-            row = connection.execute(
-                self._sql(f"""
-                SELECT
-                    COUNT(*) AS events,
+            row = connection.execute(self._sql(f"""
+                SELECT COUNT(*) AS events,
                     COUNT(DISTINCT CASE WHEN event_type IN ('play_start', 'jio_play') THEN track_id END) AS tracks_played,
                     COUNT(CASE WHEN event_type IN ('like', 'jio_like') THEN 1 END) AS likes,
                     COUNT(CASE WHEN event_type IN ('skip', 'jio_skip') THEN 1 END) AS skips,
-                    COALESCE(SUM(
-                        CASE WHEN event_type = 'listen_progress' THEN duration_ms ELSE 0 END
-                    ), 0) AS listening_ms
+                    COALESCE(SUM(CASE WHEN event_type = 'listen_progress' THEN duration_ms ELSE 0 END), 0) AS listening_ms
                 FROM behavior_events WHERE user_id = ?{session_clause}
-                """),
-                parameters,
-            ).fetchone()
+            """), parameters).fetchone()
         return {key: int(row[key] or 0) for key in row.keys()}
