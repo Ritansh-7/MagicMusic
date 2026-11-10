@@ -116,17 +116,6 @@ export default function Home() {
     authInFlight.current = true;
     setAuthPending(true);
     const endpoint = authMode === "login" ? "login" : "register";
-<<<<<<< HEAD
-    const response = await fetch(`${API}/v1/auth/${endpoint}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: authEmail, password }) });
-    const body = await response.json();
-    if (!response.ok) { setAuthError(body.detail || "Unable to authenticate"); return; }
-    window.localStorage.setItem("cozybeats_token", body.token);
-    setToken(body.token);
-    setEmail(body.user.email);
-    setPassword("");
-    void loadHome(body.token);
-    void loadHistory(body.token);
-=======
     try {
       const response = await fetch(apiUrl(`/v1/auth/${endpoint}`), {
         method: "POST",
@@ -156,7 +145,6 @@ export default function Home() {
       authInFlight.current = false;
       setAuthPending(false);
     }
->>>>>>> fix/auth-backend-and-home-load
   }
 
   function logout() {
@@ -187,24 +175,16 @@ export default function Home() {
     setRecommendationLoading(true);
     try {
       const excludeIds = queue.map(item => String(item.song_id || item.title || "")).filter(Boolean);
-<<<<<<< HEAD
-      const response = await fetch(`${API}/v1/recommendations`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ seed: track, limit: 28, exclude_ids: excludeIds }) });
-=======
       const response = await fetch(apiUrl("/v1/recommendations"), {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({ seed: track, limit: 28, exclude_ids: excludeIds }),
       });
->>>>>>> fix/auth-backend-and-home-load
       if (response.ok) {
         const items: Track[] = (await response.json()).items || [];
         const seedKey = String(track.song_id || track.title || "").toLowerCase();
         setQueue(items.filter(item => String(item.song_id || item.title || "").toLowerCase() !== seedKey).slice(0, 28));
       }
-<<<<<<< HEAD
-    } finally { setRecommendationLoading(false); }
-    void fetch(`${API}/v1/events`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ event_type: "play", track_id: track.song_id || track.title, payload: track }) });
-=======
     } catch {
       // Keep playback working even if recommendation generation is unavailable.
     } finally {
@@ -215,7 +195,6 @@ export default function Home() {
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: JSON.stringify({ event_type: "play", track_id: track.song_id || track.title, payload: track }),
     }).catch(() => undefined);
->>>>>>> fix/auth-backend-and-home-load
   }
 
   function playNext() {
