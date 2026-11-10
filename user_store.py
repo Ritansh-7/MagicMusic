@@ -53,8 +53,6 @@ class _MySQLConnection:
                     pass
             else:
                 # Never report a successful signup/login if the DB commit failed.
-                # The old implementation swallowed this exception and could issue
-                # a token for an account that had not actually been persisted.
                 self.connection.commit()
         finally:
             try:
@@ -67,6 +65,49 @@ class _MySQLConnection:
         cursor = self.connection.cursor()
         cursor.execute(query, parameters)
         return cursor
+
+
+class _ManagedConnection:
+    """Wrapper that guarantees commit-on-success and close-on-exit.
+
+    sqlite3.Connection.__exit__ commits/rolls back but does NOT close the
+    connection, so repeated auth calls leaked connections and eventually hit
+    "database is locked" — making signup/login appear to hang.
+    """
+
+    def __init__(self, conn):
+        self.conn = conn
+
+    def __enter__(self):
+        return self.conn
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            if exc_type is None:
+                try:
+                    self.conn.commit()
+                except Exception:
+                    pass
+        finally:
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+        return False
+
+
+# Concrete integrity-error classes per database backend, so register() only
+# maps genuine duplicate-key conflicts to "account already exists" instead of
+# swallowing unrelated RuntimeErrors/OperationalErrors.
+_INTEGRITY_ERRORS = (sqlite3.IntegrityError,)
+if psycopg is not None:
+    _uv = getattr(psycopg.errors, "UniqueViolation", None)
+    if _uv is not None:
+        _INTEGRITY_ERRORS += (_uv,)
+if pymysql is not None:
+    _ie = getattr(pymysql.err, "IntegrityError", None)
+    if _ie is not None:
+        _INTEGRITY_ERRORS += (_ie,)
 
 
 class UserStore:
@@ -106,12 +147,14 @@ class UserStore:
 
     def _connect(self):
         if self.uses_postgres:
-            return psycopg.connect(self.database_url, row_factory=dict_row)
+            # psycopg's context manager commits/rolls back but does not close;
+            # _ManagedConnection guarantees close-on-exit.
+            return _ManagedConnection(psycopg.connect(self.database_url, row_factory=dict_row))
         if self.uses_mysql:
             return _MySQLConnection(self.database_url)
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
-        return connection
+        return _ManagedConnection(connection)
 
     def _initialize(self) -> None:
         with self._connect() as connection:
@@ -227,19 +270,20 @@ class UserStore:
                 if self.uses_postgres:
                     return True, str(cursor.fetchone()["id"])
                 return True, str(cursor.lastrowid)
-        except (
-            sqlite3.IntegrityError,
-            getattr(getattr(psycopg, "errors", None), "UniqueViolation", RuntimeError),
-            getattr(getattr(pymysql, "err", None), "IntegrityError", RuntimeError),
-        ):
+        except _INTEGRITY_ERRORS:
             return False, "An account with this email already exists."
 
     def authenticate(self, email: str, password: str) -> tuple[bool, str]:
-        with self._connect() as connection:
-            row = connection.execute(
-                self._sql("SELECT id, email, password_hash FROM users WHERE email = ?"),
-                (email.strip().lower(),),
-            ).fetchone()
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    self._sql("SELECT id, email, password_hash FROM users WHERE email = ?"),
+                    (email.strip().lower(),),
+                ).fetchone()
+        except _INTEGRITY_ERRORS:
+            return False, "An account with this email already exists."
+        except Exception as exc:  # DB unreachable, timeout, etc.
+            return False, f"Could not reach the account database: {type(exc).__name__}"
         if not row or not self._verify_password(password, row["password_hash"]):
             return False, "Email or password is incorrect."
         return True, str(row["id"])
